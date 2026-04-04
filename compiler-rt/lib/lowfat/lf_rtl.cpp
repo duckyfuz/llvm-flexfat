@@ -18,6 +18,7 @@
 #include "lf_config.h"
 #include "lf_interface.h"
 #include "lf_stack.h"
+#include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_flag_parser.h"
@@ -106,6 +107,7 @@ static void InitializeFlags() {
   parser.ParseStringFromEnv("LOWFAT_OPTIONS");
 
   InitializeCommonFlags();
+  SetAllocatorMayReturnNull(common_flags()->allocator_may_return_null);
 }
 
 static void InitTables() {

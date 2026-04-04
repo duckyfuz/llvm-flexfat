@@ -15,7 +15,11 @@
 #include "lf_allocator.h"
 #include "lf_config.h"
 #include "lf_interface.h"
+#include "lf_stack.h"
+#include "sanitizer_common/sanitizer_allocator.h"
+#include "sanitizer_common/sanitizer_allocator_checks.h"
 #include "sanitizer_common/sanitizer_allocator_dlsym.h"
+#include "sanitizer_common/sanitizer_allocator_report.h"
 
 using namespace __sanitizer;
 
@@ -66,6 +70,12 @@ INTERCEPTOR(void, free, void *ptr) {
 INTERCEPTOR(void *, calloc, uptr nmemb, uptr size) {
   if (DlsymAlloc::Use())
     return DlsymAlloc::Callocate(nmemb, size);
+  if (UNLIKELY(CheckForCallocOverflow(nmemb, size))) {
+    if (AllocatorMayReturnNull())
+      return SetErrnoOnNull(nullptr);
+    GET_STACK_TRACE_FATAL_HERE;
+    ReportCallocOverflow(nmemb, size, &stack);
+  }
   uptr total = nmemb * size;
   if (ShouldUseLowFat(total)) {
     void *ptr = __lowfat::Allocate(total);
@@ -160,10 +170,12 @@ static inline void check_bounds(const void *ptr, uptr access_size, int is_write)
     uptr start = (uptr)ptr;
     uptr size = __lowfat::GetSize(start);
     uptr base = __lowfat::GetBase(start);
+    uptr report_ptr = access_size > ~(uptr)0 - start ? ~(uptr)0
+                                                     : start + access_size;
     if (__lowfat::lowfat_recover)
-      __lf_warn_oob(start + access_size, base, size, is_write);
+      __lf_warn_oob(report_ptr, base, size, is_write);
     else
-      __lf_report_oob(start + access_size, base, size, is_write);
+      __lf_report_oob(report_ptr, base, size, is_write);
   }
 }
 
