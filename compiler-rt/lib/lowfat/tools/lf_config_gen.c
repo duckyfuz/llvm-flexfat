@@ -10,9 +10,7 @@
 // emits lf_config_generated.h containing:
 //
 //   - kLowFatGenSizes[]   : actual object sizes for each region index
-//   - kLowFatGenMagics[]  : precomputed 2^64/S values for non-POW2 sizes
-//   - kLowFatGenIsPow2[]  : true for power-of-two size classes
-//   - kLowFatGenMasks[]   : alignment masks for POW2 sizes (0 for non-POW2)
+//   - kLowFatGenMagics[]  : precomputed ceil(2^64/S) reciprocals for all sizes
 //   - lowfat_size_to_class(): binary-search mapping from alloc size → region index
 //
 // sizes.cfg format:
@@ -62,8 +60,9 @@
 typedef unsigned __int128 u128;
 
 // Compute ceil(2^64 / S) using 128-bit arithmetic.
-// This is the magic number M such that floor(P / S) = (P * M) >> 64
-// for all P in [0, REGION_SIZE).
+// This is the magic number M used by custom-config base recovery:
+//   floor(P / S) ~= (P * M) >> 64
+// The precision checker below verifies the usable range inside a region.
 static uint64_t compute_magic(uint64_t S) {
   if (S == 0) return 0;
   u128 two64 = (u128)1 << 64;
@@ -195,25 +194,19 @@ int main(int argc, char *argv[]) {
 
   // ---- Compute tables ----
   uint64_t magics[MAX_SIZE_CLASSES];
-  int      is_pow2_arr[MAX_SIZE_CLASSES];
-  uint64_t masks[MAX_SIZE_CLASSES];
   uint64_t effective_sizes[MAX_SIZE_CLASSES];  // sizes adjusted for precision errors
 
   for (int i = 0; i < num_sizes; i++) {
     uint64_t S = sizes[i];
     int pow2   = is_pow2(S);
 
-    is_pow2_arr[i] = pow2;
-
     uint64_t M    = compute_magic(S);
     uint64_t err  = precision_error(S, M);
     magics[i]     = M;
 
     if (pow2) {
-      masks[i]          = ~(S - 1);
       effective_sizes[i] = S;              // no precision error for POW2
     } else {
-      masks[i]          = 0;                   // not applicable for non-POW2
       // Shrink effective size by error so allocator never gives out the
       // bytes that the magic-number math would mis-identify.
       effective_sizes[i] = S - err;
@@ -276,39 +269,16 @@ int main(int argc, char *argv[]) {
 
   // kLowFatGenMagics
   fprintf(out,
-    "// Magic numbers for non-POW2 sizes: M = ceil(2^64 / S).\n"
-    "// For POW2 sizes this is 0 (they use the AND fast path).\n"
+    "// Magic numbers for all sizes: M = ceil(2^64 / S).\n"
+    "// Custom-config base recovery uses this reciprocal-multiply path for\n"
+    "// both power-of-two and non-power-of-two classes.\n"
     "static const uint64_t kLowFatGenMagics[LOWFAT_NUM_SIZE_CLASSES] = {\n"
     "    /* idx: magic */\n"
   );
   for (int i = 0; i < num_sizes; i++) {
     fprintf(out, "    /* %3d */ UINT64_C(0x%016" PRIx64 ")%s  // size=%" PRIu64 "%s\n",
             i, magics[i], (i < num_sizes - 1) ? "," : " ",
-            sizes[i], is_pow2_arr[i] ? " (POW2, unused)" : "");
-  }
-  fprintf(out, "};\n\n");
-
-  // kLowFatGenIsPow2
-  fprintf(out,
-    "// True if this size class is a power-of-two (uses AND path, not MUL path).\n"
-    "static const int kLowFatGenIsPow2[LOWFAT_NUM_SIZE_CLASSES] = {\n"
-    "    /* idx: isPow2 */\n"
-  );
-  for (int i = 0; i < num_sizes; i++) {
-    fprintf(out, "    /* %3d */ %d%s  // %" PRIu64 "\n",
-            i, is_pow2_arr[i], (i < num_sizes - 1) ? "," : " ", sizes[i]);
-  }
-  fprintf(out, "};\n\n");
-
-  // kLowFatGenMasks
-  fprintf(out,
-    "// Alignment masks for POW2 sizes: ~(S-1). Zero for non-POW2 sizes.\n"
-    "static const uint64_t kLowFatGenMasks[LOWFAT_NUM_SIZE_CLASSES] = {\n"
-    "    /* idx: mask */\n"
-  );
-  for (int i = 0; i < num_sizes; i++) {
-    fprintf(out, "    /* %3d */ UINT64_C(0x%016" PRIx64 ")%s  // size=%" PRIu64 "\n",
-            i, masks[i], (i < num_sizes - 1) ? "," : " ", sizes[i]);
+            sizes[i], is_pow2(sizes[i]) ? " (POW2)" : "");
   }
   fprintf(out, "};\n\n");
 
@@ -342,16 +312,15 @@ int main(int argc, char *argv[]) {
 
   // Print summary table to stdout
   printf("Size Class Table:\n");
-  printf("  %-5s  %-10s  %-6s  %-20s  %-20s  %-10s\n",
-         "Idx", "ReqSize", "POW2?", "EffectiveSize", "Magic", "Mask");
+  printf("  %-5s  %-10s  %-6s  %-20s  %-20s\n",
+         "Idx", "ReqSize", "POW2?", "EffectiveSize", "Magic");
   printf("  %s\n", "---------------------------------------------------------------------");
   for (int i = 0; i < num_sizes; i++) {
-    printf("  %-5d  %-10" PRIu64 "  %-6s  %-20" PRIu64 "  %#-20" PRIx64 "  %#-10" PRIx64 "\n",
+    printf("  %-5d  %-10" PRIu64 "  %-6s  %-20" PRIu64 "  %#-20" PRIx64 "\n",
            i, sizes[i],
-           is_pow2_arr[i] ? "yes" : "no",
+           is_pow2(sizes[i]) ? "yes" : "no",
            effective_sizes[i],
-           magics[i],
-           masks[i]);
+           magics[i]);
   }
 
   return 0;

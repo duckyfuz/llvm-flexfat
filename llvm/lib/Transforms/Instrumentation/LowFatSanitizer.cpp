@@ -95,13 +95,9 @@ private:
   // Lazily get or create the global arrays that mirror the generated tables.
   GlobalVariable *getSizesTable();
   GlobalVariable *getMagicsTable();
-  GlobalVariable *getIsPow2Table();
-  GlobalVariable *getMasksTable();
 
   GlobalVariable *SizesTableGV  = nullptr;
   GlobalVariable *MagicsTableGV = nullptr;
-  GlobalVariable *IsPow2TableGV = nullptr;
-  GlobalVariable *MasksTableGV  = nullptr;
 #endif
 
   // Helper: GEP + load from a fixed absolute base at runtime index.
@@ -173,9 +169,10 @@ FunctionCallee LowFatSanitizer::getWarnOobFn() {
 // Custom-config pass helpers: table-accessor lazy initializers
 // ---------------------------------------------------------------------------
 //
-// We mirror the four kLowFatGen* arrays from lf_config_generated.h as LLVM
-// GlobalVariable constants embedded inside the module.  This lets the
-// optimiser see them as constant loads and fold them through inlining.
+// We mirror the generated size and reciprocal tables from
+// lf_config_generated.h as LLVM GlobalVariable constants embedded inside the
+// module. This lets the optimiser see them as constant loads and fold them
+// through inlining.
 //
 // Arrays are initialised once (lazy, per-module) with the same values that
 // lf_config_gen baked into the header.
@@ -214,27 +211,6 @@ GlobalVariable *LowFatSanitizer::getMagicsTable() {
   return MagicsTableGV;
 }
 
-GlobalVariable *LowFatSanitizer::getIsPow2Table() {
-  if (!IsPow2TableGV) {
-    SmallVector<uint64_t, 64> D;
-    for (int i = 0; i < LOWFAT_NUM_SIZE_CLASSES; ++i)
-      D.push_back((uint64_t)kLowFatGenIsPow2[i]);
-    IsPow2TableGV = makeConstantArray(M, "__lf_gen_ispow2", D,
-                                       Type::getInt8Ty(M.getContext()));
-  }
-  return IsPow2TableGV;
-}
-
-GlobalVariable *LowFatSanitizer::getMasksTable() {
-  if (!MasksTableGV) {
-    SmallVector<uint64_t, 64> D(kLowFatGenMasks,
-                                 kLowFatGenMasks + LOWFAT_NUM_SIZE_CLASSES);
-    MasksTableGV = makeConstantArray(M, "__lf_gen_masks", D,
-                                     Type::getInt64Ty(M.getContext()));
-  }
-  return MasksTableGV;
-}
-
 // ---------------------------------------------------------------------------
 // emitDynamicBaseMagic
 //
@@ -245,23 +221,14 @@ GlobalVariable *LowFatSanitizer::getMasksTable() {
 //
 //   %alloc_size = load i64, ptr getelementptr(__lf_gen_sizes, 0, %region_idx)
 //   %magic      = load i64, ptr getelementptr(__lf_gen_magics, 0, %region_idx)
-//   %is_pow2    = load i8,  ptr getelementptr(__lf_gen_ispow2, 0, %region_idx)
-//   %mask       = load i64, ptr getelementptr(__lf_gen_masks,  0, %region_idx)
 //
-//   ; AND path (POW2 fast path)
-//   %base_and   = and i64 %ptr, %mask
-//
-//   ; MUL path (non-POW2 magic multiply)
+//   ; Reciprocal fixed-point base recovery for every class
 //   %ptr128     = zext i64 %ptr to i128
 //   %magic128   = zext i64 %magic to i128
 //   %mul128     = mul i128 %ptr128, %magic128
 //   %idx128     = lshr i128 %mul128, 64
 //   %idx        = trunc i128 %idx128 to i64
 //   %base_mul   = mul i64 %idx, %alloc_size
-//
-//   ; Select based on is_pow2 flag
-//   %is_pow2_i1 = trunc i8 %is_pow2 to i1
-//   %base       = select i1 %is_pow2_i1, i64 %base_and, i64 %base_mul
 // ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
 LowFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
@@ -272,38 +239,13 @@ LowFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
 
   Value *AllocSize64 = loadFromFixedTable(IRB, TablesBase + 0 * kTablesOffset,
                                           I64Ty, RegionIndex);
-  Value *Mask64      = loadFromFixedTable(IRB, TablesBase + 3 * kTablesOffset,
-                                          I64Ty, RegionIndex);
 
   // Narrow to IntptrTy (which is i64 on 64-bit targets)
   Value *AllocSize = IRB.CreateZExtOrTrunc(AllocSize64, IntptrTy);
-  Value *Mask      = IRB.CreateZExtOrTrunc(Mask64, IntptrTy);
 
-  // --- AND (POW2) base ---
-  Value *BaseAnd = IRB.CreateAnd(PtrInt, Mask);
-
-  // Build-time specialization: if we know the region is POW2 (or all are),
-  // skip the MUL path entirely to avoid the cmov.
-  bool KnownPow2 = false;
-  if (auto *CI = dyn_cast<ConstantInt>(RegionIndex)) {
-    uint64_t Idx = CI->getZExtValue();
-    if (Idx < LOWFAT_NUM_SIZE_CLASSES && kLowFatGenIsPow2[Idx])
-      KnownPow2 = true;
-  } else {
-    // Check if ALL configured regions are POW2.
-    KnownPow2 = true;
-    for (int i = 0; i < LOWFAT_NUM_SIZE_CLASSES; ++i) {
-      if (!kLowFatGenIsPow2[i]) {
-        KnownPow2 = false;
-        break;
-      }
-    }
-  }
-
-  if (KnownPow2)
-    return {AllocSize, BaseAnd};
-
-  // --- MUL (non-POW2) base ---
+  // In custom-config mode we deliberately use the reciprocal-multiply path
+  // for every class, including power-of-two sizes, so runtime and
+  // instrumentation recover bases the same way.
   Value *Magic64     = loadFromFixedTable(IRB, TablesBase + 1 * kTablesOffset,
                                           I64Ty, RegionIndex);
 
