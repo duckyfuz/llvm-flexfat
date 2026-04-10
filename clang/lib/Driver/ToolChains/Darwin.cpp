@@ -1675,6 +1675,8 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
     }
     if (Sanitize.needsTysanRt())
       AddLinkSanitizerLibArgs(Args, CmdArgs, "tysan");
+    if (Sanitize.needsLowFatRt())
+      AddLinkSanitizerLibArgs(Args, CmdArgs, "lowfat");
     if (Sanitize.needsFuzzer() && !Args.hasArg(options::OPT_dynamiclib)) {
       AddLinkSanitizerLibArgs(Args, CmdArgs, "fuzzer", /*shared=*/false);
 
@@ -3977,6 +3979,9 @@ SanitizerMask Darwin::getSupportedSanitizers() const {
 
   if (IsX86_64)
     Res |= SanitizerKind::NumericalStability;
+
+  if (IsX86_64 || IsAArch64)
+    Res |= SanitizerKind::LowFat;
 
   return Res;
 }

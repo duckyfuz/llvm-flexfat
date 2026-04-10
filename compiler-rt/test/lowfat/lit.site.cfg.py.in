@@ -1,0 +1,14 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+config.name_suffix = "@LOWFAT_TEST_CONFIG_SUFFIX@"
+config.target_cflags = "@LOWFAT_TEST_TARGET_CFLAGS@"
+config.target_arch = "@LOWFAT_TEST_TARGET_ARCH@"
+config.target_cc = "@LOWFAT_TEST_TARGET_CC@"
+config.host_os = "@HOST_OS@"
+config.compiler_rt_libdir = "@COMPILER_RT_RESOLVED_LIBRARY_OUTPUT_DIR@"
+config.llvm_tools_dir = "@LLVM_TOOLS_DIR@"
+
+# Let the main config do the rest.
+import os
+lit_config.load_config(config, os.path.join(
+    os.path.dirname(__file__), '..', 'lit.cfg.py'))

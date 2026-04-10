@@ -1,0 +1,52 @@
+include_directories(..)
+
+set(LOWFAT_SOURCES
+  lf_rtl.cpp
+  lf_interceptors.cpp
+  lf_stack.cpp
+)
+
+set(LOWFAT_HEADERS
+  lf_allocator.h
+  lf_config.h
+  lf_interface.h
+  lf_stack.h
+)
+
+set(LOWFAT_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+append_rtti_flag(OFF LOWFAT_CFLAGS)
+
+add_compiler_rt_component(lowfat)
+
+if(COMPILER_RT_HAS_LOWFAT)
+  if(APPLE)
+    add_weak_symbols("sanitizer_common" WEAK_SYMBOL_LINK_FLAGS)
+
+    add_compiler_rt_runtime(clang_rt.lowfat
+      SHARED
+      OS ${SANITIZER_COMMON_SUPPORTED_OS}
+      ARCHS ${LOWFAT_SUPPORTED_ARCH}
+      SOURCES ${LOWFAT_SOURCES}
+      ADDITIONAL_HEADERS ${LOWFAT_HEADERS}
+      OBJECT_LIBS RTInterception
+                  RTSanitizerCommon
+                  RTSanitizerCommonLibc
+                  RTSanitizerCommonSymbolizer
+      CFLAGS ${LOWFAT_CFLAGS}
+      LINK_FLAGS ${WEAK_SYMBOL_LINK_FLAGS}
+      PARENT_TARGET lowfat)
+  else()
+    add_compiler_rt_runtime(clang_rt.lowfat
+      STATIC
+      ARCHS ${LOWFAT_SUPPORTED_ARCH}
+      SOURCES ${LOWFAT_SOURCES}
+      ADDITIONAL_HEADERS ${LOWFAT_HEADERS}
+      OBJECT_LIBS RTInterception
+                  RTSanitizerCommon
+                  RTSanitizerCommonLibc
+                  RTSanitizerCommonSymbolizer
+                  RTSanitizerCommonSymbolizerInternal
+      CFLAGS ${LOWFAT_CFLAGS}
+      PARENT_TARGET lowfat)
+  endif()
+endif()
