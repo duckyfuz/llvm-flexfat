@@ -85,6 +85,7 @@
 #include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Instrumentation/TypeSanitizer.h"
+#include "llvm/Transforms/Instrumentation/LowFatSanitizer.h"
 #include "llvm/Transforms/ObjCARC.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
@@ -106,6 +107,17 @@ namespace llvm {
 static cl::opt<bool> ClSanitizeOnOptimizerEarlyEP(
     "sanitizer-early-opt-ep", cl::Optional,
     cl::desc("Insert sanitizers on OptimizerEarlyEP."));
+
+static cl::opt<LowFatSanitizerOptions::LowFatMode> LowFatMode(
+    "lowfat-mode", cl::init(LowFatSanitizerOptions::LowFatMode::Fast),
+    cl::desc("Controls the placement and strictness of the LowFat pass"),
+    cl::values(
+        clEnumValN(LowFatSanitizerOptions::LowFatMode::Fast, "fast",
+                   "Instrument at OptimizerLastEP (least overhead)"),
+        clEnumValN(LowFatSanitizerOptions::LowFatMode::Safe, "safe",
+                   "Barrier at PipelineStartEP + instrument at OptimizerLastEP"),
+        clEnumValN(LowFatSanitizerOptions::LowFatMode::RightAlign, "right-align",
+                   "Right-align allocations within class slots to catch right-side OOB")));
 
 // Experiment to mark cold functions as optsize/minsize/optnone.
 // TODO: remove once this is exposed as a proper driver flag.
@@ -768,6 +780,12 @@ static void addSanitizers(const Triple &TargetTriple,
       MPM.addPass(DataFlowSanitizerPass(LangOpts.NoSanitizeFiles,
                                         PB.getVirtualFileSystemPtr()));
     }
+    if (LangOpts.Sanitize.has(SanitizerKind::LowFat)) {
+      LowFatSanitizerOptions LFOpts;
+      LFOpts.Recover = CodeGenOpts.SanitizeRecover.has(SanitizerKind::LowFat);
+      LFOpts.Mode = LowFatMode;
+      MPM.addPass(LowFatSanitizerPass(LFOpts));
+    }
   };
   if (ClSanitizeOnOptimizerEarlyEP) {
     PB.registerOptimizerEarlyEPCallback(
@@ -784,6 +802,23 @@ static void addSanitizers(const Triple &TargetTriple,
   } else {
     // LastEP does not need GlobalsAA.
     PB.registerOptimizerLastEPCallback(SanitizersCallback);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::LowFat)) {
+    LowFatSanitizerOptions LFOpts;
+    LFOpts.Recover = CodeGenOpts.SanitizeRecover.has(SanitizerKind::LowFat);
+    LFOpts.Mode = LowFatMode;
+
+    if (LFOpts.Mode == LowFatSanitizerOptions::LowFatMode::Safe) {
+      // Safe: insert barrier + fake.use at PipelineStartEP to preserve loads
+      // through Dead Argument Elimination, then instrument at OptimizerLastEP.
+      LowFatSanitizerOptions BarrierOpts = LFOpts;
+      BarrierOpts.InternalBarrierOnly_ = true;
+      PB.registerPipelineStartEPCallback(
+          [BarrierOpts](ModulePassManager &MPM, OptimizationLevel) {
+            MPM.addPass(LowFatSanitizerPass(BarrierOpts));
+          });
+    }
   }
 }
 

@@ -1728,6 +1728,8 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     if (SanArgs.linkCXXRuntimes())
       StaticRuntimes.push_back("scudo_standalone_cxx");
   }
+  if (SanArgs.needsLowFatRt())
+    StaticRuntimes.push_back("lowfat");
   if (SanArgs.needsUbsanLoopDetectRt())
     NonWholeStaticRuntimes.push_back("ubsan_loop_detect");
 }
