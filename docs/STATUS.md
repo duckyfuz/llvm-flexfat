@@ -9,6 +9,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 1 | Scaffolding: no-op pass, stub runtime, config skeleton, 4 test surfaces under `check-flexfat` | ✅ |
 | 2 | Config/table generator (byte-identical to reference, POW2 + non-POW2) | ✅ |
 | 3 | Runtime pointer-encoding core: `lowfat_index/size/magic/base/buffer_size`, tables @ `0x200000`/`0x300000`, region reservation, constructor/preinit; codegen parity (POW2 `and`, non-POW2 `mulq`, no `div`) | ✅ |
+| 4 | Heap allocator: per-class bump+freelist, lazy `mprotect` commit, big-object de-page, realloc/calloc/alignment-family/strdup, libc fallback, `LOWFAT_ALIAS` interposition; fast-path asm parity (no `div`, `clzll`→`lzcnt`, freelist LIFO, per-region mutex) | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -21,6 +22,17 @@ Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC 
   page across the high index range. Not an ABI difference.
 - **`MAP_FIXED_NOREPLACE`** is used instead of the reference's `MAP_FIXED` (detect
   a stray mapping instead of clobbering it). Same effect when the address is free.
+- **The allocator gtests run WITHOUT host ASan.** lowfat's fixed regions
+  (`i·2^35`, e.g. `0x800000000`) live inside ASan's shadow/gap address range, so
+  reserving them under ASan fails with `EEXIST` ("failed to reserve region: File
+  exists") — verified empirically, and not fixable with `protect_shadow_gap=0`
+  (the high regions collide with real HighShadow). This is inherent to lowfat and
+  ASan both claiming fixed address layouts; the reference LowFat is equally
+  incompatible with ASan. The allocator is a verbatim port of the reference
+  allocator and is validated by the (non-ASan) gtests in
+  `compiler-rt/lib/flexfat/tests/`, including death tests that exercise the
+  guard-page fault paths. Note `compiler-rt`'s own sanitizer unit tests likewise
+  do not run a fixed-layout sanitizer under ASan.
 
 ## ⚠ Dependency: SHM is a hard prerequisite for the stack unit
 The `/dev/shm` aliasing we skipped for the tables is **not** skippable for stack

@@ -18,6 +18,7 @@ set(FLEXFAT_UNITTEST_CFLAGS
 set(FLEXFAT_UNITTEST_SOURCES
   flexfat_test.cpp
   flexfat_encoding_test.cpp
+  flexfat_malloc_test.cpp
   flexfat_test_main.cpp)
 
 add_custom_target(FlexFatUnitTests)
@@ -36,7 +37,8 @@ foreach(arch ${FLEXFAT_SUPPORTED_ARCH})
   set(FlexFatTestObjects)
   # Static archive of the runtime objects for the test to link against.
   set(FLEXFAT_TEST_RUNTIME RTFlexFatTest.${arch})
-  add_library(${FLEXFAT_TEST_RUNTIME} STATIC $<TARGET_OBJECTS:RTFlexfat.${arch}>)
+  add_library(${FLEXFAT_TEST_RUNTIME} STATIC
+    $<TARGET_OBJECTS:RTFlexfat_noreplace.${arch}>)
   set_target_properties(${FLEXFAT_TEST_RUNTIME} PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     FOLDER "Compiler-RT Runtime tests")

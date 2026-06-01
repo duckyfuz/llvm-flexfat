@@ -71,3 +71,13 @@ No new LLVM-tree touchpoints; all within `compiler-rt/lib/flexfat/`.
 - **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — build `RTFlexfat` as an object library (so tests can link it); `-I` for `<lowfat_config.h>`.
 - **+** `compiler-rt/lib/flexfat/tests/flexfat_encoding_test.cpp` — encoding gtests (both variants, index-0, §1.4 ptr-info golden, read-only death test).
 - **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — link the runtime objects so the constructor initialises the tables.
+
+## Unit 4 — heap allocator
+
+No new LLVM-tree touchpoints; all within `compiler-rt/lib/flexfat/`.
+
+- **+** `compiler-rt/lib/flexfat/lowfat_malloc.c` — per-size-class bump+freelist allocator (faithful port of reference `lowfat_malloc.c`), `#included` into `lowfat.c`.
+- **~** `compiler-rt/lib/flexfat/lowfat.c` — add the helpers the allocator needs (per-region pthread mutex, `lowfat_rand` via getrandom, `lowfat_dont_need` via madvise, variadic `lowfat_error`/`lowfat_warning`/`lowfat_oob_error`); call `lowfat_malloc_init` from the constructor.
+- **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — add `RTFlexfat_noreplace` object library (`-DLOWFAT_NO_REPLACE_STD_MALLOC/_FREE`) for tests, so the unit-test process keeps libc malloc and calls `lowfat_malloc` directly.
+- **+** `compiler-rt/lib/flexfat/tests/flexfat_malloc_test.cpp` — allocator gtests (every class, freelist LIFO, big-object de-page death test, realloc-no-copy, alignment family, calloc/strdup, libc fallback, free-non-heap error).
+- **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — add the malloc test; link `RTFlexfat_noreplace` + `-ldl`.

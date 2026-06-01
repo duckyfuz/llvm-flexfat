@@ -37,6 +37,16 @@ add_compiler_rt_object_libraries(RTFlexfat
   ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
   CFLAGS ${FLEXFAT_CFLAGS})
 
+# A test-only variant WITHOUT the libc malloc/free interposition aliases, so the
+# unit-test process keeps using libc and calls lowfat_malloc/lowfat_free directly.
+add_compiler_rt_object_libraries(RTFlexfat_noreplace
+  ARCHS ${FLEXFAT_SUPPORTED_ARCH}
+  SOURCES ${FLEXFAT_SOURCES}
+  ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
+  CFLAGS ${FLEXFAT_CFLAGS}
+        -DLOWFAT_NO_REPLACE_STD_MALLOC
+        -DLOWFAT_NO_REPLACE_STD_FREE)
+
 foreach(arch ${FLEXFAT_SUPPORTED_ARCH})
   add_compiler_rt_runtime(clang_rt.flexfat
     STATIC
