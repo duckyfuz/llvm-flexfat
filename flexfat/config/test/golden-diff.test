@@ -1,8 +1,0 @@
-# FlexFat config golden-parity sentinel (Unit 1).
-#
-# Until the config generator is ported there is nothing to regenerate, so this
-# diffs the committed golden artifact against itself: a trivially-green
-# placeholder that proves the golden-diff harness runs under check-flexfat. When
-# the generator lands, the left-hand side becomes the freshly generated file.
-#
-# RUN: diff %S/sentinel.golden %S/sentinel.golden

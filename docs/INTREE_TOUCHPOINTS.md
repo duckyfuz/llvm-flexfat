@@ -47,3 +47,16 @@ Legend: **+** created, **~** modified.
 ### Docs
 - **+** `docs/LLVM_NOTES.md` — toolchain / build-config / ABI-parity record.
 - **+** `docs/INTREE_TOUCHPOINTS.md` — this file.
+
+## Unit 2 — config/table generator (byte-identical to reference, both variants)
+
+No new LLVM-tree touchpoints; entirely self-contained under `flexfat/config/`.
+
+- **+** `flexfat/config/lowfat-config.c` — generator, faithful port of reference `config/lowfat-config.c`.
+- **+** `flexfat/config/sizes.cfg`, `sizes2.cfg` — non-POW2 / POW2 size-class inputs.
+- **+** `flexfat/config/lowfat.errs` — non-POW2 precision-error cache.
+- **+** `flexfat/config/golden/pow2/`, `golden/nonpow2/` — committed reference `lowfat_config.{c,h}` + `lowfat.ld` per variant.
+- **+** `flexfat/config/test/pow2-parity.test`, `nonpow2-parity.test` — regenerate + byte-diff vs golden.
+- **~** `flexfat/config/test/lit.cfg.py` — add `%cc` substitution.
+- **~** `flexfat/config/README.md` — document the generator + layout.
+- **−** `flexfat/config/test/golden-diff.test`, `sentinel.golden` — Unit-1 placeholders, replaced by the real parity tests.

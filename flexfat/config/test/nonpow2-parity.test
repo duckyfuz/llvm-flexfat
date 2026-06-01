@@ -1,0 +1,16 @@
+# FlexFat config generator — non-POW2 (default / sizes.cfg) table parity.
+#
+# Build the FlexFat config generator, regenerate the non-POW2 reciprocal-magic
+# tables and linker script from "sizes.cfg 32", and assert byte-identical output
+# vs the committed golden. The per-region precision-error computation reads the
+# committed lowfat.errs cache (recomputing from scratch is billions of
+# iterations), so we also assert the cache is consumed without modification.
+#
+# RUN: %cc -O2 -o %t.gen %S/../lowfat-config.c -lm -lpthread
+# RUN: rm -rf %t.d && mkdir -p %t.d
+# RUN: cp %S/../sizes.cfg %S/../lowfat.errs %t.d/
+# RUN: cd %t.d && %t.gen sizes.cfg 32
+# RUN: diff -u %S/../golden/nonpow2/lowfat_config.h %t.d/lowfat_config.h
+# RUN: diff -u %S/../golden/nonpow2/lowfat_config.c %t.d/lowfat_config.c
+# RUN: diff -u %S/../golden/nonpow2/lowfat.ld       %t.d/lowfat.ld
+# RUN: diff -u %S/../lowfat.errs %t.d/lowfat.errs
