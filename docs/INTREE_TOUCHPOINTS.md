@@ -60,3 +60,14 @@ No new LLVM-tree touchpoints; entirely self-contained under `flexfat/config/`.
 - **~** `flexfat/config/test/lit.cfg.py` — add `%cc` substitution.
 - **~** `flexfat/config/README.md` — document the generator + layout.
 - **−** `flexfat/config/test/golden-diff.test`, `sentinel.golden` — Unit-1 placeholders, replaced by the real parity tests.
+
+## Unit 3 — runtime pointer-encoding core + init
+
+No new LLVM-tree touchpoints; all within `compiler-rt/lib/flexfat/`.
+
+- **~** `compiler-rt/lib/flexfat/lowfat.h` — replace the Unit-1 stub with the reference ABI header (inline `lowfat_index/size/magic/objidx/base/buffer_size`).
+- **~** `compiler-rt/lib/flexfat/lowfat.c` — replace the stub with the encoding core: SIZES/MAGICS tables @ `0x200000`/`0x300000` (full index range, mprotect read-only), region reservation (PROT_NONE/MAP_NORESERVE), pointer classification, constructor(10102) + `.preinit_array`.
+- **+** `compiler-rt/lib/flexfat/lowfat_config.h`, `lowfat_config.c` — the generated **non-POW2** config (the default variant; matches build.sh + SPEC §1.4), from `flexfat/config`.
+- **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — build `RTFlexfat` as an object library (so tests can link it); `-I` for `<lowfat_config.h>`.
+- **+** `compiler-rt/lib/flexfat/tests/flexfat_encoding_test.cpp` — encoding gtests (both variants, index-0, §1.4 ptr-info golden, read-only death test).
+- **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — link the runtime objects so the constructor initialises the tables.

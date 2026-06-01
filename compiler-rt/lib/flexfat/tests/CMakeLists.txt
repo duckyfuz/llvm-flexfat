@@ -1,8 +1,7 @@
 # Unit tests for the FlexFat runtime (gtest). Modeled on lib/rtsan/tests.
 #
-# Unit 1: a single self-contained sentinel that proves the harness builds, links
-# and runs under check-flexfat. It does not link the runtime yet; real
-# runtime-internals tests arrive with the ported runtime.
+# Unit 3 links the runtime objects (RTFlexfat) so the constructor initialises the
+# SIZES/MAGICS tables before the encoding cases run.
 
 include(CompilerRTCompile)
 
@@ -18,6 +17,7 @@ set(FLEXFAT_UNITTEST_CFLAGS
 
 set(FLEXFAT_UNITTEST_SOURCES
   flexfat_test.cpp
+  flexfat_encoding_test.cpp
   flexfat_test_main.cpp)
 
 add_custom_target(FlexFatUnitTests)
@@ -34,9 +34,17 @@ append_list_if(COMPILER_RT_HAS_LIBPTHREAD -pthread FLEXFAT_UNITTEST_LINK_FLAGS)
 
 foreach(arch ${FLEXFAT_SUPPORTED_ARCH})
   set(FlexFatTestObjects)
+  # Static archive of the runtime objects for the test to link against.
+  set(FLEXFAT_TEST_RUNTIME RTFlexFatTest.${arch})
+  add_library(${FLEXFAT_TEST_RUNTIME} STATIC $<TARGET_OBJECTS:RTFlexfat.${arch}>)
+  set_target_properties(${FLEXFAT_TEST_RUNTIME} PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    FOLDER "Compiler-RT Runtime tests")
+
   generate_compiler_rt_tests(FlexFatTestObjects
     FlexFatUnitTests "Flexfat-${arch}-Test" ${arch}
     SOURCES ${FLEXFAT_UNITTEST_SOURCES} ${COMPILER_RT_GTEST_SOURCE}
+    RUNTIME ${FLEXFAT_TEST_RUNTIME}
     CFLAGS ${FLEXFAT_UNITTEST_CFLAGS}
     LINK_FLAGS ${FLEXFAT_UNITTEST_LINK_FLAGS})
   set_target_properties(FlexFatUnitTests PROPERTIES

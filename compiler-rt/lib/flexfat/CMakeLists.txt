@@ -1,7 +1,7 @@
 # Build for the FlexFat runtime support library (LowFat reimplementation).
 #
-# Unit 1: a no-op stub static runtime (clang_rt.flexfat). Modeled structurally
-# on compiler-rt/lib/asan/CMakeLists.txt, kept minimal like lib/safestack.
+# Unit 3: the pointer-encoding core + init. Built as an object library so the
+# unit tests can link the runtime objects. Modeled on lib/asan and lib/rtsan.
 
 add_compiler_rt_component(flexfat)
 
@@ -11,26 +11,37 @@ set(FLEXFAT_SOURCES
 
 set(FLEXFAT_HEADERS
   lowfat.h
+  lowfat_config.h
   )
 
 include_directories(..)
 
-# FlexFat/LowFat encodes object base+size into the pointer and relocates its
-# globals and metadata tables into reserved high regions, using BMI/BMI2/LZCNT.
-# Build the runtime with the large code model and those ISA extensions, matching
-# the reference build (build.sh: -mcmodel=large -mbmi -mbmi2 -mlzcnt).
+# FlexFat/LowFat encodes base+size into the pointer and relocates its globals and
+# metadata tables into reserved high regions, using BMI/BMI2/LZCNT. Build with
+# the large code model and those ISA extensions, matching the reference build
+# (build.sh: -mcmodel=large -mbmi -mbmi2 -mlzcnt). -I for <lowfat_config.h>.
+# The generated lowfat_config.c carries stack/heap-select tables not consumed
+# until later units; silence their unused diagnostics.
 set(FLEXFAT_CFLAGS
   -mcmodel=large
   -mbmi
   -mbmi2
-  -mlzcnt)
+  -mlzcnt
+  -I${CMAKE_CURRENT_SOURCE_DIR}
+  -Wno-unused-function
+  -Wno-unused-const-variable)
+
+add_compiler_rt_object_libraries(RTFlexfat
+  ARCHS ${FLEXFAT_SUPPORTED_ARCH}
+  SOURCES ${FLEXFAT_SOURCES}
+  ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
+  CFLAGS ${FLEXFAT_CFLAGS})
 
 foreach(arch ${FLEXFAT_SUPPORTED_ARCH})
   add_compiler_rt_runtime(clang_rt.flexfat
     STATIC
     ARCHS ${arch}
-    SOURCES ${FLEXFAT_SOURCES}
-    ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
+    OBJECT_LIBS RTFlexfat
     CFLAGS ${FLEXFAT_CFLAGS}
     PARENT_TARGET flexfat)
 endforeach()
