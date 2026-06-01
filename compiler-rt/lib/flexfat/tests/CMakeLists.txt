@@ -19,6 +19,7 @@ set(FLEXFAT_UNITTEST_SOURCES
   flexfat_test.cpp
   flexfat_encoding_test.cpp
   flexfat_malloc_test.cpp
+  flexfat_classify_test.cpp
   flexfat_test_main.cpp)
 
 add_custom_target(FlexFatUnitTests)

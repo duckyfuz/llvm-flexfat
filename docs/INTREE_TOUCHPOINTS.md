@@ -88,3 +88,15 @@ No new LLVM-tree touchpoints; all within `compiler-rt/lib/flexfat/`.
 - **+** `compiler-rt/lib/flexfat/tests/logic/malloc_bookkeeping.cpp` — page-macro / freelist / alignment tests on ordinary memory under host ASan+UBSan.
 - **+** `compiler-rt/lib/flexfat/tests/logic/lit.cfg.py` — self-contained lit config (host clang++ `-fsanitize=address,undefined`).
 - **~** `compiler-rt/test/flexfat/CMakeLists.txt` — add the `logic/` suite to `check-flexfat`.
+
+## Unit 5 — memops, classifiers, OOB reporter
+
+No new LLVM-tree touchpoints; all within `compiler-rt/`.
+
+- **+** `compiler-rt/lib/flexfat/lowfat_memops.c` — bounds-checked memset/memmove/memcpy (verbatim port), `#included` into `lowfat.c`.
+- **~** `compiler-rt/lib/flexfat/lowfat.c` — replace the Unit-4 minimal error path with the verbatim reporter (banner, color, backtrace, `lowfat_message`, `lowfat_error/warning`, `lowfat_kind`, `lowfat_error_kind`, `lowfat_oob_error/warning/check`); switch the classifiers to the reference form; include memops.
+- **+** `compiler-rt/lib/flexfat/tests/flexfat_classify_test.cpp` — classifier gtests (heap/stack/global/nonfat/index-0 + kind precedence).
+- **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — add the classifier test.
+- **+** `compiler-rt/test/flexfat/TestCases/oob_report.c` — e2e exact error-text CHECK (fixed addresses → deterministic).
+- **~** `compiler-rt/test/flexfat/lit.cfg.py` — add `%clang_flexfat_runtime` (links the runtime source until the Unit-6 driver flag).
+- **~** `compiler-rt/test/flexfat/lit.site.cfg.py.in` — pass `flexfat_src_dir`.

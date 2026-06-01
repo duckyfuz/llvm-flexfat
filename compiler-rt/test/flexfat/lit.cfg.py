@@ -31,3 +31,22 @@ config.substitutions.append(
 config.substitutions.append(
     ("%clang_flexfat ", build_invocation([config.target_cflags, "-fsanitize=flexfat"]))
 )
+
+# Until the -fsanitize=flexfat driver flag exists (Unit 6), e2e tests link the
+# runtime by compiling its source directly (like the config tests compile the
+# generator). Used by the OOB-reporter error-text test.
+_flexfat_src = getattr(config, "flexfat_src_dir", "")
+config.substitutions.append(
+    (
+        "%clang_flexfat_runtime ",
+        build_invocation(
+            [
+                config.target_cflags,
+                "-I" + _flexfat_src,
+                os.path.join(_flexfat_src, "lowfat.c"),
+                "-lpthread",
+                "-ldl",
+            ]
+        ),
+    )
+)

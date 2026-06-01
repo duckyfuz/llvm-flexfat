@@ -6,6 +6,7 @@ config.flexfat_lit_source_dir = "@FLEXFAT_LIT_SOURCE_DIR@"
 config.target_cflags = "@FLEXFAT_TEST_TARGET_CFLAGS@"
 config.target_arch = "@FLEXFAT_TEST_TARGET_ARCH@"
 config.clang = "@FLEXFAT_TEST_TARGET_CC@"
+config.flexfat_src_dir = "@COMPILER_RT_SOURCE_DIR@/lib/flexfat"
 config.built_with_llvm = ("@COMPILER_RT_STANDALONE_BUILD@" != "TRUE")
 
 if config.built_with_llvm:

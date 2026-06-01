@@ -10,6 +10,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 2 | Config/table generator (byte-identical to reference, POW2 + non-POW2) | ✅ |
 | 3 | Runtime pointer-encoding core: `lowfat_index/size/magic/base/buffer_size`, tables @ `0x200000`/`0x300000`, region reservation, constructor/preinit; codegen parity (POW2 `and`, non-POW2 `mulq`, no `div`) | ✅ |
 | 4 | Heap allocator: per-class bump+freelist, lazy `mprotect` commit, big-object de-page, realloc/calloc/alignment-family/strdup, libc fallback, `LOWFAT_ALIAS` interposition; fast-path asm parity (no `div`, `clzll`→`lzcnt`, freelist LIFO, per-region mutex) | ✅ |
+| 5 | memops (`lowfat_memset/memmove/memcpy`), the five classifiers + `lowfat_kind`, and the OOB reporter (`lowfat_oob_error/warning/check`); **reporter output byte-identical to the reference** (char-diff clean for overflow + underflow) | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -37,6 +38,23 @@ Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC 
     ordinary (non-fixed-region) memory under host ASan+UBSan by the `FlexFatLogic`
     test (`compiler-rt/lib/flexfat/tests/logic/`, wired into `check-flexfat`).
     That catches the UB the criterion was meant to catch.
+
+## OOB reporter & exit-code convention (flagged)
+The `LOWFAT ERROR:` report text is load-bearing twice over (the e2e `// CHECK:`s
+in `compiler-rt/test/flexfat/TestCases/` and the Unit-11 MSET differential), so
+the reporter is a **verbatim** port and its uncolored output is **byte-identical**
+to the reference — verified by a character diff against the reference `lowfat.o`
+for one overflow and one underflow case (banner + fields, backtrace excluded as
+it is inherently address-variable). ANSI coloring is emitted only on a TTY.
+
+**Exit code: FlexFat keeps `abort()` → SIGABRT (134 = 128+6).** This matches the
+reference (`lowfat_oob_error` → `lowfat_error` → `abort()`) and the MSET
+`lowfat_original.xml` / `lowfat.xml` configs, which key "bug detected" on exit
+6/SIGABRT. SPEC §5.5 notes a "FlexFat variant uses 1" — that is the separate MSET
+`lowfat_2*.xml` configs driving a `-lowfat-mode` build (exit 1), a **future
+FlexFat MODE, not Unit 5**. Decision: the default stays SIGABRT/6 for
+reference + MSET-original parity; an exit-1 mode, if added, must be gated behind a
+mode flag and its own MSET config — do not change the default silently.
 
 ## ⚠ Dependency: SHM is a hard prerequisite for the stack unit
 The `/dev/shm` aliasing we skipped for the tables is **not** skippable for stack
