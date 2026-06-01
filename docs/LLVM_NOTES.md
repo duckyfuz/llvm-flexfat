@@ -4,14 +4,13 @@ Environment of record for the FlexFat reimplementation. Branch
 `flexfat/reimplementation` (based on `llvmorg-22.1.6`).
 
 ## In-tree LLVM
-- The tree self-reports **clang/LLVM `23.0.0git`** (configure: "Clang version:
-  23.0.0git"; runtime resource dir `lib/clang/23/...`). Treat this as
-  authoritative for tool versions.
-- `git describe` nearest tag = `llvmorg-22-init-37625-g28be1eaf755a`. CLAUDE.md
-  describes the fork as the "LLVM 22 fork" based on `llvmorg-22.1.6`; the
-  self-reported version (23.0.0git) does not match that label — flagged here so
-  later units don't assume a 22.x ABI/header surface. APIs were verified against
-  the actual installed headers, not the label.
+- **Confirmed target: LLVM 23-dev (`23.0.0git`).** This is the intended version, not a
+  mistake (configure: "Clang version: 23.0.0git"; runtime resource dir `lib/clang/23/...`).
+  Authoritative for tool versions and the header/ABI surface we build against.
+- HEAD (`git describe` = `llvmorg-22-init-37625-g28be1eaf755a`) descends from our chosen base;
+  the tree has since moved onto the 23 development line. Earlier `llvmorg-22.1.6` / "LLVM 22"
+  labels are superseded — we track this tree's actual installed headers, which all LLVM
+  symbols/signatures are verified against, not a version label.
 - New Pass Manager + opaque pointers only. No legacy PassManager,
   no `getPointerElementType`, no `RegisterStandardPasses`.
 
