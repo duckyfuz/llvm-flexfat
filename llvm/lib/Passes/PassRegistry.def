@@ -111,6 +111,7 @@ MODULE_PASS("lower-ifunc", LowerIFuncPass())
 MODULE_PASS("simplify-type-tests", SimplifyTypeTestsPass())
 MODULE_PASS("lowertypetests", LowerTypeTestsPass())
 MODULE_PASS("fatlto-cleanup", FatLtoCleanup())
+MODULE_PASS("flexfat", FlexFatPass())
 MODULE_PASS("pgo-force-function-attrs",
             PGOForceFunctionAttrsPass(PGOOpt
                                           ? PGOOpt->ColdOptType

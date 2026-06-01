@@ -1,0 +1,3 @@
+FlexFat config golden placeholder (Unit 1).
+Replaced by the generated lowfat_config.{c,h} / lowfat.ld golden tables in a
+later unit.
