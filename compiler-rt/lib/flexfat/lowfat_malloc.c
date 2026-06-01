@@ -22,14 +22,7 @@
  * !LOWFAT_NO_REPLACE_STD_MALLOC/_FREE so the unit tests can opt out.
  */
 
-#define LOWFAT_BIG_OBJECT           (3 * LOWFAT_PAGE_SIZE)
-#define LOWFAT_NUM_PAGES(size)                                          \
-    ((((size) - 1) / LOWFAT_PAGE_SIZE) + 1)
-#define LOWFAT_PAGES_BASE(ptr)                                          \
-    ((void *)((uint8_t *)(ptr) - ((uintptr_t)(ptr) % LOWFAT_PAGE_SIZE)))
-#define LOWFAT_PAGES_SIZE(ptr, size)                                    \
-    (LOWFAT_NUM_PAGES(((uint8_t *)(ptr) -                               \
-        (uint8_t *)LOWFAT_PAGES_BASE(ptr)) + (size)) * LOWFAT_PAGE_SIZE)
+#include "lowfat_malloc_internal.h" // page macros + struct lowfat_freelist_s
 
 void lowfat_init(void);
 extern size_t malloc_usable_size(void *ptr);
@@ -38,15 +31,9 @@ extern void *__libc_realloc(void *ptr, size_t size);
 extern void __libc_free(void *ptr);
 
 /*
- * Allocator data-structures.
+ * Allocator data-structures. (struct lowfat_freelist_s is in
+ * lowfat_malloc_internal.h, shared with the logic-only unit test.)
  */
-struct lowfat_freelist_s
-{
-    uintptr_t _reserved;    // Reserved for meta-data.
-    struct lowfat_freelist_s *next;
-};
-typedef struct lowfat_freelist_s *lowfat_freelist_t;
-
 struct lowfat_regioninfo_s
 {
     lowfat_mutex_t mutex;

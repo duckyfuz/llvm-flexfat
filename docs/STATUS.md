@@ -22,17 +22,21 @@ Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC 
   page across the high index range. Not an ABI difference.
 - **`MAP_FIXED_NOREPLACE`** is used instead of the reference's `MAP_FIXED` (detect
   a stray mapping instead of clobbering it). Same effect when the address is free.
-- **The allocator gtests run WITHOUT host ASan.** lowfat's fixed regions
-  (`i·2^35`, e.g. `0x800000000`) live inside ASan's shadow/gap address range, so
-  reserving them under ASan fails with `EEXIST` ("failed to reserve region: File
-  exists") — verified empirically, and not fixable with `protect_shadow_gap=0`
-  (the high regions collide with real HighShadow). This is inherent to lowfat and
-  ASan both claiming fixed address layouts; the reference LowFat is equally
-  incompatible with ASan. The allocator is a verbatim port of the reference
-  allocator and is validated by the (non-ASan) gtests in
-  `compiler-rt/lib/flexfat/tests/`, including death tests that exercise the
-  guard-page fault paths. Note `compiler-rt`'s own sanitizer unit tests likewise
-  do not run a fixed-layout sanitizer under ASan.
+- **Sanitizer coverage of the allocator** splits into two:
+  - *Full runtime under ASan — infeasible (inherent to the fixed-address layout).*
+    lowfat's fixed regions (`i·2^35`, e.g. `0x800000000`) live inside ASan's
+    shadow/gap address range, so reserving them under ASan fails with `EEXIST`
+    ("failed to reserve region: File exists") — verified empirically, and not
+    fixable with `protect_shadow_gap=0` (the high regions collide with real
+    HighShadow). The reference LowFat shares this incompatibility (both demand
+    fixed address layouts). The integration gtests therefore run without ASan;
+    they include death tests that exercise the guard-page fault paths.
+  - *Allocator bookkeeping under ASan/UBSan — covered.* The page-arithmetic
+    macros, freelist node link/unlink and posix_memalign offset math live in
+    `compiler-rt/lib/flexfat/lowfat_malloc_internal.h` and are exercised on
+    ordinary (non-fixed-region) memory under host ASan+UBSan by the `FlexFatLogic`
+    test (`compiler-rt/lib/flexfat/tests/logic/`, wired into `check-flexfat`).
+    That catches the UB the criterion was meant to catch.
 
 ## ⚠ Dependency: SHM is a hard prerequisite for the stack unit
 The `/dev/shm` aliasing we skipped for the tables is **not** skippable for stack

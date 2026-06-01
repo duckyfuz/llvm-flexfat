@@ -81,3 +81,10 @@ No new LLVM-tree touchpoints; all within `compiler-rt/lib/flexfat/`.
 - **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — add `RTFlexfat_noreplace` object library (`-DLOWFAT_NO_REPLACE_STD_MALLOC/_FREE`) for tests, so the unit-test process keeps libc malloc and calls `lowfat_malloc` directly.
 - **+** `compiler-rt/lib/flexfat/tests/flexfat_malloc_test.cpp` — allocator gtests (every class, freelist LIFO, big-object de-page death test, realloc-no-copy, alignment family, calloc/strdup, libc fallback, free-non-heap error).
 - **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — add the malloc test; link `RTFlexfat_noreplace` + `-ldl`.
+
+### Allocator bookkeeping under ASan/UBSan (logic-only)
+- **+** `compiler-rt/lib/flexfat/lowfat_malloc_internal.h` — shared page macros + `lowfat_freelist_s` (extracted from `lowfat_malloc.c`, single source of truth).
+- **~** `compiler-rt/lib/flexfat/lowfat_malloc.c` — include the internal header instead of defining the macros/struct inline.
+- **+** `compiler-rt/lib/flexfat/tests/logic/malloc_bookkeeping.cpp` — page-macro / freelist / alignment tests on ordinary memory under host ASan+UBSan.
+- **+** `compiler-rt/lib/flexfat/tests/logic/lit.cfg.py` — self-contained lit config (host clang++ `-fsanitize=address,undefined`).
+- **~** `compiler-rt/test/flexfat/CMakeLists.txt` — add the `logic/` suite to `check-flexfat`.

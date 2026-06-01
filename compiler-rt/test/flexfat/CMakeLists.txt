@@ -46,6 +46,12 @@ get_filename_component(FLEXFAT_TOP_DIR "${COMPILER_RT_SOURCE_DIR}/.." ABSOLUTE)
 if(EXISTS ${FLEXFAT_TOP_DIR}/flexfat/config/test)
   list(APPEND FLEXFAT_EXTRA_TESTSUITES ${FLEXFAT_TOP_DIR}/flexfat/config/test)
 endif()
+# Allocator bookkeeping under host ASan+UBSan (self-contained lit config; uses
+# the host toolchain, no in-tree asan build).
+if(EXISTS ${COMPILER_RT_SOURCE_DIR}/lib/flexfat/tests/logic)
+  list(APPEND FLEXFAT_EXTRA_TESTSUITES
+    ${COMPILER_RT_SOURCE_DIR}/lib/flexfat/tests/logic)
+endif()
 
 add_lit_testsuite(check-flexfat "Running the FlexFat tests"
   ${FLEXFAT_TESTSUITES}
