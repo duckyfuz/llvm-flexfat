@@ -13,6 +13,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 5 | memops (`lowfat_memset/memmove/memcpy`), the five classifiers + `lowfat_kind`, and the OOB reporter (`lowfat_oob_error/warning/check`); **reporter output byte-identical to the reference** (char-diff clean for overflow + underflow) | ✅ |
 | 6 | clang driver wiring: `-fsanitize=flexfat` (+ deprecated `lowfat` alias) recognized, x86_64-gated, forces `-mcmodel=large` + lzcnt/bmi/bmi2, links `libclang_rt.flexfat`, schedules the (no-op) pass at the reference's ScalarOptimizerLate point at every -O; e2e sentinel un-XFAILed | ✅ |
 | 7 | load/store bounds-check instrumentation: `calcBasePtr` + inlined non-POW2 `lowfat_base` + inlined `lowfat_oob_check`; heap OOB traps with the exact report, in-bounds exits 0; **fast-path asm strategy-identical to the reference** (shr/table-load/single unsigned compare/`jae` to out-of-line error, no fast-path call, no div) | ✅ |
+| 8 | static bounds analysis (`Bounds` lattice + `getPtrBounds`): provably in-bounds accesses (constant offset off known-size malloc/alloca/global, select/PHI merges, offset-0 input derefs) skip the check; genuine OOB / dynamic / unknown-provenance accesses still checked; Unit 7 traps still fire (no false negative); `-flexfat-no-check-fields` flag | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -144,6 +145,32 @@ divergences from the LLVM-4.0 reference — all justified, none on the fast path
   bounds elimination of provably-safe checks are deferred. Without §4.2 every
   fat load/store is checked; alloca/global/constant bases are non-fat (NULL
   base ⇒ check dropped) since stack/global lowfatification is a later unit.
+
+## Static bounds analysis (Unit 8)
+`getPtrBounds` (port of LowFat.cpp:441-621) proves accesses in-bounds and skips
+their checks: a pointer's `Bounds` is `[0, ub]` (max in-bounds byte offset), with
+`NONFAT`/`UNKNOWN` sentinels; `run()` skips the check iff `isInBounds(0)` (the
+`access_size = 0` default — `-flexfat-check-whole-access` is still deferred).
+Measured win (`-flexfat-no-elide` toggles the analysis for A/B): the `bounds.ll`
+sample drops **7 → 3** checks; a realistic `-O1` function drops 5 → 4. No false
+negative: every Unit 7 trap test still aborts (verified).
+
+Notes / opaque-pointer divergences:
+- **`-flexfat-no-check-fields` is applied at the GEP, not in `getInputPtrBounds`.**
+  The reference trusts an input pointer up to `sizeof(*ptr)`; opaque pointers have
+  no pointee type, so we instead trust it up to the **GEP's source element type**
+  size. This works on unoptimized IR (the `no_check_fields.ll` test), but is
+  weaker at `-O1+`: the optimizer canonicalizes struct GEPs to `i8` GEPs, erasing
+  the struct type, so field accesses fall back to checked. (Default — flag off —
+  field accesses are checked regardless, matching the reference default.)
+- **`getObjectSize` needs the allocation attributes.** Unlike LLVM-4.0's
+  TLI-only recognition, LLVM 23's `getObjectSize` reads `allocsize`/`allockind`;
+  clang emits them, so heap accesses size correctly. Hand-written test IR must
+  carry them (see `bounds.ll`'s `malloc` declaration).
+- **Input pointers are trusted at offset 0.** Default input bounds are `[0,0]`,
+  so a *direct* deref of an argument/loaded pointer is elided (the reference's
+  behavior); only positive offsets off an input pointer are checked. Unknown
+  pointer producers default to `NONFAT` (no check), also matching the reference.
 
 ## Pass placement & the module→function decision (Unit 6, flagged)
 The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at

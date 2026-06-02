@@ -1,19 +1,22 @@
-; FlexFat Unit 7: a single load through a (fat) pointer argument gets an inlined
-; bounds check. The base is computed by the inlined non-POW2 lowfat_base
-; (reciprocal multiply); the check is the inlined lowfat_oob_check.
+; FlexFat Unit 7/8: a load through a fat pointer at a dynamic (unprovable) offset
+; gets an inlined bounds check. The base is computed by the inlined non-POW2
+; lowfat_base (reciprocal multiply); the check is the inlined lowfat_oob_check.
+; (A *direct* deref of an input pointer is now elided by Unit 8's bounds
+; analysis, so this uses a dynamic GEP, which stays checked.)
 ;
 ; RUN: opt < %s -passes=flexfat -S | FileCheck %s
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
 
-define i32 @load(ptr %p) {
+define i32 @load(ptr %p, i64 %i) {
 entry:
-  %v = load i32, ptr %p, align 4
+  %q = getelementptr i8, ptr %p, i64 %i
+  %v = load i32, ptr %q, align 4
   ret i32 %v
 }
 
-; CHECK-LABEL: define i32 @load(ptr %p)
+; CHECK-LABEL: define i32 @load(ptr %p, i64 %i)
 ;
 ; Inlined lowfat_base(%p): region index = p>>35, magic table load @ 0x300000,
 ; 128-bit reciprocal multiply, size table load @ 0x200000, base = objidx*size.
@@ -39,9 +42,9 @@ entry:
 ; CHECK:      icmp uge i64
 ; CHECK:      br i1 %{{.*}}, label %[[ERR:[0-9]+]], label %[[CONT:[0-9]+]], !prof ![[W:[0-9]+]]
 ; CHECK:    [[ERR]]:
-; CHECK:      call void @lowfat_oob_error(i32 0, ptr %p, ptr %{{.*}})
+; CHECK:      call void @lowfat_oob_error(i32 0, ptr %q, ptr %{{.*}})
 ; CHECK-NEXT: unreachable
 ; CHECK:    [[CONT]]:
-; CHECK:      load i32, ptr %p
+; CHECK:      load i32, ptr %q
 ;
 ; CHECK:      ![[W]] = !{!"branch_weights", i32 1, i32 2000000000}

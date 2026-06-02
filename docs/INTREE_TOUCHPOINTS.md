@@ -151,3 +151,15 @@ build/driver touchpoints; entirely within the existing pass + test surfaces.
 ### e2e tests (surface 3)
 - **+** `compiler-rt/test/flexfat/TestCases/heap_oob.c` — the SPEC §1.4 / README heap example (`noinline get()`) must trap with the deterministic report fields (`operation=read`, `size=16`, `overflow=+84`, `(heap)`); addresses are ASLR-random and regex-matched.
 - **+** `compiler-rt/test/flexfat/TestCases/in_bounds.c` — an in-bounds program exits 0 (no false positive).
+
+## Unit 8 — static bounds analysis (provably-safe check elision)
+
+No new build/driver touchpoints; entirely within the pass + IR test surface.
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp` — add the `Bounds` lattice (lb=0, ub; `NONFAT`=INT64_MAX, `UNKNOWN`=INT64_MIN) and `getPtrBounds`/`getConstantPtrBounds`/`getInputPtrBounds` (port of LowFat.cpp:61-137, :426-621). `run()` now consults `getPtrBounds(Ptr).isInBounds(0)` and skips a check entirely when the access is provably in-bounds (the `addToPlan` gate), before `calcBasePtr`. Adds the `-flexfat-no-check-fields` flag (opaque-pointer analog of `-lowfat-no-check-fields`, applied at the GEP using the source element type), an internal `-flexfat-no-elide` flag (A/B measurement), and `NumChecks`/`NumElided` statistics.
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/bounds.ll` — positives (constant in-bounds GEP off malloc/alloca/global, select/PHI merge within the min → check elided) and negatives (constant OOB off malloc, dynamic GEP, unknown-provenance loaded pointer → check kept). malloc carries clang's `allockind`/`allocsize(0)` attributes so `getObjectSize` recovers the size.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/no_check_fields.ll` — `-flexfat-no-check-fields` flips a constant field GEP off an input pointer from checked (default) to elided.
+- **~** `llvm/test/Instrumentation/FlexFat/X86/load.ll` — a *direct* input-pointer deref is now elided by the analysis, so the canonical "checked load" test moves to a dynamic GEP (still checked).

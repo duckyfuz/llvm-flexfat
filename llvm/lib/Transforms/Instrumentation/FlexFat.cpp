@@ -32,6 +32,7 @@
 #include "llvm/Transforms/Instrumentation/FlexFat.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Constants.h"
@@ -41,11 +42,29 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "flexfat"
+
+STATISTIC(NumChecks, "Number of FlexFat bounds checks inserted");
+STATISTIC(NumElided, "Number of FlexFat bounds checks elided (proven in-bounds)");
+
+// -flexfat-no-check-fields: trust input pointers up to the indexed object type,
+// eliding checks on in-bounds field accesses (LowFat -lowfat-no-check-fields).
+static cl::opt<bool> ClNoCheckFields(
+    "flexfat-no-check-fields", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: trust input pointers up to the indexed object's size, "
+             "skipping bounds checks on provably in-bounds field accesses"));
+
+// -flexfat-no-elide: disable the static bounds analysis (check everything). For
+// A/B measurement of the elimination's effect; not a LowFat option.
+static cl::opt<bool> ClNoElide(
+    "flexfat-no-elide", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: disable static elision of provably-safe bounds checks"));
 
 namespace {
 
@@ -69,10 +88,42 @@ constexpr unsigned kInfoWrite = 1;
 constexpr uint32_t kErrorWeight = 1;
 constexpr uint32_t kFastWeight = 2000000000;
 
+// Static bounds lattice (LowFat.cpp:61-137). lb is always 0; `ub` is the
+// greatest byte offset from the pointer that is known in-bounds. Two sentinels:
+// NONFAT (the pointer is non-fat -> no check) and UNKNOWN (can't prove -> must
+// check). An access at offset k is provably safe iff 0 <= k <= ub.
+struct Bounds {
+  static constexpr int64_t NONFAT = INT64_MAX;
+  static constexpr int64_t UNKNOWN = INT64_MIN;
+
+  int64_t ub = 0;
+  Bounds() = default;
+  explicit Bounds(int64_t Ub) : ub(Ub) {}
+
+  static Bounds empty() { return Bounds(0); }
+  static Bounds nonFat() { return Bounds(NONFAT); }
+  static Bounds unknown() { return Bounds(UNKNOWN); }
+
+  bool isUnknown() const { return ub == UNKNOWN; }
+  bool isNonFat() const { return ub == NONFAT; }
+  bool isEmpty() const { return ub == 0; }
+  bool isInBounds(int64_t K) const { return K >= 0 && K <= ub; }
+
+  // Walk a GEP that adds `K` bytes: the remaining in-bounds size shrinks.
+  void sub(uint64_t K) {
+    if (K == 0 || isUnknown() || isNonFat())
+      return;
+    ub = ((int64_t)K > ub) ? UNKNOWN : ub - (int64_t)K;
+  }
+  static Bounds min(Bounds A, Bounds B) {
+    return Bounds(std::min(A.ub, B.ub));
+  }
+};
+
 class FlexFat {
 public:
   FlexFat(Function &F, const TargetLibraryInfo &TLI)
-      : F(F), M(*F.getParent()), Ctx(F.getContext()),
+      : F(F), M(*F.getParent()), Ctx(F.getContext()), DL(M.getDataLayout()),
         I64Ty(Type::getInt64Ty(Ctx)), I128Ty(Type::getInt128Ty(Ctx)),
         PtrTy(PointerType::getUnqual(Ctx)), TLI(TLI) {}
 
@@ -85,6 +136,11 @@ private:
                          Value *Base);
   std::pair<BasicBlock *, BasicBlock::iterator> nextInsertPoint(Value *Ptr);
 
+  // Static bounds analysis (LowFat.cpp:426-621): prove an access in-bounds.
+  Bounds getPtrBounds(Value *Ptr);
+  Bounds getConstantPtrBounds(Constant *C);
+  Bounds getInputPtrBounds(Value *Ptr);
+
   // Inline a GEP into a fixed runtime table (_LOWFAT_SIZES / _LOWFAT_MAGICS).
   Value *tableSlot(IRBuilder<> &B, uint64_t TableAddr, Value *Idx) {
     Value *Table = B.CreateIntToPtr(B.getInt64(TableAddr), PtrTy);
@@ -94,11 +150,13 @@ private:
   Function &F;
   Module &M;
   LLVMContext &Ctx;
+  const DataLayout &DL;
   IntegerType *I64Ty;
   IntegerType *I128Ty;
   PointerType *PtrTy;
   const TargetLibraryInfo &TLI;
   DenseMap<Value *, Value *> baseInfo;
+  DenseMap<const Value *, int64_t> boundsInfo; // memoized Bounds::ub
 };
 
 } // namespace
@@ -142,6 +200,121 @@ Value *FlexFat::emitInlineBase(Value *Ptr) {
                                     Align(sizeof(uint64_t)));
   Value *IBase = B.CreateMul(ObjIdx, Size);
   return B.CreateIntToPtr(IBase, PtrTy);
+}
+
+// Bounds for an "input" pointer of unknown provenance (LowFat.cpp:426-439).
+// Default: empty [0,0] -- the byte at the pointer is trusted, any positive
+// offset is checked. With opaque pointers there is no pointee type to size, so
+// -flexfat-no-check-fields is applied at the GEP level (getPtrBounds) using the
+// GEP's source element type, not here.
+Bounds FlexFat::getInputPtrBounds(Value *Ptr) { return Bounds::empty(); }
+
+// Bounds of a constant pointer (LowFat.cpp:441-531).
+Bounds FlexFat::getConstantPtrBounds(Constant *C) {
+  if (isa<ConstantPointerNull>(C) || isa<UndefValue>(C))
+    return Bounds::nonFat();
+  auto It = boundsInfo.find(C);
+  if (It != boundsInfo.end())
+    return Bounds(It->second);
+
+  Bounds B = Bounds::nonFat();
+  if (auto *GV = dyn_cast<GlobalVariable>(C)) {
+    Type *Ty = GV->getValueType();
+    if (Ty->isSized()) {
+      uint64_t Size = DL.getTypeAllocSize(Ty);
+      if (Size != 0) // size==0 implies unspecified size, e.g. int x[];
+        B = Bounds((int64_t)Size);
+    }
+  } else if (auto *CE = dyn_cast<ConstantExpr>(C)) {
+    switch (CE->getOpcode()) {
+    case Instruction::GetElementPtr: {
+      auto *GEP = cast<GEPOperator>(CE);
+      B = getPtrBounds(GEP->getPointerOperand());
+      if (!B.isUnknown() && !B.isNonFat()) {
+        APInt Off(64, 0);
+        if (GEP->accumulateConstantOffset(DL, Off) && !Off.isNegative())
+          B.sub(Off.getZExtValue());
+        else
+          B = Bounds::unknown();
+      }
+      break;
+    }
+    case Instruction::BitCast:
+    case Instruction::AddrSpaceCast:
+      B = getConstantPtrBounds(CE->getOperand(0));
+      break;
+    default:
+      B = Bounds::nonFat(); // inttoptr / extract / ... -> assumed non-fat
+      break;
+    }
+  } else if (!isa<GlobalValue>(C)) {
+    B = Bounds::nonFat();
+  }
+  boundsInfo[C] = B.ub;
+  return B;
+}
+
+// Statically (approx.) bound the object pointed to by `Ptr` (LowFat.cpp:537-621).
+Bounds FlexFat::getPtrBounds(Value *Ptr) {
+  auto It = boundsInfo.find(Ptr);
+  if (It != boundsInfo.end())
+    return Bounds(It->second);
+
+  Bounds B = Bounds::nonFat();
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+    B = getPtrBounds(GEP->getPointerOperand());
+    // -flexfat-no-check-fields: trust an input-pointer base (empty bounds) up to
+    // the indexed object -- the opaque-pointer analog of [0, sizeof(*ptr)].
+    if (ClNoCheckFields && B.isEmpty() && GEP->getSourceElementType()->isSized())
+      B = Bounds((int64_t)DL.getTypeAllocSize(GEP->getSourceElementType()));
+    if (!B.isUnknown() && !B.isNonFat()) {
+      APInt Off(64, 0);
+      if (cast<GEPOperator>(GEP)->accumulateConstantOffset(DL, Off) &&
+          !Off.isNegative())
+        B.sub(Off.getZExtValue());
+      else
+        B = Bounds::unknown();
+    }
+  } else if (auto *AI = dyn_cast<AllocaInst>(Ptr)) {
+    auto *CI = dyn_cast<ConstantInt>(AI->getArraySize());
+    if (CI && AI->getAllocatedType()->isSized())
+      B = Bounds((int64_t)(CI->getZExtValue() *
+                           DL.getTypeAllocSize(AI->getAllocatedType())));
+    else
+      B = getInputPtrBounds(Ptr);
+  } else if (auto *BC = dyn_cast<BitCastInst>(Ptr)) {
+    B = getPtrBounds(BC->getOperand(0));
+  } else if (auto *ASC = dyn_cast<AddrSpaceCastInst>(Ptr)) {
+    B = getPtrBounds(ASC->getOperand(0));
+  } else if (auto *Sel = dyn_cast<SelectInst>(Ptr)) {
+    B = Bounds::min(getPtrBounds(Sel->getTrueValue()),
+                    getPtrBounds(Sel->getFalseValue()));
+  } else if (auto *C = dyn_cast<Constant>(Ptr)) {
+    B = getConstantPtrBounds(C);
+  } else if (isa<Argument>(Ptr) || isa<LoadInst>(Ptr) ||
+             isa<IntToPtrInst>(Ptr) || isa<ExtractValueInst>(Ptr) ||
+             isa<ExtractElementInst>(Ptr)) {
+    B = getInputPtrBounds(Ptr);
+  } else if (auto *CB = dyn_cast<CallBase>(Ptr)) {
+    uint64_t Size;
+    if (isAllocationFn(CB, &TLI) && getObjectSize(CB, Size, DL, &TLI))
+      B = Bounds((int64_t)Size);
+    else
+      B = getInputPtrBounds(Ptr);
+  } else if (auto *PHI = dyn_cast<PHINode>(Ptr)) {
+    B = Bounds::nonFat();
+    boundsInfo[Ptr] = Bounds::UNKNOWN; // break cycles while recursing
+    for (unsigned i = 0, n = PHI->getNumIncomingValues(); i < n; i++) {
+      B = Bounds::min(B, getPtrBounds(PHI->getIncomingValue(i)));
+      if (B.isUnknown())
+        break;
+    }
+    boundsInfo.erase(Ptr);
+  }
+  // else: unknown pointer producer -> non-fat (matches the reference default).
+
+  boundsInfo[Ptr] = B.ub;
+  return B;
 }
 
 // Reduce `Ptr` to its object base (LowFat.cpp:718-808). NULL => non-fat.
@@ -236,15 +409,29 @@ void FlexFat::insertBoundsCheck(Instruction *I, Value *Ptr, unsigned Info,
 
 bool FlexFat::run() {
   // Plan a check per interesting memory op first (getInterestingInsts,
-  // LowFat.cpp:892-1021, LOAD/STORE subset). Skip nosanitize-tagged accesses.
+  // LowFat.cpp:892-1021, LOAD/STORE subset). Skip nosanitize-tagged accesses,
+  // and -- the Unit 8 elision -- accesses the static bounds analysis proves
+  // in-bounds (addToPlan, LowFat.cpp:870-889; access_size defaults to 0).
   SmallVector<std::tuple<Instruction *, Value *, unsigned>, 16> Plan;
   for (Instruction &I : instructions(F)) {
     if (I.getMetadata(LLVMContext::MD_nosanitize))
       continue;
-    if (auto *LD = dyn_cast<LoadInst>(&I))
-      Plan.emplace_back(&I, LD->getPointerOperand(), kInfoRead);
-    else if (auto *ST = dyn_cast<StoreInst>(&I))
-      Plan.emplace_back(&I, ST->getPointerOperand(), kInfoWrite);
+    Value *Ptr = nullptr;
+    unsigned Info = 0;
+    if (auto *LD = dyn_cast<LoadInst>(&I)) {
+      Ptr = LD->getPointerOperand();
+      Info = kInfoRead;
+    } else if (auto *ST = dyn_cast<StoreInst>(&I)) {
+      Ptr = ST->getPointerOperand();
+      Info = kInfoWrite;
+    } else {
+      continue;
+    }
+    if (!ClNoElide && getPtrBounds(Ptr).isInBounds(/*access_size=*/0)) {
+      ++NumElided;
+      continue; // provably in-bounds: no check
+    }
+    Plan.emplace_back(&I, Ptr, Info);
   }
 
   bool Changed = false;
@@ -253,6 +440,7 @@ bool FlexFat::run() {
     if (!Base || isa<ConstantPointerNull>(Base))
       continue; // non-fat pointer: no check
     insertBoundsCheck(I, Ptr, Info, Base);
+    ++NumChecks;
     Changed = true;
   }
   return Changed;
