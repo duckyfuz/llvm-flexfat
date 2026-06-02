@@ -100,3 +100,32 @@ No new LLVM-tree touchpoints; all within `compiler-rt/`.
 - **+** `compiler-rt/test/flexfat/TestCases/oob_report.c` — e2e exact error-text CHECK (fixed addresses → deterministic).
 - **~** `compiler-rt/test/flexfat/lit.cfg.py` — add `%clang_flexfat_runtime` (links the runtime source until the Unit-6 driver flag).
 - **~** `compiler-rt/test/flexfat/lit.site.cfg.py.in` — pass `flexfat_src_dir`.
+
+## Unit 6 — clang driver wiring (`-fsanitize=flexfat`)
+
+First unit to touch the **clang** tree. Makes `-fsanitize=flexfat` a real flag:
+recognized, x86_64-gated, code-model/feature-forced, pass-scheduled, and
+runtime-linked. Pass body stays a no-op (instrumentation lands later).
+
+### Sanitizer registration + driver args
+- **~** `clang/include/clang/Basic/Sanitizers.def` — `SANITIZER("flexfat", FlexFat)`.
+- **~** `clang/lib/Driver/SanitizerArgs.cpp` — `lowfat` deprecated alias → `flexfat` (in `parseArgValues`, via `warn_drv_deprecated_arg`); in `addArgs`, when flexfat is enabled, force `-mcmodel=large` + `-target-feature +lzcnt/+bmi/+bmi2`. (`-fsanitize=flexfat` itself reaches cc1 automatically via `toString(Sanitizers)`, which is what enables the pass in BackendUtil.)
+- **~** `clang/include/clang/Driver/SanitizerArgs.h` — `needsFlexfatRt()` accessor.
+
+### x86_64 toolchain gate
+- **~** `clang/lib/Driver/ToolChains/Linux.cpp` — `Linux::getSupportedSanitizers` adds `FlexFat` only when `IsX86_64`; elsewhere the driver emits `unsupported option '-fsanitize=flexfat' for target '…'`.
+
+### NPM pass scheduling (reproduce EP_ScalarOptimizerLate + EP_EnabledOnOptLevel0)
+- **~** `llvm/include/llvm/Transforms/Instrumentation/FlexFat.h`, `llvm/lib/Transforms/Instrumentation/FlexFat.cpp` — convert the no-op pass **module → function** so it can sit at the function-level ScalarOptimizerLate extension point (body unchanged: still `PreservedAnalyses::all()`).
+- **~** `llvm/lib/Passes/PassRegistry.def` — move `flexfat` from `MODULE_PASS` to `FUNCTION_PASS` (`opt -passes=flexfat` still works via top-level function-pass adaptation).
+- **~** `clang/lib/CodeGen/BackendUtil.cpp` — `#include FlexFat.h`; `addFlexFat()` registers the pass via `registerScalarOptimizerLateEPCallback` (this tree fires it at both -O0 and -O1+), called next to `addSanitizers`.
+
+### Runtime linking
+- **~** `clang/lib/Driver/ToolChains/CommonArgs.cpp` — `collectSanitizerRuntimes` pushes `flexfat` to `StaticRuntimes` (whole-archived, pulling in the malloc interposers + `.preinit_array` constructor); its libc deps come from the existing `linkSanitizerRuntimeDeps`.
+
+### Tests
+- **+** `clang/test/Driver/fsanitize-flexfat.c` — forwarding to cc1, forced `-mcmodel=large` + lzcnt/bmi/bmi2, x86_64 gate, runtime link line, deprecated `lowfat` alias.
+- **+** `clang/test/CodeGen/flexfat-pass-order.c` — `-fdebug-pass-manager` proves FlexFat runs after `SROAPass` at -O2 and still runs at -O0.
+- **~** `compiler-rt/test/flexfat/lit.cfg.py` — re-point `%clang_flexfat_runtime` to the real `-fsanitize=flexfat` path (+`-I` so direct `lowfat_oob_error` callers see `<lowfat.h>`).
+- **~** `compiler-rt/test/flexfat/TestCases/sentinel.c` — drop `XFAIL`; now a real end-to-end pass through the flag.
+- **~** `compiler-rt/test/flexfat/TestCases/oob_report.c` — comment-only; now exercises the flag instead of the direct-compile workaround.

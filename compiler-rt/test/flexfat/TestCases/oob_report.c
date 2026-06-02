@@ -2,9 +2,9 @@
 //
 // Triggers a synthetic heap overflow with FIXED addresses (no ASLR) so the
 // LOWFAT ERROR: report is fully deterministic and can be pinned character-for-
-// character. The pass-instrumented path arrives in Unit 9; here we link the
-// runtime and call lowfat_oob_error directly. stderr is piped (not a TTY), so
-// the report is uncolored.
+// character. The pass-instrumented path arrives in Unit 9; here we build with
+// -fsanitize=flexfat (which links libclang_rt.flexfat) and call lowfat_oob_error
+// directly. stderr is piped (not a TTY), so the report is uncolored.
 //
 // RUN: %clang_flexfat_runtime %s -o %t
 // RUN: not --crash %run %t > %t.out 2>&1

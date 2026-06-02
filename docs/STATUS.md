@@ -11,6 +11,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 3 | Runtime pointer-encoding core: `lowfat_index/size/magic/base/buffer_size`, tables @ `0x200000`/`0x300000`, region reservation, constructor/preinit; codegen parity (POW2 `and`, non-POW2 `mulq`, no `div`) | ✅ |
 | 4 | Heap allocator: per-class bump+freelist, lazy `mprotect` commit, big-object de-page, realloc/calloc/alignment-family/strdup, libc fallback, `LOWFAT_ALIAS` interposition; fast-path asm parity (no `div`, `clzll`→`lzcnt`, freelist LIFO, per-region mutex) | ✅ |
 | 5 | memops (`lowfat_memset/memmove/memcpy`), the five classifiers + `lowfat_kind`, and the OOB reporter (`lowfat_oob_error/warning/check`); **reporter output byte-identical to the reference** (char-diff clean for overflow + underflow) | ✅ |
+| 6 | clang driver wiring: `-fsanitize=flexfat` (+ deprecated `lowfat` alias) recognized, x86_64-gated, forces `-mcmodel=large` + lzcnt/bmi/bmi2, links `libclang_rt.flexfat`, schedules the (no-op) pass at the reference's ScalarOptimizerLate point at every -O; e2e sentinel un-XFAILed | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -55,6 +56,36 @@ reference (`lowfat_oob_error` → `lowfat_error` → `abort()`) and the MSET
 FlexFat MODE, not Unit 5**. Decision: the default stays SIGABRT/6 for
 reference + MSET-original parity; an exit-1 mode, if added, must be gated behind a
 mode flag and its own MSET config — do not change the default silently.
+
+## Pass placement & the module→function decision (Unit 6, flagged)
+The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at
+`EP_ScalarOptimizerLate` **+** `EP_EnabledOnOptLevel0` — i.e. as a per-function
+transformation that runs right after mem2reg and stays visible to the rest of
+the optimizer (LowFat *wants* its checks optimized — CSE'd, hoisted — which is
+load-bearing for the performance-parity mandate), at every optimization level.
+
+`EP_ScalarOptimizerLate` is a **function-level** extension point. The new-PM
+analog, `registerScalarOptimizerLateEPCallback`, hands out a
+`FunctionPassManager`, so the pass must be a **function pass**. Unit 1 stood
+`FlexFatPass` up as a no-op *module* pass; Unit 6 converts it to a no-op
+*function* pass (body unchanged) so it can occupy that slot faithfully. This is
+correct for FlexFat specifically: its hot-path load/store checks only reference
+the runtime-provided tables (`_LOWFAT_SIZES`@`0x200000`,
+`_LOWFAT_MAGICS`@`0x300000`) as **externals**, so the per-function
+instrumentation needs no module-level setup (unlike ASan, which builds its own
+globals/ctors and is therefore a module pass at `OptimizerLast`).
+
+Verified in this tree's `PassBuilderPipelines.cpp`: `buildO0DefaultPipeline`
+invokes the ScalarOptimizerLate callbacks too, so the pass runs at `-O0` —
+reproducing `EP_EnabledOnOptLevel0` without a separate registration.
+`clang/test/CodeGen/flexfat-pass-order.c` pins this: at `-O2` FlexFatPass runs
+after `SROAPass`, and at `-O0` it still runs.
+
+**To revisit when the real instrumentation lands:** global *lowfatification*
+(re-laying-out globals into lowfat regions) is genuinely module-scoped; if/when
+that is ported it will be a **separate module pass** at a module extension
+point, not a reason to move the hot-path function instrumentation off
+ScalarOptimizerLate.
 
 ## ⚠ Dependency: SHM is a hard prerequisite for the stack unit
 The `/dev/shm` aliasing we skipped for the tables is **not** skippable for stack
