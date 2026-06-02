@@ -32,11 +32,16 @@ entry:
 ;
 ; Inlined lowfat_oob_check: idx = base>>35, size table reload, diff = ptr-base,
 ; unsigned (diff >=u size) compare, weighted branch to the cold error block.
+; The error block (the TRUE successor, containing lowfat_oob_error) must carry
+; the COLD weight: !prof = {1, 2000000000}, i.e. error-edge=1, fast-edge=2e9.
+; This direction is intentionally inverted from the reference (see STATUS.md).
 ; CHECK:      sub i64
 ; CHECK:      icmp uge i64
-; CHECK:      br i1 %{{.*}}, label %{{.*}}, label %{{.*}}, !prof ![[W:[0-9]+]]
+; CHECK:      br i1 %{{.*}}, label %[[ERR:[0-9]+]], label %[[CONT:[0-9]+]], !prof ![[W:[0-9]+]]
+; CHECK:    [[ERR]]:
 ; CHECK:      call void @lowfat_oob_error(i32 0, ptr %p, ptr %{{.*}})
 ; CHECK-NEXT: unreachable
+; CHECK:    [[CONT]]:
 ; CHECK:      load i32, ptr %p
 ;
 ; CHECK:      ![[W]] = !{!"branch_weights", i32 1, i32 2000000000}

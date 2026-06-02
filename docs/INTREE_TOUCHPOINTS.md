@@ -145,6 +145,9 @@ build/driver touchpoints; entirely within the existing pass + test surfaces.
 - **+** `llvm/test/Instrumentation/FlexFat/X86/nonfat.ll` — alloca/global accesses are left uninstrumented (NULL base ⇒ non-fat ⇒ check dropped).
 - **−** `llvm/test/Instrumentation/FlexFat/X86/noop.ll` — the Unit-1 "pass is a no-op on a load/store" sentinel; obsolete now that load/store are instrumented (superseded by `nonfat.ll`).
 
+### Codegen-placement test (surface 1, asm level)
+- **+** `clang/test/CodeGen/flexfat-error-block-placement.c` — asserts at the x86_64 asm level that the cold `lowfat_oob_error` block is emitted out of line (after the fast-path `ret`), guarding the intentionally-inverted branch-weight direction against a future `MachineBlockPlacement` change.
+
 ### e2e tests (surface 3)
 - **+** `compiler-rt/test/flexfat/TestCases/heap_oob.c` — the SPEC §1.4 / README heap example (`noinline get()`) must trap with the deterministic report fields (`operation=read`, `size=16`, `overflow=+84`, `(heap)`); addresses are ASLR-random and regex-matched.
 - **+** `compiler-rt/test/flexfat/TestCases/in_bounds.c` — an in-bounds program exits 0 (no false positive).

@@ -105,14 +105,22 @@ divergences from the LLVM-4.0 reference — all justified, none on the fast path
   `lowfat_base`/`lowfat_oob_check` symbols (SPEC §5.3 lists those as pass-emitted
   — we inline them away; `lowfat_oob_error` is still referenced by name).
 
-- **Branch weights: error edge weighted *cold* (`1:2000000000`), not hot.** The
-  reference weights the OOB (error) edge `2000000000` and relies on LLVM-4.0's
-  noreturn-cold block-placement heuristic to override that. **LLVM 23's
-  `MachineBlockPlacement` honours the explicit weight over the heuristic** — so
-  weighting the error edge hot puts it on the fall-through (a fast-path branch
-  regression, observed). We weight the error edge cold; same `2e9:1` intent,
-  and the fast-path asm then matches the reference (`jae` to an out-of-line
-  error block, fast path falls through to the access).
+- **Branch weights: error edge weighted *cold* (`1:2000000000`) — intentionally
+  INVERTED from the reference.** The reference weights the OOB (error) edge
+  `2000000000` (hot) and relies on LLVM-4.0's noreturn-cold block-placement
+  heuristic to override that for placement. **LLVM 23's `MachineBlockPlacement`
+  honours the explicit branch weight over that heuristic** — so emitting the
+  reference's direction verbatim puts the cold error block (and its
+  `lowfat_oob_error` call) on the hot fall-through, a fast-path branch regression
+  (observed in `-S`). We therefore invert the direction: the error edge gets the
+  cold weight `1`, the fast edge `2000000000`. Same `2e9:1` magnitude/intent; the
+  fast-path asm then matches the reference (`jae` to an out-of-line error block,
+  fast path falls through to the access). This is pinned three ways so a future
+  backend change cannot silently regress the hot path: `load.ll` / `store.ll`
+  assert the IR weights in the emitted (error-edge-cold) direction and that the
+  error block is the `!prof`-cold TRUE successor, and
+  `clang/test/CodeGen/flexfat-error-block-placement.c` asserts at the asm level
+  that the `lowfat_oob_error` call is emitted *after* the fast-path `ret`.
 
 - **Base computation is non-POW2 (our default); the only built reference clang
   is POW2.** Side-by-side on the canonical `char get(char*q,int i){return q[i];}`:

@@ -23,11 +23,15 @@ entry:
 ; CHECK:      getelementptr i64, ptr inttoptr (i64 2097152 to ptr), i64
 ; CHECK:      inttoptr i64 %{{.*}} to ptr
 ;
-; The check validates the access pointer %q; info = WRITE = 1.
+; The check validates the access pointer %q; info = WRITE = 1. The error block
+; (TRUE successor) carries the COLD weight: !prof = {1, 2000000000} (error-edge=1,
+; fast-edge=2e9), intentionally inverted from the reference (see STATUS.md).
 ; CHECK:      icmp uge i64
-; CHECK:      br i1 %{{.*}}, label %{{.*}}, label %{{.*}}, !prof ![[W:[0-9]+]]
+; CHECK:      br i1 %{{.*}}, label %[[ERR:[0-9]+]], label %[[CONT:[0-9]+]], !prof ![[W:[0-9]+]]
+; CHECK:    [[ERR]]:
 ; CHECK:      call void @lowfat_oob_error(i32 1, ptr %q, ptr %{{.*}})
 ; CHECK-NEXT: unreachable
+; CHECK:    [[CONT]]:
 ; CHECK:      store i8 42, ptr %q
 ;
 ; CHECK:      ![[W]] = !{!"branch_weights", i32 1, i32 2000000000}
