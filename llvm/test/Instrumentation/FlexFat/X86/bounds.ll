@@ -2,7 +2,10 @@
 ; genuine OOB / unprovable accesses still get a check. The asymmetry is the
 ; point: positives assert the check is GONE, negatives assert it REMAINS.
 ;
-; RUN: opt < %s -passes=flexfat -S | FileCheck %s
+; (Also a corpus canary: none of these producers may trip the unrecognized-
+; producer fallback -- --implicit-check-not="unknown pointer".)
+;
+; RUN: opt < %s -passes=flexfat -S 2>&1 | FileCheck %s --implicit-check-not="unknown pointer"
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"

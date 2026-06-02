@@ -167,10 +167,33 @@ Notes / opaque-pointer divergences:
   TLI-only recognition, LLVM 23's `getObjectSize` reads `allocsize`/`allockind`;
   clang emits them, so heap accesses size correctly. Hand-written test IR must
   carry them (see `bounds.ll`'s `malloc` declaration).
-- **Input pointers are trusted at offset 0.** Default input bounds are `[0,0]`,
-  so a *direct* deref of an argument/loaded pointer is elided (the reference's
-  behavior); only positive offsets off an input pointer are checked. Unknown
-  pointer producers default to `NONFAT` (no check), also matching the reference.
+- **Input pointers are trusted at offset 0 (a detection/overhead tradeoff
+  inherited from the reference).** Default input bounds are `[0,0]`, so a *direct*
+  deref of an argument / loaded pointer / `inttoptr` / opaque-call result is
+  elided; only positive offsets off such a pointer are checked. **Missed-bug
+  class:** an already-out-of-bounds pointer passed across a function boundary and
+  dereferenced *at its first byte* (`*p`, offset 0) is not caught — e.g. a caller
+  forms `arr + 1000` for a 10-element array and the callee does `*p`. The
+  instant a positive offset is applied (`p[k]`, `k>0`) the check returns.
+  Verified by `unknown_producer.ll` (elided) vs its `arg_offset` contrast
+  (checked). This is the reference's behavior; finding 3 confirmed it.
+- **Truly-unrecognized producers default to `NONFAT` (elide) — but no longer
+  silently.** Finding 3 confirmed `getPtrBounds` initializes `nonFat()` and the
+  fall-through `else` leaves it there (LowFat.cpp:544 + :612-617), so an IR form
+  the analysis doesn't recognize is elided. We keep that default for parity, but
+  the fallback now emits a real (FileCheck-able) `(BUG) unknown pointer type`
+  warning (port of the reference's `LowFatWarning`) **and** bumps a
+  `NumUnknownProducers` statistic. **Missed-bug class:** an OOB access through a
+  pointer from an unrecognized producer is missed — so this firing means our
+  recognition list is incomplete for the IR we see (more likely on LLVM 23 /
+  opaque pointers than on 4.0). `check-flexfat` asserts `NumUnknownProducers == 0`
+  over the corpus: the IR canaries (`bounds.ll`, `unknown_producer.ll`,
+  `--implicit-check-not="unknown pointer"`) and the e2e canary
+  (`no_unknown_producers.c`, a producer-diverse `-O2` compile). Empirically 0
+  fallbacks across the e2e and a varied real corpus (linked lists, atomics,
+  C++ STL). `unknown_producer_diag.ll` is the negative control (an `atomicrmw`
+  result trips it) proving the signal works. If the canary ever trips, the fix
+  is to add that producer to `getPtrBounds`, not to ship a silent elision.
 
 ## Pass placement & the module→function decision (Unit 6, flagged)
 The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at

@@ -36,6 +36,8 @@
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -52,6 +54,29 @@ using namespace llvm;
 
 STATISTIC(NumChecks, "Number of FlexFat bounds checks inserted");
 STATISTIC(NumElided, "Number of FlexFat bounds checks elided (proven in-bounds)");
+// Bumped whenever getPtrBounds hits a pointer producer it does not recognize and
+// falls back to NONFAT (elide). On LLVM 23 / opaque pointers, IR forms have
+// shifted vs the 4.0 reference, so this firing means the recognition list is
+// incomplete relative to the IR we actually see -- a missing case to add, not a
+// silent unsound elision. check-flexfat asserts this stays 0 over the corpus.
+STATISTIC(NumUnknownProducers,
+          "Number of unrecognized pointer producers (bounds analysis fell back "
+          "to NONFAT / no check)");
+
+// A real, FileCheck-able warning (port of the reference's LowFatWarning) so the
+// unrecognized-producer fallback is a visible signal, not a silent elision.
+class FlexFatDiag : public DiagnosticInfo {
+  const Twine &Msg;
+
+public:
+  explicit FlexFatDiag(const Twine &M LLVM_LIFETIME_BOUND)
+      : DiagnosticInfo(getKind(), DS_Warning), Msg(M) {}
+  void print(DiagnosticPrinter &DP) const override { DP << Msg; }
+  static int getKind() {
+    static int K = getNextAvailablePluginDiagnosticKind();
+    return K;
+  }
+};
 
 // -flexfat-no-check-fields: trust input pointers up to the indexed object type,
 // eliding checks on in-bounds field accesses (LowFat -lowfat-no-check-fields).
@@ -310,8 +335,19 @@ Bounds FlexFat::getPtrBounds(Value *Ptr) {
         break;
     }
     boundsInfo.erase(Ptr);
+  } else {
+    // Unrecognized producer. Match the reference's default (NONFAT -> elide,
+    // B is already nonFat), but make it a visible signal: this means our
+    // recognition list is incomplete for the IR we are seeing, not that the
+    // pointer is provably safe. See the NumUnknownProducers note above.
+    ++NumUnknownProducers;
+    StringRef OpName = "value";
+    if (auto *Inst = dyn_cast<Instruction>(Ptr))
+      OpName = Inst->getOpcodeName();
+    Ctx.diagnose(FlexFatDiag(
+        "FlexFat: (BUG) unknown pointer type in static bounds analysis ('" +
+        OpName + "'); bounds-check elided -- add this producer to getPtrBounds"));
   }
-  // else: unknown pointer producer -> non-fat (matches the reference default).
 
   boundsInfo[Ptr] = B.ub;
   return B;
