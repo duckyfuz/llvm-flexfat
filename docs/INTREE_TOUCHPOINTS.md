@@ -125,7 +125,8 @@ runtime-linked. Pass body stays a no-op (instrumentation lands later).
 
 ### Tests
 - **+** `clang/test/Driver/fsanitize-flexfat.c` — forwarding to cc1, forced `-mcmodel=large` + lzcnt/bmi/bmi2, x86_64 gate, runtime link line, deprecated `lowfat` alias.
-- **+** `clang/test/CodeGen/flexfat-pass-order.c` — `-fdebug-pass-manager` proves FlexFat runs after `SROAPass` at -O2 and still runs at -O0.
+- **+** `clang/test/Driver/fsanitize-lowfat-deprecated.c` — the `lowfat` alias emits a stable non-fatal deprecation warning, a real `-c` compile still succeeds (exit 0, no `error:`), and it lowers to the flexfat cc1 configuration. (MSET-safety rationale recorded in `docs/STATUS.md`.)
+- **+** `clang/test/CodeGen/flexfat-pass-order.c` — `-fdebug-pass-manager` proves FlexFat runs after `SROAPass` and after the CGSCC `InlinerPass` at -O2, and still runs at -O0.
 - **~** `compiler-rt/test/flexfat/lit.cfg.py` — re-point `%clang_flexfat_runtime` to the real `-fsanitize=flexfat` path (+`-I` so direct `lowfat_oob_error` callers see `<lowfat.h>`).
 - **~** `compiler-rt/test/flexfat/TestCases/sentinel.c` — drop `XFAIL`; now a real end-to-end pass through the flag.
 - **~** `compiler-rt/test/flexfat/TestCases/oob_report.c` — comment-only; now exercises the flag instead of the direct-compile workaround.

@@ -57,6 +57,36 @@ FlexFat MODE, not Unit 5**. Decision: the default stays SIGABRT/6 for
 reference + MSET-original parity; an exit-1 mode, if added, must be gated behind a
 mode flag and its own MSET config — do not change the default silently.
 
+## `-fsanitize=lowfat` deprecated alias & MSET safety (Unit 6, verified)
+`-fsanitize=lowfat` is a deprecated alias for `-fsanitize=flexfat`
+(`SanitizerArgs.cpp`, `parseArgValues`): it maps to the same `SanitizerKind`,
+forces the same code model + features, and emits a stable **non-fatal** warning —
+`argument '-fsanitize=lowfat' is deprecated, use '-fsanitize=flexfat' instead
+[-Wdeprecated]`. Compilation still succeeds (exit 0). Pinned by
+`clang/test/Driver/fsanitize-lowfat-deprecated.c` (real `-c` compile asserts
+exit 0 + exact warning text + no `error:`, plus cc1 equivalence to flexfat).
+
+**This does not break the MSET differential harness (Unit 11).** Checked the
+committed configs `MSET/sanitizer_configs/lowfat_original.xml` and `lowfat.xml`:
+- Their `compile_cmd`s carry **no `-Werror`** (only `-Wl,-T,after_text.ld` and
+  `-g`), and the MSET evaluator injects none (`grep -r Werror MSET/src` is empty).
+  So the `[-Wdeprecated]` warning stays a warning — the build does not fail. (If
+  it *were* promoted via `-Werror`/`-Werror=deprecated`, it would become an error
+  and break the compile; it is not, on this path.)
+- MSET keys "bug detected" **solely on the run process's wait-status**
+  (`src/evaluator/sanitizer.cpp:459-489`: `WIFSIGNALED → WTERMSIG`, else
+  `WEXITSTATUS`) matched against `<bug_detected_exit_values>` (`6` = SIGABRT). It
+  never inspects compiler stderr, and contains no stderr/`LOWFAT ERROR` text
+  match. The deprecation warning is emitted at *compile* time on clang's stderr —
+  a different process from the `<run>` step whose status is judged — so it cannot
+  be misread as a bug-detection signal.
+- As committed, both configs point `compile_cmd` at the **reference** LowFat clang
+  (`llvm-lowfat/build/bin/clang` and `../sanitizers/lowfat/clang`), where
+  `-fsanitize=lowfat` is native and *no* deprecation fires. The warning appears
+  only if a Unit-11 config is re-pointed at *our* flexfat clang via the alias —
+  and even then it is harmless per the two points above. A re-pointed config can
+  simply use `-fsanitize=flexfat` to avoid the warning entirely.
+
 ## Pass placement & the module→function decision (Unit 6, flagged)
 The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at
 `EP_ScalarOptimizerLate` **+** `EP_EnabledOnOptLevel0` — i.e. as a per-function
