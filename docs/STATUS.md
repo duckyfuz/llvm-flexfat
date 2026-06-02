@@ -12,6 +12,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 4 | Heap allocator: per-class bump+freelist, lazy `mprotect` commit, big-object de-page, realloc/calloc/alignment-family/strdup, libc fallback, `LOWFAT_ALIAS` interposition; fast-path asm parity (no `div`, `clzll`→`lzcnt`, freelist LIFO, per-region mutex) | ✅ |
 | 5 | memops (`lowfat_memset/memmove/memcpy`), the five classifiers + `lowfat_kind`, and the OOB reporter (`lowfat_oob_error/warning/check`); **reporter output byte-identical to the reference** (char-diff clean for overflow + underflow) | ✅ |
 | 6 | clang driver wiring: `-fsanitize=flexfat` (+ deprecated `lowfat` alias) recognized, x86_64-gated, forces `-mcmodel=large` + lzcnt/bmi/bmi2, links `libclang_rt.flexfat`, schedules the (no-op) pass at the reference's ScalarOptimizerLate point at every -O; e2e sentinel un-XFAILed | ✅ |
+| 7 | load/store bounds-check instrumentation: `calcBasePtr` + inlined non-POW2 `lowfat_base` + inlined `lowfat_oob_check`; heap OOB traps with the exact report, in-bounds exits 0; **fast-path asm strategy-identical to the reference** (shr/table-load/single unsigned compare/`jae` to out-of-line error, no fast-path call, no div) | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -86,6 +87,55 @@ committed configs `MSET/sanitizer_configs/lowfat_original.xml` and `lowfat.xml`:
   only if a Unit-11 config is re-pointed at *our* flexfat clang via the alias —
   and even then it is harmless per the two points above. A re-pointed config can
   simply use `-fsanitize=flexfat` to avoid the warning entirely.
+
+## Load/store instrumentation & codegen parity (Unit 7)
+The LOAD/STORE bounds check is implemented in `FlexFat.cpp`. Acceptance was met
+(IR tests, trap/in-bounds e2e, fast-path asm parity), with these deliberate
+divergences from the LLVM-4.0 reference — all justified, none on the fast path:
+
+- **Inline IR instead of `call lowfat_base`/`lowfat_oob_check` + `addLowFatFuncs`.**
+  The reference emits calls to alwaysinline helpers and relies on a bundled
+  post-pass inliner to inline them. FlexFat is a New-PM *function* pass at
+  ScalarOptimizerLate with no inliner after it (the Unit 6 decision), and a
+  function pass cannot safely add module-level functions. So we emit the
+  *post-inline* IR directly — the `lowfat_base` reciprocal-multiply and the
+  `oob_check` body inline at the access site. The only out-of-line callee is
+  `lowfat_oob_error`, in the cold error block, exactly as in the reference. Net
+  effect on generated code is identical; instrumented objects just don't carry
+  `lowfat_base`/`lowfat_oob_check` symbols (SPEC §5.3 lists those as pass-emitted
+  — we inline them away; `lowfat_oob_error` is still referenced by name).
+
+- **Branch weights: error edge weighted *cold* (`1:2000000000`), not hot.** The
+  reference weights the OOB (error) edge `2000000000` and relies on LLVM-4.0's
+  noreturn-cold block-placement heuristic to override that. **LLVM 23's
+  `MachineBlockPlacement` honours the explicit weight over the heuristic** — so
+  weighting the error edge hot puts it on the fall-through (a fast-path branch
+  regression, observed). We weight the error edge cold; same `2e9:1` intent,
+  and the fast-path asm then matches the reference (`jae` to an out-of-line
+  error block, fast path falls through to the access).
+
+- **Base computation is non-POW2 (our default); the only built reference clang
+  is POW2.** Side-by-side on the canonical `char get(char*q,int i){return q[i];}`:
+  the *check* is identical (`shr $35`, `_LOWFAT_SIZES[idx]` absolute-addressed
+  load, single `cmpq … , diff`, `jae` to the out-of-line error block, no
+  fast-path call, no div). The *base* differs by **variant**: ours emits the
+  non-POW2 reciprocal multiply (`mulxq` + `imulq`, using `_LOWFAT_MAGICS`@`0x300000`
+  and `_LOWFAT_SIZES`@`0x200000`); the POW2 reference emits the bitmask `andq`.
+  Both are div-free and inlined — "the original's choice per variant". Ours
+  matches the SPEC §1.4 reciprocal and `lowfat.h`'s `lowfat_base`.
+
+- **Cold-block call is large-model indirect** (`movabsq $lowfat_oob_error, %rax;
+  callq *%rax`) vs the reference's direct `callq`, because the flexfat driver
+  forces `-mcmodel=large` (required by LowFat's high addresses). This is in the
+  cold error block only — not on the fast path. (The PIC/GOT setup at function
+  entry seen under the default PIE vanishes with `-no-pie`; it is platform PIE
+  overhead, not from the instrumentation.)
+
+- **`access_size` defaults to 0** (check the byte at `ptr`).
+  `-lowfat-check-whole-access` (`size = sizeof(access)-1`) and the §4.2 static
+  bounds elimination of provably-safe checks are deferred. Without §4.2 every
+  fat load/store is checked; alloca/global/constant bases are non-fat (NULL
+  base ⇒ check dropped) since stack/global lowfatification is a later unit.
 
 ## Pass placement & the module→function decision (Unit 6, flagged)
 The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at

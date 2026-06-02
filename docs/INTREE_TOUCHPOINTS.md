@@ -130,3 +130,21 @@ runtime-linked. Pass body stays a no-op (instrumentation lands later).
 - **~** `compiler-rt/test/flexfat/lit.cfg.py` — re-point `%clang_flexfat_runtime` to the real `-fsanitize=flexfat` path (+`-I` so direct `lowfat_oob_error` callers see `<lowfat.h>`).
 - **~** `compiler-rt/test/flexfat/TestCases/sentinel.c` — drop `XFAIL`; now a real end-to-end pass through the flag.
 - **~** `compiler-rt/test/flexfat/TestCases/oob_report.c` — comment-only; now exercises the flag instead of the direct-compile workaround.
+
+## Unit 7 — load/store bounds-check instrumentation
+
+First unit where the pass does real work (the LOAD/STORE path). No new
+build/driver touchpoints; entirely within the existing pass + test surfaces.
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp` — replace the no-op body with the LOAD/STORE instrumentation: `getInterestingInsts` (plan a check per load/store, skip `nosanitize`), `calcBasePtr` (recurse GEP/bitcast/addrspacecast/select/PHI; an allocation is its own base; alloca/global/constant → non-fat for now; argument/load/inttoptr/extract → inline base), the inlined **non-POW2** `lowfat_base` (reciprocal multiply, no div), and the inlined `lowfat_oob_check` (`idx = base>>35`, `_LOWFAT_SIZES` load @ `0x200000`, `diff = ptr-base`, unsigned `diff >=u size` compare, weighted branch to a cold `lowfat_oob_error` block + `unreachable`). Uses `TargetLibraryAnalysis`, `MemoryBuiltins` (`isAllocationFn`), and `SplitBlockAndInsertIfThen`. (`LLVMInstrumentation` already links `Analysis`/`TransformUtils`.)
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/load.ll` — single load through a fat pointer argument: the inlined base + check sequence + `2000000000:1` branch weights.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/store.ll` — single store through a GEP: base taken from the GEP's pointer operand; `info = WRITE = 1`.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/nonfat.ll` — alloca/global accesses are left uninstrumented (NULL base ⇒ non-fat ⇒ check dropped).
+- **−** `llvm/test/Instrumentation/FlexFat/X86/noop.ll` — the Unit-1 "pass is a no-op on a load/store" sentinel; obsolete now that load/store are instrumented (superseded by `nonfat.ll`).
+
+### e2e tests (surface 3)
+- **+** `compiler-rt/test/flexfat/TestCases/heap_oob.c` — the SPEC §1.4 / README heap example (`noinline get()`) must trap with the deterministic report fields (`operation=read`, `size=16`, `overflow=+84`, `(heap)`); addresses are ASLR-random and regex-matched.
+- **+** `compiler-rt/test/flexfat/TestCases/in_bounds.c` — an in-bounds program exits 0 (no false positive).
