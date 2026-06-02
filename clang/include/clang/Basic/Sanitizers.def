@@ -198,6 +198,11 @@ SANITIZER("scudo", Scudo)
 // AllocToken
 SANITIZER("alloc-token", AllocToken)
 
+// FlexFat: in-tree reimplementation of the LowFat spatial-memory-safety system
+// (x86_64 only). `-fsanitize=lowfat` is a deprecated alias handled in
+// SanitizerArgs.
+SANITIZER("flexfat", FlexFat)
+
 // Magic group, containing all sanitizers. For example, "-fno-sanitize=all"
 // can be used to disable all the sanitizers.
 SANITIZER_GROUP("all", All, ~SanitizerMask())
