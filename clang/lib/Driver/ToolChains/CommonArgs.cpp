@@ -1694,6 +1694,11 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
   }
   if (!SanArgs.needsSharedRt() && SanArgs.needsNsanRt())
     StaticRuntimes.push_back("nsan");
+  // FlexFat ships only as a static runtime; it is whole-archived like the other
+  // static sanitizer runtimes so its malloc interposers and .preinit_array
+  // constructor are pulled in even when nothing references them directly.
+  if (SanArgs.needsFlexfatRt())
+    StaticRuntimes.push_back("flexfat");
   if (!SanArgs.needsSharedRt() && SanArgs.needsTsanRt()) {
     StaticRuntimes.push_back("tsan");
     if (SanArgs.linkCXXRuntimes())
