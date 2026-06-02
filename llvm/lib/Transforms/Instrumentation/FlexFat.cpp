@@ -9,20 +9,21 @@
 // FlexFat: an in-tree reimplementation of the LowFat spatial-memory-safety
 // bounds checker, modeled structurally on AddressSanitizer.
 //
-// Unit 1 (scaffolding): this is a structural no-op New-PM module pass. It
-// exists so the pass plumbing (registration, pipeline scheduling, IR tests) can
-// be stood up before any real instrumentation is ported. run() preserves all
-// analyses and leaves the module unchanged.
+// Scaffolding: this is a structural no-op New-PM function pass. It exists so the
+// pass plumbing (registration, pipeline scheduling at the reference's
+// EP_ScalarOptimizerLate point, IR tests) can be stood up before any real
+// instrumentation is ported. run() preserves all analyses and leaves the
+// function unchanged.
 //
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Instrumentation/FlexFat.h"
-#include "llvm/IR/Module.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/PassManager.h"
 
 using namespace llvm;
 
-PreservedAnalyses FlexFatPass::run(Module &M, ModuleAnalysisManager &AM) {
-  // Unit 1: no instrumentation yet. Leave the module byte-for-byte unchanged.
+PreservedAnalyses FlexFatPass::run(Function &F, FunctionAnalysisManager &AM) {
+  // No instrumentation yet. Leave the function byte-for-byte unchanged.
   return PreservedAnalyses::all();
 }

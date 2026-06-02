@@ -10,11 +10,20 @@
 // LowFat spatial-memory-safety bounds checker (Duck & Yap, NUS), modeled
 // structurally on AddressSanitizer.
 //
-// Unit 1 (scaffolding): FlexFatPass is a structural no-op. It registers under
-// the New Pass Manager as `flexfat`, is loadable via `opt -passes=flexfat`, and
-// leaves the module unchanged. The real LowFat-style instrumentation (pointer
-// encoding, load/store bounds checks, heap/stack/global lowfatification) lands
-// in later units.
+// FlexFatPass is a New-PM *function* pass. The LowFat reference scheduled its
+// instrumentation at EP_ScalarOptimizerLate (a per-function extension point) so
+// the bounds checks run right after mem2reg and stay visible to the rest of the
+// optimizer; reproducing that placement requires a function pass. FlexFat's
+// hot-path checks only reference the runtime-provided tables at fixed addresses
+// (`_LOWFAT_SIZES`@0x200000, `_LOWFAT_MAGICS`@0x300000) as externals, so the
+// per-function instrumentation needs no module-level setup (unlike ASan).
+//
+// Unit 1/6 (scaffolding + driver wiring): the body is still a structural no-op.
+// It registers under the New Pass Manager as `flexfat`, is loadable via
+// `opt -passes=flexfat`, runs at the reference's pipeline point, and leaves the
+// function unchanged. The real LowFat-style instrumentation (pointer encoding,
+// load/store bounds checks, heap/stack/global lowfatification) lands in later
+// units.
 //
 //===----------------------------------------------------------------------===//
 #ifndef LLVM_TRANSFORMS_INSTRUMENTATION_FLEXFAT_H
@@ -24,12 +33,18 @@
 #include "llvm/Support/Compiler.h"
 
 namespace llvm {
-class Module;
+class Function;
 
-/// Public interface to the FlexFat module pass.
+/// Public interface to the FlexFat function pass.
 class FlexFatPass : public PassInfoMixin<FlexFatPass> {
 public:
-  LLVM_ABI PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+
+  // FlexFat is instrumentation: like the other sanitizers, it must run even on
+  // `optnone` functions (which clang attaches to every function at -O0).
+  // Without this, the function-pass adaptor would skip it at -O0, defeating the
+  // reference's EP_EnabledOnOptLevel0 placement.
+  static bool isRequired() { return true; }
 };
 
 } // namespace llvm
