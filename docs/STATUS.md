@@ -77,9 +77,31 @@ globals/ctors and is therefore a module pass at `OptimizerLast`).
 
 Verified in this tree's `PassBuilderPipelines.cpp`: `buildO0DefaultPipeline`
 invokes the ScalarOptimizerLate callbacks too, so the pass runs at `-O0` —
-reproducing `EP_EnabledOnOptLevel0` without a separate registration.
-`clang/test/CodeGen/flexfat-pass-order.c` pins this: at `-O2` FlexFatPass runs
-after `SROAPass`, and at `-O0` it still runs.
+reproducing `EP_EnabledOnOptLevel0` without a separate registration. The pass
+also declares `isRequired() = true` so the function-pass adaptor does not skip
+it on the `optnone` functions clang stamps at `-O0`.
+`clang/test/CodeGen/flexfat-pass-order.c` pins the placement: at `-O2`
+FlexFatPass runs after `SROAPass` **and after the CGSCC `InlinerPass`**, and at
+`-O0` it still runs.
+
+**Inliner ordering (verified against the reference, not assumed).**
+`EP_ScalarOptimizerLate` is a **post-(main-)inline** point in *both* PMs: in
+legacy clang-4.0 (`PassManagerBuilder.cpp`) the main `Inliner` is added, then
+`addFunctionSimplificationPasses` — which hosts `EP_ScalarOptimizerLate` — runs;
+in the new PM the ScalarOptimizerLate callbacks fire inside the
+function-simplification pipeline run by the CGSCC inliner wrapper. So FlexFat
+runs *after* the main inliner — it is **not** a pre-inline pass. The reference's
+`addLowFatPass` (clang-4.0 `BackendUtil.cpp:258-263`) additionally bundles a
+**local** `createFunctionInliningPass()` right after `createLowFatPass()`
+(comment: *"Inline LowFat instrumentation"*) whose only purpose is to inline the
+`lowfat_base`/`lowfat_oob_check` helper **calls** the pass inserts, so the fast
+path has no out-of-line call. **We do not reproduce that bundled inliner:** the
+FlexFat instrumentation will emit its fast-path checks as **inline IR** (no
+helper call — see the performance-parity mandate, "no out-of-line call on the
+fast path"), which makes a post-pass inliner unnecessary by construction. If the
+instrumentation instead grows out-of-line helpers, that inlining belongs in the
+instrumentation unit (mark helpers `alwaysinline` + rely on the pipeline's
+inliner, or emit inline IR) — *not* a pre-inline move of the pass.
 
 **To revisit when the real instrumentation lands:** global *lowfatification*
 (re-laying-out globals into lowfat regions) is genuinely module-scoped; if/when
