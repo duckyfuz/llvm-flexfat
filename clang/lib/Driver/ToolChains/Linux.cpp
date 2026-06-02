@@ -997,6 +997,8 @@ Linux::getSupportedSanitizers(StringRef BoundArch,
   }
   if (IsX86_64)
     Res |= SanitizerKind::NumericalStability;
+  if (IsX86_64)
+    Res |= SanitizerKind::FlexFat;
   if (!IsAndroid)
     Res |= SanitizerKind::Memory;
 
