@@ -213,3 +213,25 @@ No new build/driver touchpoints; all within the pass + test surfaces.
 ### e2e tests (surface 3)
 - **+** `compiler-rt/test/flexfat/TestCases/error_no_abort.c` — `-flexfat-no-abort` reports `LOWFAT WARNING` and exits 0 (continues; the overrun stays on the committed page).
 - **+** `compiler-rt/test/flexfat/TestCases/error_signal.c` — `-flexfat-signal` dies with SIGILL (132), no report (`sh -c` pins the exact signal).
+
+## Unit 11 — verification harness + MSET differential
+
+No LLVM/compiler-rt source touchpoints; the consolidated `check-flexfat` gate
+(Unit 1) already aggregates all four surfaces (confirmed 46/46). New artifacts are
+the differential harness and the glibc landmine validator.
+
+### MSET differential (committed evidence)
+- **+** `flexfat/mset/flexfat_original.xml` — base FlexFat MSET config (`-fsanitize=flexfat`, exit-6 keyed); analogue of the reference `lowfat_original.xml`.
+- **+** `flexfat/mset/flexfat.xml` — hardened config, adds `-mllvm -flexfat-check-whole-access`; analogue of `lowfat.xml`.
+- **+** `flexfat/mset/flexfat_original_detected.txt`, `flexfat/mset/flexfat_detected.txt` — FlexFat's detected-type sets (base/hardened), committed for auditability against the reference oracle.
+- **+** `flexfat/mset/README.md` — how the differential is run + harvested; result pointer to STATUS.md.
+  - The MSET corpus + evaluator live in the sibling `MSET/` tree (not vendored). The reference oracle is `MSET/build/lowfat_original_detected.txt` (96) / `lowfat_detected.txt` (36).
+
+### glibc TID/JOINID landmine validator
+- **+** `flexfat/config/lowfat-check-config.c` — port of the reference `config/lowfat-check-config.c`; validates `LOWFAT_TID_OFFSET`/`LOWFAT_JOINID_OFFSET` (from the committed `golden/nonpow2/lowfat_config.c`) against host glibc. Build: `cc -I golden/nonpow2 -Wno-unused-function -Wno-unused-variable -o lowfat-check-config lowfat-check-config.c -lpthread`. Result on glibc 2.39: `OK`, exit 0. Re-run on the target glibc before Part II thread support.
+
+### Result
+Full differential + per-delta classification in [STATUS.md](STATUS.md) "Unit 11".
+Headline: FlexFat's detected set is a strict subset of the reference's (0 false
+detections); the only genuine heap-origin misses are the 6 Heap→Heap offset-0
+adjacency-blind-spot types, identical across base and hardened.

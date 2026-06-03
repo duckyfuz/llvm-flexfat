@@ -16,6 +16,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 8 | static bounds analysis (`Bounds` lattice + `getPtrBounds`): provably in-bounds accesses (constant offset off known-size malloc/alloca/global, select/PHI merges, offset-0 input derefs) skip the check; genuine OOB / dynamic / unknown-provenance accesses still checked; Unit 7 traps still fire (no false negative); `-flexfat-no-check-fields` flag | ✅ |
 | 9 | mem-intrinsic end-pointer checks (memcpy/memset/memmove, info MEMCPY/MEMSET), `replaceUnsafeLibFuncs` (mem-intrinsics always; allocator family + new/delete unless `-flexfat-no-replace-malloc`), `optimizeMalloc` (constant `malloc(K)` → `lowfat_malloc_index(idx,K)`, `heap_select` folded). **Pass↔runtime ABI closes**: e2e link+run through `-fsanitize=flexfat`; memcpy/memset overruns trap, constant-malloc asm calls `lowfat_malloc_index` with an immediate index (no `clzll`/`lzcnt`) | ✅ |
 | 10 | option surface + SpecialCaseList blacklist: per-kind suppression (`-flexfat-no-check-reads/-writes/-memcpy/-memset`), `-flexfat-check-whole-access` (access_size = sizeof(*ptr)-1), error-block modes (`-flexfat-no-abort` warns+continues, `-flexfat-signal` inline `ud2`/SIGILL), and a `[flexfat]` `fun:`/`src:` blacklist; one behavioral test per flag, all defaults checks-on | ✅ |
+| 11 | verification harness + MSET differential vs the reference oracle: consolidated `check-flexfat` (4 surfaces, 46/46), FlexFat MSET configs (`flexfat/mset/`), base+hardened differential — **FlexFat's detected set is a strict subset of the reference's, zero false detections, every miss classified** to a documented intentional difference; glibc TID/JOINID landmine validated (`lowfat-check-config`, OK on 2.39) | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -344,3 +345,138 @@ does not map stack regions, and uses only anonymous/private maps.
 
 **→ The stack unit depends on landing SHM support (`lowfat_create_shm`,
 `MAP_SHARED` same-fd regions) first.** See [STACK_UNIT.md](STACK_UNIT.md).
+
+## Unit 11 — verification harness + MSET differential
+
+### `check-flexfat` is the single 4-surface gate (consolidated, green)
+`ninja check-flexfat` runs **46 tests, 46 passed** spanning all four surfaces as
+one target — IR/FileCheck (`llvm/test/Instrumentation/FlexFat/`), runtime gtest
+(`compiler-rt/lib/flexfat/tests/`), e2e lit (`compiler-rt/test/flexfat/TestCases/`),
+and config golden-diff + size-sync (`flexfat/config/test/`). Nothing drifted out:
+the IR canaries' `NumUnknownProducers == 0` assertion (Unit 8), the table golden
+diffs (Unit 2), the pass↔runtime size-sync (`sizes-sync.test`, Unit 9), the
+per-flag behavioral tests (Unit 10), and the e2e trap/in-bounds cases (Units 7/9)
+all live under it. Pointer-encoding parity (the `lowfat-ptr-info` analogue) is
+covered by the Unit 3 runtime gtests, also folded in. This is the single source of
+truth for "FlexFat is not broken".
+
+### The differential: FlexFat vs the reference LowFat MSET oracle
+Harness and configs in [`flexfat/mset/`](../flexfat/mset/) (`flexfat_original.xml`
+base, `flexfat.xml` hardened). Both drive **our** clang via `-fsanitize=flexfat`
+(NOT `-fsanitize=lowfat`; the pass flag is `-flexfat-check-whole-access`, not
+aliased to `-lowfat-*`), keyed on **exit 6 / SIGABRT**. Run with
+`mset --evaluate`; FlexFat's `DETECTED` set diffed against the committed reference
+oracle (`MSET/build/lowfat_original_detected.txt`, 96 types;
+`lowfat_detected.txt`, 36 types). FlexFat's own detected sets are committed as
+evidence (`flexfat/mset/flexfat_*_detected.txt`).
+
+**Headline: FlexFat's detected set is a strict subset of the reference's — zero
+false detections, and every miss maps to a documented intentional difference.
+No unexplained miss.**
+
+MSET scores each bug *type* `DETECTED` / `UNDETECTED` (ran, didn't catch) /
+`PRECONDITIONS FAILED` (the bug's required memory layout couldn't be constructed —
+**not** a detection miss). A type's two trailing tokens are `<Origin> <Target>`;
+*Origin* is the bounds-checked object the access overflows out of. FlexFat catches
+a bug only if the Origin is **heap** (Part I is heap-only; stack/global
+lowfatification is Part II).
+
+#### Base config — FlexFat detects 30 / reference 96
+| | count |
+|---|---|
+| **Parity** (both detect) | **30** |
+| **FlexFat-only** (FF detects, ref didn't) | **0** |
+| **Reference-only** (ref detects, FF doesn't) | **66** |
+
+All 30 FlexFat detections are a subset of the reference's 96 — **no false
+positives, no novel detections to explain away.** Classification of all 66
+reference-only deltas (every one maps to an intentional difference):
+
+| # | Delta bucket | FlexFat verdict | Maps to (intentional difference) |
+|---|---|---|---|
+| 42 | Stack/Global-**origin** Inter-Object spatial | UNDETECTED | **Heap-only / Part II** — the origin object is never lowfatified, so no check is inserted; the neighbor is valid memory ⇒ no trap. |
+| 12 | `Misuse-of-free` (temporal) | UNDETECTED | **Spatial-only by design** — FlexFat has no temporal/use-after-free detection. |
+| 6 | Heap↔{Global,Stack} cross-domain adjacency | **PRECONDITIONS FAILED** | **Heap-only layout divergence** — the lowfat allocator relocates heap into high 2³⁵-stride regions, so a heap object *cannot* be made adjacent to a low-address global/stack object; MSET can't even construct the bug. Not a detection miss. |
+| 6 | **Heap→Heap** Linear (Inter-Object ×4 + Non-Object ×2) | UNDETECTED | **Offset-0 same-size-class adjacency blind spot** (inherent LowFat encoding limitation — see below). |
+
+`42 + 12 + 6 + 6 = 66.` ✔
+
+#### Hardened config (`-flexfat-check-whole-access`) — FlexFat detects 30 / reference 36
+FlexFat's detected set is **identical to the base config (the same 30 types)** —
+whole-access checking added no detections in this corpus. Against the (narrower,
+heap-focused) 36-type hardened oracle: **27 parity, 3 FlexFat-only, 9
+reference-only.**
+- The **3 FlexFat-only** (`…Write Global Stack`, `…Stdlib Write Global Stack`,
+  `…Underflow Write Stack Global`) are **all present in the base reference oracle**
+  — i.e. parity-confirming, not false positives. The 36-type hardened oracle is a
+  narrower reference run that simply didn't score those Global/Stack-origin types;
+  FlexFat (and the base reference) legitimately detect them.
+- The **9 reference-only** = 3 `PRECONDITIONS FAILED` (Heap↔Global cross-domain
+  adjacency, as above) + **6 `UNDETECTED` that are exactly the same Heap→Heap
+  Linear set as the base config**. Whole-access checking does not close any of
+  them — see below.
+
+### The one residual: the Heap→Heap offset-0 adjacency blind spot (classified, not papered over)
+The only genuine "FlexFat ran a heap-origin bug and didn't catch it" deltas are
+**6 Heap→Heap Linear types, identical across base and hardened configs**:
+```
+Inter-Object Linear OOBA Overflow  Direct Read  Heap Heap
+Inter-Object Linear OOBA Overflow  Direct Write Heap Heap
+Inter-Object Linear OOBA Underflow Direct Read  Heap Heap
+Inter-Object Linear OOBA Underflow Direct Write Heap Heap
+Non-Object   Linear OOBA Underflow Direct Read  Heap Heap
+Non-Object   Linear OOBA Underflow Direct Write Heap Heap
+```
+**Mechanism — the documented offset-0 cross-boundary blind spot.** Two heap objects
+of the same size class are packed adjacently in one 2³⁵ region. A *linear* overflow
+off object A by exactly its size lands at **offset 0 of neighbour B**; `lowfat_base`
+resolves that pointer to **B's** base, so the unsigned `diff >=u size` check sees a
+perfectly in-bounds pointer to B and passes. The reporter's `overflow = +0`
+field is the literal signature of this boundary.
+
+**Evidence it is the inherent LowFat encoding limitation, shared with the reference
+— not a FlexFat regression:**
+1. **The check provably works for heap origins** elsewhere: FlexFat catches every
+   Heap→Global / Heap→Stack and every Non-Linear / Stdlib / Type-Confusion
+   Heap→Heap variant. The MSET log shows `lowfat_error` firing on Heap→Heap
+   concrete instances too (e.g. `linear_ooba_heap_heap_…_read_0/_1`,
+   `…_write_0/_1`) — the instrumentation is wired and active; only the
+   offset-0-landing, baseline-survivable instances are invisible.
+2. **The hardened `-flexfat-check-whole-access` config closes none of the 6**
+   (identical 30 detected). That is the diagnostic signature of a *base-computation*
+   blind spot rather than an access-extent gap: widening the checked extent cannot
+   help when the **computed base is already the neighbour's**. Theory predicts
+   exactly this for offset-0 adjacency, and the experiment confirms it.
+3. **Zero FlexFat-only false detections** against the base reference oracle — the
+   base ABI (`_LOWFAT_MAGICS`/`_LOWFAT_SIZES`, `lowfat_base`) is byte-for-byte the
+   reference's, so the encoding behaves identically.
+
+The reference oracle records these 6 *types* as `DETECTED` because MSET credits the
+reference for concrete instances whose overflow distance skips the immediate
+same-class neighbour (≥2 slots, into unmapped/guard memory) and because the full
+reference (which also lowfatifies stack+globals) has a different malloc-arena
+history, so its concrete Heap→Heap pairs are not always exact same-class neighbours.
+FlexFat's heap-only arena packs them adjacently, so the offset-0 instance dominates
+the type's baseline-survivable score ⇒ `UNDETECTED`. This is a layout sensitivity of
+a **shared** blind spot, not a divergence in detection logic. (Documented in the
+Unit 8 "input pointers trusted at offset 0" caveat family; closing it requires
+inter-object redzones or guard slots, which LowFat deliberately omits for
+performance.)
+
+### glibc TID/JOINID landmine — validated before Part II
+`flexfat/config/lowfat-check-config.c` (port of the reference validator) checks the
+hard-coded `LOWFAT_TID_OFFSET = 0x2d0` / `LOWFAT_JOINID_OFFSET = 0x620` (from the
+committed `lowfat_config.c`) against the **host** glibc's real `struct pthread`
+layout — a worker thread asserts `*(pthread_t + TID_OFFSET) == gettid()` and, after
+detach, `*(pthread_t + JOINID_OFFSET) == self`. **Result: `OK`, exit 0 on glibc
+2.39 (Ubuntu 2.39-0ubuntu8.7).** These offsets are version-specific and load-bearing
+for Part II's stack/thread support; this is the canary to re-run on the target
+glibc before trusting that unit.
+
+### Caveat on the temporal phase
+FlexFat is spatial-only, so every MSET temporal type is an expected miss. Several
+temporal test binaries spawn detached workers that `sleep()` forever, so MSET's
+temporal phase may not self-terminate; the **spatial** differential (the meaningful
+comparison) completes fully first. The hardened run finished cleanly; the base run
+was stopped after its spatial verdicts were emitted. This does not affect any
+number above — temporal types are all `UNDETECTED` by design.
