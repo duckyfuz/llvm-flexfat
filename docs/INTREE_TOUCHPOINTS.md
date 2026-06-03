@@ -167,3 +167,24 @@ No new build/driver touchpoints; entirely within the pass + IR test surface.
 - **+** `llvm/test/Instrumentation/FlexFat/X86/unknown_producer_diag.ll` — negative control: an `atomicrmw`-derived pointer trips the fallback, asserting the `(BUG) unknown pointer type` warning fires and the check is still elided.
 - **~** `llvm/test/Instrumentation/FlexFat/X86/bounds.ll` — RUN extended with `2>&1 ... --implicit-check-not="unknown pointer"` (corpus canary over its malloc/gep/alloca/global/select/PHI/load forms).
 - **+** `compiler-rt/test/flexfat/TestCases/no_unknown_producers.c` — e2e corpus canary: a producer-diverse program compiled through `-fsanitize=flexfat -O2` must emit no fallback warning (`NumUnknownProducers == 0`).
+
+## Unit 9 — intrinsic checks, replaceUnsafeLibFuncs, optimizeMalloc
+
+First unit where pass-emitted symbols (`lowfat_mem*`, `lowfat_malloc_index`) must
+resolve against the Units 3–5 runtime — the e2e are the real integration test.
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp`:
+  - **mem-intrinsic checks** (`instrumentMemIntrinsic`, port of LowFat.cpp:913-947): `llvm.memcpy`/`memmove` validate `Src+len` and `Dst+len`; `llvm.memset` validates `Dst+len`; info codes `MEMCPY`=2 / `MEMSET`=3. Reuses the Unit 7/8 elide+`insertBoundsCheck` path.
+  - **replaceUnsafeLibFuncs** (`replaceLibFunc`, port of LowFat.cpp:1071-1118): redirects calls to `memcpy`/`memset`/`memmove` (always) and the allocator family `malloc`/`free`/`calloc`/`realloc`/`posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`pvalloc`/`strdup`/`strndup` + C++ `new`/`delete` (unless `-flexfat-no-replace-malloc`) to their `lowfat_*` equivalents. Per call site (a function pass must not RAUW module declarations).
+  - **optimizeMalloc** (`optimizeMalloc`, port of LowFat.cpp:330-384): a constant `lowfat_malloc(K)` becomes `lowfat_malloc_index(idx, K)` with `idx = heap_select(K)` folded at compile time via host-side `flexfatHeapSelect` over an embedded `kLowFatSizes[]` (copied from the generated `lowfat_config.c`, must stay in sync).
+  - New `-flexfat-no-replace-malloc` flag; `I8Ty` for byte GEPs.
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/replace_libfuncs.ll` — memcpy/memset/memmove + malloc family + `_Znwm` rewritten to `lowfat_*`; `-flexfat-no-replace-malloc` leaves the allocator family untouched (mem-intrinsics still replaced).
+- **+** `llvm/test/Instrumentation/FlexFat/X86/optimize_malloc.ll` — constant `malloc(100)` → `lowfat_malloc_index(i64 7, i64 100)`; dynamic stays `lowfat_malloc`.
+
+### e2e tests (surface 3)
+- **+** `compiler-rt/test/flexfat/TestCases/memcpy_oob.c` — a memcpy overrun traps with `operation = memcpy` (`size = 16`, `overflow = +84`).
+- **+** `compiler-rt/test/flexfat/TestCases/memset_oob.c` — a memset overrun traps with `operation = memset`.
+- **+** `compiler-rt/test/flexfat/TestCases/mem_inbounds.c` — in-bounds memcpy/memset (+ a constant-malloc path) exit 0.

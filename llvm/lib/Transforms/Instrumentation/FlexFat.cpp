@@ -42,6 +42,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
@@ -91,6 +92,44 @@ static cl::opt<bool> ClNoElide(
     "flexfat-no-elide", cl::Hidden, cl::init(false),
     cl::desc("FlexFat: disable static elision of provably-safe bounds checks"));
 
+// -flexfat-no-replace-malloc (LowFat -lowfat-no-replace-malloc): leave the
+// allocator family (malloc/free/.../new/delete) calls untouched. mem-intrinsics
+// are replaced regardless.
+static cl::opt<bool> ClNoReplaceMalloc(
+    "flexfat-no-replace-malloc", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not replace malloc()/free()/... with lowfat_* "
+             "(disables heap protection of pass-compiled allocations)"));
+
+// Heap size classes, copied verbatim from the generated
+// compiler-rt/lib/flexfat/lowfat_config.c `lowfat_sizes[]` (non-POW2 default).
+// MUST stay in sync with the runtime: both are emitted by the Unit 2 generator
+// from sizes.cfg. Region index `i` (1-based, as returned by heap_select and
+// consumed by lowfat_malloc_index) has class size kLowFatSizes[i-1].
+static constexpr uint64_t kLowFatSizes[] = {
+    16,         32,         48,         64,         80,         96,
+    112,        128,        144,        160,        192,        224,
+    256,        272,        320,        384,        448,        512,
+    528,        640,        768,        896,        1024,       1040,
+    1280,       1536,       1792,       2048,       2064,       2560,
+    3072,       3584,       4096,       4112,       5120,       6144,
+    7168,       8192,       8208,       10240,      12288,      16384,
+    32768,      65536,      131072,     262144,     524288,     1048576,
+    2097152,    4194304,    8388608,    16777216,   33554432,   67108864,
+    134217728,  268435456,  536870912,  1073741824, 2147483648, 4294967296,
+    8589934592};
+static constexpr unsigned kNumRegions =
+    sizeof(kLowFatSizes) / sizeof(kLowFatSizes[0]);
+
+// Host-side lowfat_heap_select: the region index for an allocation of `Size`
+// (smallest class with `Size <= class - 1`, i.e. class >= Size+1), or 0 (too
+// large -> runtime libc fallback). Equivalent to the generated runtime switch.
+static unsigned flexfatHeapSelect(uint64_t Size) {
+  for (unsigned J = 0; J < kNumRegions; ++J)
+    if (kLowFatSizes[J] >= Size + 1)
+      return J + 1;
+  return 0;
+}
+
 namespace {
 
 // ABI constants -- must stay byte-identical to the runtime (lowfat_config.h /
@@ -102,6 +141,8 @@ constexpr uint64_t kMagicsAddr = 0x300000; // _LOWFAT_MAGICS (uint64_t[])
 // OOB info codes (lowfat.h: LOWFAT_OOB_ERROR_{READ,WRITE}).
 constexpr unsigned kInfoRead = 0;
 constexpr unsigned kInfoWrite = 1;
+constexpr unsigned kInfoMemcpy = 2;
+constexpr unsigned kInfoMemset = 3;
 
 // Fast-path branch weights (2000000000:1 in favour of the fast path), so the
 // cold error block is placed out of line. NOTE: the reference weights the OOB
@@ -149,8 +190,9 @@ class FlexFat {
 public:
   FlexFat(Function &F, const TargetLibraryInfo &TLI)
       : F(F), M(*F.getParent()), Ctx(F.getContext()), DL(M.getDataLayout()),
-        I64Ty(Type::getInt64Ty(Ctx)), I128Ty(Type::getInt128Ty(Ctx)),
-        PtrTy(PointerType::getUnqual(Ctx)), TLI(TLI) {}
+        I8Ty(Type::getInt8Ty(Ctx)), I64Ty(Type::getInt64Ty(Ctx)),
+        I128Ty(Type::getInt128Ty(Ctx)), PtrTy(PointerType::getUnqual(Ctx)),
+        TLI(TLI) {}
 
   bool run();
 
@@ -166,6 +208,12 @@ private:
   Bounds getConstantPtrBounds(Constant *C);
   Bounds getInputPtrBounds(Value *Ptr);
 
+  // Unit 9.
+  bool checkAccess(Instruction *I, Value *Ptr, unsigned Info); // bounds elide+check
+  bool instrumentMemIntrinsic(MemIntrinsic *MI);              // end-pointer checks
+  bool replaceLibFunc(CallBase *CB);                          // replaceUnsafeLibFuncs
+  bool optimizeMalloc(CallBase *CB);                          // const heap_select fold
+
   // Inline a GEP into a fixed runtime table (_LOWFAT_SIZES / _LOWFAT_MAGICS).
   Value *tableSlot(IRBuilder<> &B, uint64_t TableAddr, Value *Idx) {
     Value *Table = B.CreateIntToPtr(B.getInt64(TableAddr), PtrTy);
@@ -176,6 +224,7 @@ private:
   Module &M;
   LLVMContext &Ctx;
   const DataLayout &DL;
+  IntegerType *I8Ty;
   IntegerType *I64Ty;
   IntegerType *I128Ty;
   PointerType *PtrTy;
@@ -443,42 +492,128 @@ void FlexFat::insertBoundsCheck(Instruction *I, Value *Ptr, unsigned Info,
   Call->setDoesNotReturn();
 }
 
+// Bounds-check (or, via the static analysis, elide) one access at `Ptr`.
+bool FlexFat::checkAccess(Instruction *I, Value *Ptr, unsigned Info) {
+  if (!ClNoElide && getPtrBounds(Ptr).isInBounds(/*access_size=*/0)) {
+    ++NumElided;
+    return false; // provably in-bounds
+  }
+  Value *Base = calcBasePtr(Ptr);
+  if (!Base || isa<ConstantPointerNull>(Base))
+    return false; // non-fat pointer
+  insertBoundsCheck(I, Ptr, Info, Base);
+  ++NumChecks;
+  return true;
+}
+
+// memcpy/memset/memmove intrinsics: validate the end pointer(s) Dst+len (and
+// Src+len) against their objects (LowFat.cpp:913-947). Info = MEMCPY / MEMSET.
+bool FlexFat::instrumentMemIntrinsic(MemIntrinsic *MI) {
+  IRBuilder<> B(MI);
+  bool Changed = false;
+  if (auto *MT = dyn_cast<MemTransferInst>(MI)) {
+    Value *Len = B.CreateIntCast(MT->getLength(), I64Ty, /*isSigned=*/false);
+    Value *SrcEnd = B.CreateGEP(I8Ty, MT->getRawSource(), Len);
+    Value *DstEnd = B.CreateGEP(I8Ty, MT->getRawDest(), Len);
+    Changed |= checkAccess(MI, SrcEnd, kInfoMemcpy);
+    Changed |= checkAccess(MI, DstEnd, kInfoMemcpy);
+  } else if (auto *MS = dyn_cast<MemSetInst>(MI)) {
+    Value *Len = B.CreateIntCast(MS->getLength(), I64Ty, /*isSigned=*/false);
+    Value *DstEnd = B.CreateGEP(I8Ty, MS->getRawDest(), Len);
+    Changed |= checkAccess(MI, DstEnd, kInfoMemset);
+  }
+  return Changed;
+}
+
+// replaceUnsafeLibFuncs (LowFat.cpp:1071-1118): redirect a call to an unsafe
+// libc function to its lowfat_* equivalent. mem-intrinsics (the *named* memcpy/
+// memset/memmove functions) are always replaced; the allocator family is
+// replaced unless -flexfat-no-replace-malloc. Done per call site (a function
+// pass must not RAUW module-level declarations); rare non-call uses are left.
+bool FlexFat::replaceLibFunc(CallBase *CB) {
+  Function *Callee = CB->getCalledFunction();
+  if (!Callee || !Callee->hasName())
+    return false;
+  StringRef Name = Callee->getName();
+  static const char *const MemFns[] = {"memcpy", "memset", "memmove"};
+  static const char *const AllocFns[] = {
+      "malloc",  "free",    "calloc",  "realloc",
+      "posix_memalign", "aligned_alloc", "valloc", "memalign", "pvalloc",
+      "strdup",  "strndup", "_Znwm",   "_Znam",   "_ZdlPv",    "_ZdaPv",
+      "_ZnwmRKSt9nothrow_t", "_ZnamRKSt9nothrow_t"};
+  bool IsMem = false, IsAlloc = false;
+  for (const char *N : MemFns)
+    IsMem |= (Name == N);
+  for (const char *N : AllocFns)
+    IsAlloc |= (Name == N);
+  if (!IsMem && !IsAlloc)
+    return false;
+  if (IsAlloc && ClNoReplaceMalloc)
+    return false;
+  FunctionCallee New =
+      M.getOrInsertFunction(("lowfat_" + Name).str(), CB->getFunctionType());
+  CB->setCalledFunction(New);
+  return true;
+}
+
+// optimizeMalloc (LowFat.cpp:330-384): a constant lowfat_malloc(K) becomes
+// lowfat_malloc_index(idx, K) with idx = heap_select(K) folded at compile time,
+// eliding the runtime clzll/lzcnt dispatch.
+bool FlexFat::optimizeMalloc(CallBase *CB) {
+  Function *Callee = CB->getCalledFunction();
+  if (!Callee || CB->arg_size() != 1 || isa<InvokeInst>(CB))
+    return false;
+  StringRef Name = Callee->getName();
+  if (Name != "lowfat_malloc" && Name != "lowfat__Znwm" &&
+      Name != "lowfat__Znam")
+    return false;
+  auto *Size = dyn_cast<ConstantInt>(CB->getArgOperand(0));
+  if (!Size)
+    return false;
+  unsigned Idx = flexfatHeapSelect(Size->getZExtValue());
+  IRBuilder<> B(CB);
+  FunctionCallee MIdx =
+      M.getOrInsertFunction("lowfat_malloc_index", PtrTy, I64Ty, I64Ty);
+  CallInst *NewCall = B.CreateCall(MIdx, {B.getInt64(Idx), Size});
+  NewCall->setDebugLoc(CB->getDebugLoc());
+  CB->replaceAllUsesWith(NewCall);
+  CB->eraseFromParent();
+  return true;
+}
+
 bool FlexFat::run() {
-  // Plan a check per interesting memory op first (getInterestingInsts,
-  // LowFat.cpp:892-1021, LOAD/STORE subset). Skip nosanitize-tagged accesses,
-  // and -- the Unit 8 elision -- accesses the static bounds analysis proves
-  // in-bounds (addToPlan, LowFat.cpp:870-889; access_size defaults to 0).
-  SmallVector<std::tuple<Instruction *, Value *, unsigned>, 16> Plan;
+  // Phase 1: collect interesting instructions without mutating IR (the
+  // getInterestingInsts sweep). Loads/stores and the mem-intrinsics get bounds
+  // checks; named libc calls get replaced.
+  SmallVector<std::tuple<Instruction *, Value *, unsigned>, 16> LoadStores;
+  SmallVector<MemIntrinsic *, 8> MemIntrs;
+  SmallVector<CallBase *, 8> LibCalls;
   for (Instruction &I : instructions(F)) {
     if (I.getMetadata(LLVMContext::MD_nosanitize))
       continue;
-    Value *Ptr = nullptr;
-    unsigned Info = 0;
-    if (auto *LD = dyn_cast<LoadInst>(&I)) {
-      Ptr = LD->getPointerOperand();
-      Info = kInfoRead;
-    } else if (auto *ST = dyn_cast<StoreInst>(&I)) {
-      Ptr = ST->getPointerOperand();
-      Info = kInfoWrite;
-    } else {
-      continue;
-    }
-    if (!ClNoElide && getPtrBounds(Ptr).isInBounds(/*access_size=*/0)) {
-      ++NumElided;
-      continue; // provably in-bounds: no check
-    }
-    Plan.emplace_back(&I, Ptr, Info);
+    if (auto *LD = dyn_cast<LoadInst>(&I))
+      LoadStores.emplace_back(&I, LD->getPointerOperand(), kInfoRead);
+    else if (auto *ST = dyn_cast<StoreInst>(&I))
+      LoadStores.emplace_back(&I, ST->getPointerOperand(), kInfoWrite);
+    else if (auto *MI = dyn_cast<MemIntrinsic>(&I))
+      MemIntrs.push_back(MI);
+    else if (auto *CB = dyn_cast<CallBase>(&I))
+      LibCalls.push_back(CB); // filtered in replaceLibFunc
   }
 
   bool Changed = false;
-  for (auto &[I, Ptr, Info] : Plan) {
-    Value *Base = calcBasePtr(Ptr);
-    if (!Base || isa<ConstantPointerNull>(Base))
-      continue; // non-fat pointer: no check
-    insertBoundsCheck(I, Ptr, Info, Base);
-    ++NumChecks;
-    Changed = true;
-  }
+  // Phase 2: load/store bounds checks.
+  for (auto &[I, Ptr, Info] : LoadStores)
+    Changed |= checkAccess(I, Ptr, Info);
+  // Phase 3: mem-intrinsic end-pointer checks.
+  for (MemIntrinsic *MI : MemIntrs)
+    Changed |= instrumentMemIntrinsic(MI);
+  // Phase 4 + 5: replaceUnsafeLibFuncs, then optimizeMalloc on the result.
+  for (CallBase *CB : LibCalls)
+    if (replaceLibFunc(CB)) {
+      Changed = true;
+      optimizeMalloc(CB); // CB may be erased
+    }
   return Changed;
 }
 

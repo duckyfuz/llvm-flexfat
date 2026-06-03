@@ -14,6 +14,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 6 | clang driver wiring: `-fsanitize=flexfat` (+ deprecated `lowfat` alias) recognized, x86_64-gated, forces `-mcmodel=large` + lzcnt/bmi/bmi2, links `libclang_rt.flexfat`, schedules the (no-op) pass at the reference's ScalarOptimizerLate point at every -O; e2e sentinel un-XFAILed | ✅ |
 | 7 | load/store bounds-check instrumentation: `calcBasePtr` + inlined non-POW2 `lowfat_base` + inlined `lowfat_oob_check`; heap OOB traps with the exact report, in-bounds exits 0; **fast-path asm strategy-identical to the reference** (shr/table-load/single unsigned compare/`jae` to out-of-line error, no fast-path call, no div) | ✅ |
 | 8 | static bounds analysis (`Bounds` lattice + `getPtrBounds`): provably in-bounds accesses (constant offset off known-size malloc/alloca/global, select/PHI merges, offset-0 input derefs) skip the check; genuine OOB / dynamic / unknown-provenance accesses still checked; Unit 7 traps still fire (no false negative); `-flexfat-no-check-fields` flag | ✅ |
+| 9 | mem-intrinsic end-pointer checks (memcpy/memset/memmove, info MEMCPY/MEMSET), `replaceUnsafeLibFuncs` (mem-intrinsics always; allocator family + new/delete unless `-flexfat-no-replace-malloc`), `optimizeMalloc` (constant `malloc(K)` → `lowfat_malloc_index(idx,K)`, `heap_select` folded). **Pass↔runtime ABI closes**: e2e link+run through `-fsanitize=flexfat`; memcpy/memset overruns trap, constant-malloc asm calls `lowfat_malloc_index` with an immediate index (no `clzll`/`lzcnt`) | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -194,6 +195,38 @@ Notes / opaque-pointer divergences:
   C++ STL). `unknown_producer_diag.ll` is the negative control (an `atomicrmw`
   result trips it) proving the signal works. If the canary ever trips, the fix
   is to add that producer to `getPtrBounds`, not to ship a silent elision.
+
+## Intrinsic checks, libfunc replacement, optimizeMalloc (Unit 9)
+This unit's teeth are integration: the e2e (`memcpy_oob.c`, `memset_oob.c`,
+`mem_inbounds.c`) **link and run** through `-fsanitize=flexfat` against the real
+`libclang_rt.flexfat`, proving the symbols the pass now emits (`lowfat_mem*`,
+`lowfat_malloc_index`) resolve to the Units 3–5 runtime. A memcpy/memset overrun
+traps with `operation = memcpy`/`memset` (the pass's end-pointer check fires
+before the intrinsic, reporting `Dst+len`).
+
+- **`optimizeMalloc` win is asm-confirmed.** A constant `malloc(100)` lowers to
+  `movl $7, %edi; movl $100, %esi; jmp lowfat_malloc_index` — the size-class index
+  (`7`) is a compile-time immediate, so the runtime `heap_select` `clzll`/`lzcnt`
+  dispatch is gone. A dynamic `malloc(n)` stays `jmp lowfat_malloc` (which does
+  the dispatch internally). Pinned by `optimize_malloc.ll`.
+- **`kLowFatSizes[]` is duplicated in the pass.** `flexfatHeapSelect` replicates
+  the runtime `lowfat_heap_select` host-side from a copy of the generated
+  `lowfat_config.c` `lowfat_sizes[]` (61 non-POW2 classes). Both come from the
+  Unit 2 generator and **must stay in sync**; if `sizes.cfg` changes, regenerate
+  both. (The reference gets this for free by `#include`-ing the generated config
+  into the pass TU; our pass lives in `llvm/`, the config in `compiler-rt/`.)
+- **replaceUnsafeLibFuncs is per-call, not module RAUW.** A New-PM function pass
+  must not `replaceAllUsesWith` a module-level declaration, so we redirect each
+  call site (`CallBase::setCalledFunction`). Divergence from the reference: rare
+  *non-call* uses of `memcpy`/`malloc` (e.g. taking the function's address) are
+  not redirected — link-time `LOWFAT_ALIAS` interposition still covers their
+  runtime behavior. Mem-intrinsics (`llvm.mem*`) are a separate path (the
+  end-pointer checks); only the *named* libc calls are redirected here.
+- **Two overlapping safety nets for mem ops, by design.** The pass checks the
+  `llvm.mem*` intrinsic end pointers (fires first, reports MEMCPY/MEMSET), and
+  the runtime `lowfat_mem*` re-check (reached via replacement or link
+  interposition when the intrinsic lowers to a libc call). Either catches an
+  overrun; the report text is identical.
 
 ## Pass placement & the module→function decision (Unit 6, flagged)
 The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at
