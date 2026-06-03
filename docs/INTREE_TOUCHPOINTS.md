@@ -196,3 +196,20 @@ resolve against the Units 3–5 runtime — the e2e are the real integration tes
 - **~** `flexfat/config/test/{nonpow2,pow2}-parity.test` — also diff the regenerated `.inc` against golden.
 - **+** `flexfat/config/test/sizes-sync.test` — byte-for-byte drift guard: pass `.inc` values == runtime `lowfat_sizes[]` values (and pass `.inc` == golden `.inc`).
 - **+** `compiler-rt/test/flexfat/TestCases/malloc_class.c` — behavioral drift guard: `malloc(100)` → region 7 / class 112; `p[111]` passes, `p[112]` traps with `size = 112`.
+
+## Unit 10 — option surface + SpecialCaseList blacklist
+
+No new build/driver touchpoints; all within the pass + test surfaces.
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp` — add the option surface: `-flexfat-no-check-{reads,writes,memset,memcpy,escapes}` (`filterKind`), `-flexfat-check-whole-access` (threads access_size = sizeof(*ptr)-1 through `checkAccess`/`insertBoundsCheck`), `-flexfat-no-replace-{alloca,globals}` (inert forward-decls), `-flexfat-no-check-blacklist` (`SpecialCaseList`, cached, `isBlacklisted` skips a function/module), and the error-block modes in `insertBoundsCheck` (`-flexfat-no-abort` → `lowfat_oob_warning` + branch-back; `-flexfat-signal` → inline `ud2` + unreachable; default → `lowfat_oob_error` + unreachable). New includes: `InlineAsm.h`, `SpecialCaseList.h`, `VirtualFileSystem.h`.
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/check_suppression.ll` — `-no-check-reads`/`-writes` drop the matching info-0/1 check, keep the other.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/mem_suppression.ll` — `-no-check-memcpy`/`-memset` drop the info-2/3 checks.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/whole_access.ll` — `-check-whole-access` emits `sub i64 %size, 3` (sizeof(i32)-1) before the compare; default does not.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/blacklist.ll` (+ `Inputs/flexfat_blacklist.txt`) — the listed function emits no checks; an unlisted one in the same module still does.
+
+### e2e tests (surface 3)
+- **+** `compiler-rt/test/flexfat/TestCases/error_no_abort.c` — `-flexfat-no-abort` reports `LOWFAT WARNING` and exits 0 (continues; the overrun stays on the committed page).
+- **+** `compiler-rt/test/flexfat/TestCases/error_signal.c` — `-flexfat-signal` dies with SIGILL (132), no report (`sh -c` pins the exact signal).

@@ -15,6 +15,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 7 | load/store bounds-check instrumentation: `calcBasePtr` + inlined non-POW2 `lowfat_base` + inlined `lowfat_oob_check`; heap OOB traps with the exact report, in-bounds exits 0; **fast-path asm strategy-identical to the reference** (shr/table-load/single unsigned compare/`jae` to out-of-line error, no fast-path call, no div) | ✅ |
 | 8 | static bounds analysis (`Bounds` lattice + `getPtrBounds`): provably in-bounds accesses (constant offset off known-size malloc/alloca/global, select/PHI merges, offset-0 input derefs) skip the check; genuine OOB / dynamic / unknown-provenance accesses still checked; Unit 7 traps still fire (no false negative); `-flexfat-no-check-fields` flag | ✅ |
 | 9 | mem-intrinsic end-pointer checks (memcpy/memset/memmove, info MEMCPY/MEMSET), `replaceUnsafeLibFuncs` (mem-intrinsics always; allocator family + new/delete unless `-flexfat-no-replace-malloc`), `optimizeMalloc` (constant `malloc(K)` → `lowfat_malloc_index(idx,K)`, `heap_select` folded). **Pass↔runtime ABI closes**: e2e link+run through `-fsanitize=flexfat`; memcpy/memset overruns trap, constant-malloc asm calls `lowfat_malloc_index` with an immediate index (no `clzll`/`lzcnt`) | ✅ |
+| 10 | option surface + SpecialCaseList blacklist: per-kind suppression (`-flexfat-no-check-reads/-writes/-memcpy/-memset`), `-flexfat-check-whole-access` (access_size = sizeof(*ptr)-1), error-block modes (`-flexfat-no-abort` warns+continues, `-flexfat-signal` inline `ud2`/SIGILL), and a `[flexfat]` `fun:`/`src:` blacklist; one behavioral test per flag, all defaults checks-on | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -239,6 +240,46 @@ before the intrinsic, reporting `Dst+len`).
   the runtime `lowfat_mem*` re-check (reached via replacement or link
   interposition when the intrinsic lowers to a libc call). Either catches an
   overrun; the report text is identical.
+
+## Option surface & blacklist (Unit 10)
+The pass options are `-mllvm -flexfat-*` (internal/developer flags). Reference →
+FlexFat mapping (all bool defaults = checks ON):
+
+| Reference (`-lowfat-*`) | FlexFat (`-flexfat-*`) | Status |
+|---|---|---|
+| `no-check-reads` / `no-check-writes` | same | behavioral (`check_suppression.ll`) |
+| `no-check-memset` / `no-check-memcpy` | same | behavioral (`mem_suppression.ll`) |
+| `no-check-fields` | same | behavioral (`no_check_fields.ll`, Unit 8) |
+| `check-whole-access` | same | behavioral (`whole_access.ll`) |
+| `no-replace-malloc` | same | behavioral (`replace_libfuncs.ll`, Unit 9) |
+| `no-check-blacklist` | same | behavioral (`blacklist.ll`) |
+| `no-abort` / `signal` | same | behavioral e2e (`error_no_abort.c` / `error_signal.c`) |
+| `no-check-escapes` | same | **forward-declared, inert** (escapes are Part III) |
+| `no-replace-alloca` / `no-replace-globals` | same | **forward-declared, inert** (stack/global lowfatification is Part II) |
+| `no-check-escape-{call,return,store,ptr2int,insert}` | — | not ported (granular escape flags, Part III; the umbrella `no-check-escapes` covers them) |
+| `lowfat-debug` | — | not ported (IR dump; add if needed) |
+
+Decisions / notes:
+- **`-lowfat-*` cl::opt aliases are NOT kept** (contrast the *user-facing*
+  `-fsanitize=lowfat` alias, which is kept/deprecated). These are internal
+  `-mllvm` developer flags, not a stable user ABI; the committed MSET configs
+  that pass `-lowfat-*` (e.g. `lowfat.xml`'s `-mllvm -lowfat-check-whole-access`)
+  target the *reference* clang, and any flexfat-side Unit-11 config will use
+  `-flexfat-*`. Aliasing ~13 internal flags is surface bloat with no consumer.
+- **`-flexfat-check-whole-access` uses `sizeof(*ptr)-1`** as access_size (the
+  reference's `getTypeAllocSize(Ty)-1`), so `diff >=u size-(sizeof-1)` validates
+  the last accessed byte. With opaque pointers the access type comes from the
+  load/store value type, not a pointee type.
+- **Blacklist format is modern SpecialCaseList**: a `[flexfat]` (or `[*]`)
+  section with `fun:`/`src:` globs, via `inSection("flexfat", "fun"/"src", ...)`
+  — not the reference's LLVM-4.0 `[src]`/`[fun]` *section* headers (the API
+  changed: section headers are now tool-name globs). `src:` matches the module
+  id, `fun:` the function name; a blacklisted function is skipped wholesale.
+  The list is parsed once and cached per path.
+- **`-flexfat-signal` e2e pins SIGILL (132) via `sh -c '%run %t; test $? -eq
+  132'`** — lit's internal shell does not expand `$?`. The trap path makes no
+  runtime call (no `LOWFAT` report), which also distinguishes it from the
+  SIGABRT+report default and the `-flexfat-no-abort` warn-and-continue path.
 
 ## Pass placement & the module→function decision (Unit 6, flagged)
 The LowFat reference (LLVM 4.0) registered `createLowFatPass()` at

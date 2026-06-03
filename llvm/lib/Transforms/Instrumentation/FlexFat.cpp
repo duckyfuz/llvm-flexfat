@@ -40,6 +40,7 @@
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -47,7 +48,10 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/SpecialCaseList.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include <string>
 
 using namespace llvm;
 
@@ -99,6 +103,100 @@ static cl::opt<bool> ClNoReplaceMalloc(
     "flexfat-no-replace-malloc", cl::Hidden, cl::init(false),
     cl::desc("FlexFat: do not replace malloc()/free()/... with lowfat_* "
              "(disables heap protection of pass-compiled allocations)"));
+
+// Per-kind check suppression (LowFat.cpp:161-184, :237-262, via filterKind).
+static cl::opt<bool> ClNoCheckReads(
+    "flexfat-no-check-reads", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check reads"));
+static cl::opt<bool> ClNoCheckWrites(
+    "flexfat-no-check-writes", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check writes"));
+static cl::opt<bool> ClNoCheckMemset(
+    "flexfat-no-check-memset", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check memset"));
+static cl::opt<bool> ClNoCheckMemcpy(
+    "flexfat-no-check-memcpy", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check memcpy or memmove"));
+// Forward-declared: pointer-escape checks land in Part III; this flag is wired
+// into filterKind for the escape info codes (5-9) but no escape checks are
+// emitted yet, so it is currently inert.
+static cl::opt<bool> ClNoCheckEscapes(
+    "flexfat-no-check-escapes", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check pointer escapes (Part III; inert)"));
+
+static cl::opt<bool> ClCheckWholeAccess(
+    "flexfat-check-whole-access", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: OOB-check the whole access [ptr, ptr+sizeof(*ptr)) "
+             "rather than just the byte at ptr"));
+
+// Forward-declared: stack/global lowfatification is Part II; these flags will
+// gate it then. Inert today (no alloca/global replacement is emitted).
+static cl::opt<bool> ClNoReplaceAlloca(
+    "flexfat-no-replace-alloca", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not lowfatify stack allocations (Part II; inert)"));
+static cl::opt<bool> ClNoReplaceGlobals(
+    "flexfat-no-replace-globals", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not lowfatify globals (Part II; inert)"));
+
+static cl::opt<std::string> ClBlacklist(
+    "flexfat-no-check-blacklist", cl::Hidden, cl::init("-"),
+    cl::desc("FlexFat: do not OOB-check the functions/files in this "
+             "SpecialCaseList blacklist ([flexfat] section, fun:/src: globs)"));
+
+// Error-block modes (LowFat.cpp:1202-1235, §4.4).
+static cl::opt<bool> ClNoAbort(
+    "flexfat-no-abort", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: warn and continue (lowfat_oob_warning) instead of "
+             "aborting on an OOB error"));
+static cl::opt<bool> ClSignal(
+    "flexfat-signal", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: raise SIGILL (inline ud2, no runtime call) on an OOB "
+             "error"));
+
+// filterKind (LowFat.cpp:237-262): is this access kind's check suppressed?
+static bool filterKind(unsigned Info) {
+  switch (Info) {
+  case 0: // READ
+    return ClNoCheckReads;
+  case 1: // WRITE
+    return ClNoCheckWrites;
+  case 2: // MEMCPY / MEMMOVE
+    return ClNoCheckMemcpy;
+  case 3: // MEMSET
+    return ClNoCheckMemset;
+  default: // 5-9: escape kinds (Part III)
+    return ClNoCheckEscapes;
+  }
+}
+
+// SpecialCaseList blacklist (LowFat.cpp:1684-1695). Cached per path so a large
+// module parses the file once. The path is constant within a compile, so the
+// first (thread-safe) static init is the only mutation.
+static SpecialCaseList *getBlacklist() {
+  static std::unique_ptr<SpecialCaseList> Cached;
+  static std::string CachedPath;
+  static bool Inited = false;
+  if (!Inited || CachedPath != ClBlacklist) {
+    Inited = true;
+    CachedPath = ClBlacklist;
+    Cached.reset();
+    if (!ClBlacklist.empty() && ClBlacklist != "-") {
+      std::string Err;
+      Cached = SpecialCaseList::create({std::string(ClBlacklist)},
+                                       *vfs::getRealFileSystem(), Err);
+    }
+  }
+  return Cached.get();
+}
+
+static bool isBlacklisted(Function &F) {
+  SpecialCaseList *SCL = getBlacklist();
+  if (!SCL)
+    return false;
+  return SCL->inSection("flexfat", "src",
+                        F.getParent()->getModuleIdentifier()) ||
+         SCL->inSection("flexfat", "fun", F.getName());
+}
 
 // Heap size classes (non-POW2 default). SINGLE-SOURCED with the runtime: the
 // Unit 2 generator (flexfat/config/lowfat-config.c) emits this `.inc` and the
@@ -192,8 +290,8 @@ public:
 private:
   Value *calcBasePtr(Value *Ptr);
   Value *emitInlineBase(Value *Ptr);
-  void insertBoundsCheck(Instruction *I, Value *Ptr, unsigned Info,
-                         Value *Base);
+  void insertBoundsCheck(Instruction *I, Value *Ptr, unsigned Info, Value *Base,
+                         uint64_t AccessSize);
   std::pair<BasicBlock *, BasicBlock::iterator> nextInsertPoint(Value *Ptr);
 
   // Static bounds analysis (LowFat.cpp:426-621): prove an access in-bounds.
@@ -202,7 +300,8 @@ private:
   Bounds getInputPtrBounds(Value *Ptr);
 
   // Unit 9.
-  bool checkAccess(Instruction *I, Value *Ptr, unsigned Info); // bounds elide+check
+  bool checkAccess(Instruction *I, Value *Ptr, unsigned Info,
+                   uint64_t AccessSize = 0); // bounds elide+check
   bool instrumentMemIntrinsic(MemIntrinsic *MI);              // end-pointer checks
   bool replaceLibFunc(CallBase *CB);                          // replaceUnsafeLibFuncs
   bool optimizeMalloc(CallBase *CB);                          // const heap_select fold
@@ -456,7 +555,7 @@ Value *FlexFat::calcBasePtr(Value *Ptr) {
 // The inlined lowfat_oob_check (LowFat.cpp:1026-1066 + :1168-1243), emitted
 // before the access. access_size defaults to 0 (check the byte at ptr).
 void FlexFat::insertBoundsCheck(Instruction *I, Value *Ptr, unsigned Info,
-                                Value *Base) {
+                                Value *Base, uint64_t AccessSize) {
   IRBuilder<> B(I);
   Value *IBase = B.CreatePtrToInt(Base, I64Ty);
   Value *Idx = B.CreateLShr(IBase, B.getInt64(kRegionSizeShift));
@@ -464,37 +563,60 @@ void FlexFat::insertBoundsCheck(Instruction *I, Value *Ptr, unsigned Info,
                                     Align(sizeof(uint64_t)));
   Value *IPtr = B.CreatePtrToInt(Ptr, I64Ty);
   Value *Diff = B.CreateSub(IPtr, IBase);
-  // The check is `diff >=u size - access_size`. access_size defaults to 0 (check
-  // the byte at ptr); -lowfat-check-whole-access (a later option) would subtract
-  // sizeof(access)-1 here. Nothing to subtract for 0.
+  // The check is `diff >=u size - access_size`. access_size defaults to 0 (just
+  // the byte at ptr); -flexfat-check-whole-access sets it to sizeof(*ptr)-1 so
+  // the whole [ptr, ptr+sizeof) span is validated.
+  if (AccessSize != 0)
+    Size = B.CreateSub(Size, B.getInt64(AccessSize));
   Value *Cmp = B.CreateICmpUGE(Diff, Size);
 
   MDNode *Weights =
       MDBuilder(Ctx).createBranchWeights(kErrorWeight, kFastWeight);
-  Instruction *ErrTerm =
-      SplitBlockAndInsertIfThen(Cmp, I, /*Unreachable=*/true, Weights);
-
+  // Error-block mode (LowFat.cpp:1202-1235): -flexfat-no-abort warns and
+  // continues (branch back to the access); otherwise the block is unreachable
+  // (-flexfat-signal traps with ud2/SIGILL, default calls lowfat_oob_error).
+  Instruction *ErrTerm = SplitBlockAndInsertIfThen(
+      Cmp, I, /*Unreachable=*/!ClNoAbort, Weights);
   IRBuilder<> EB(ErrTerm);
-  FunctionCallee OobError = M.getOrInsertFunction(
-      "lowfat_oob_error",
-      FunctionType::get(EB.getVoidTy(),
-                        {EB.getInt32Ty(), PtrTy, PtrTy}, false));
-  if (auto *Fn = dyn_cast<Function>(OobError.getCallee()))
-    Fn->setDoesNotReturn();
-  CallInst *Call = EB.CreateCall(OobError, {EB.getInt32(Info), Ptr, Base});
-  Call->setDoesNotReturn();
+
+  if (ClNoAbort) {
+    FunctionCallee Warn = M.getOrInsertFunction(
+        "lowfat_oob_warning",
+        FunctionType::get(EB.getVoidTy(), {EB.getInt32Ty(), PtrTy, PtrTy},
+                          false));
+    EB.CreateCall(Warn, {EB.getInt32(Info), Ptr, Base});
+  } else if (ClSignal) {
+    InlineAsm *Ud2 = InlineAsm::get(
+        FunctionType::get(EB.getVoidTy(), {}, false), "ud2",
+        "~{dirflag},~{fpsr},~{flags}", /*hasSideEffects=*/true,
+        /*isAlignStack=*/false, InlineAsm::AD_Intel);
+    CallInst *Call = EB.CreateCall(Ud2, {});
+    Call->setDoesNotReturn();
+  } else {
+    FunctionCallee OobError = M.getOrInsertFunction(
+        "lowfat_oob_error",
+        FunctionType::get(EB.getVoidTy(), {EB.getInt32Ty(), PtrTy, PtrTy},
+                          false));
+    if (auto *Fn = dyn_cast<Function>(OobError.getCallee()))
+      Fn->setDoesNotReturn();
+    CallInst *Call = EB.CreateCall(OobError, {EB.getInt32(Info), Ptr, Base});
+    Call->setDoesNotReturn();
+  }
 }
 
 // Bounds-check (or, via the static analysis, elide) one access at `Ptr`.
-bool FlexFat::checkAccess(Instruction *I, Value *Ptr, unsigned Info) {
-  if (!ClNoElide && getPtrBounds(Ptr).isInBounds(/*access_size=*/0)) {
+bool FlexFat::checkAccess(Instruction *I, Value *Ptr, unsigned Info,
+                          uint64_t AccessSize) {
+  if (filterKind(Info))
+    return false; // this access kind's checks are suppressed
+  if (!ClNoElide && getPtrBounds(Ptr).isInBounds((int64_t)AccessSize)) {
     ++NumElided;
     return false; // provably in-bounds
   }
   Value *Base = calcBasePtr(Ptr);
   if (!Base || isa<ConstantPointerNull>(Base))
     return false; // non-fat pointer
-  insertBoundsCheck(I, Ptr, Info, Base);
+  insertBoundsCheck(I, Ptr, Info, Base, AccessSize);
   ++NumChecks;
   return true;
 }
@@ -578,16 +700,27 @@ bool FlexFat::run() {
   // Phase 1: collect interesting instructions without mutating IR (the
   // getInterestingInsts sweep). Loads/stores and the mem-intrinsics get bounds
   // checks; named libc calls get replaced.
-  SmallVector<std::tuple<Instruction *, Value *, unsigned>, 16> LoadStores;
+  // (Instruction, pointer, info, access-size). access_size is sizeof(*ptr)-1
+  // under -flexfat-check-whole-access, else 0.
+  SmallVector<std::tuple<Instruction *, Value *, unsigned, uint64_t>, 16>
+      LoadStores;
   SmallVector<MemIntrinsic *, 8> MemIntrs;
   SmallVector<CallBase *, 8> LibCalls;
+  auto AccessSizeOf = [&](Type *Ty) -> uint64_t {
+    if (!ClCheckWholeAccess || !Ty->isSized())
+      return 0;
+    uint64_t Sz = DL.getTypeAllocSize(Ty).getFixedValue();
+    return Sz ? Sz - 1 : 0;
+  };
   for (Instruction &I : instructions(F)) {
     if (I.getMetadata(LLVMContext::MD_nosanitize))
       continue;
     if (auto *LD = dyn_cast<LoadInst>(&I))
-      LoadStores.emplace_back(&I, LD->getPointerOperand(), kInfoRead);
+      LoadStores.emplace_back(&I, LD->getPointerOperand(), kInfoRead,
+                              AccessSizeOf(LD->getType()));
     else if (auto *ST = dyn_cast<StoreInst>(&I))
-      LoadStores.emplace_back(&I, ST->getPointerOperand(), kInfoWrite);
+      LoadStores.emplace_back(&I, ST->getPointerOperand(), kInfoWrite,
+                              AccessSizeOf(ST->getValueOperand()->getType()));
     else if (auto *MI = dyn_cast<MemIntrinsic>(&I))
       MemIntrs.push_back(MI);
     else if (auto *CB = dyn_cast<CallBase>(&I))
@@ -596,8 +729,8 @@ bool FlexFat::run() {
 
   bool Changed = false;
   // Phase 2: load/store bounds checks.
-  for (auto &[I, Ptr, Info] : LoadStores)
-    Changed |= checkAccess(I, Ptr, Info);
+  for (auto &[I, Ptr, Info, AccessSize] : LoadStores)
+    Changed |= checkAccess(I, Ptr, Info, AccessSize);
   // Phase 3: mem-intrinsic end-pointer checks.
   for (MemIntrinsic *MI : MemIntrs)
     Changed |= instrumentMemIntrinsic(MI);
@@ -613,6 +746,8 @@ bool FlexFat::run() {
 PreservedAnalyses FlexFatPass::run(Function &F, FunctionAnalysisManager &AM) {
   if (F.isDeclaration())
     return PreservedAnalyses::all();
+  if (isBlacklisted(F))
+    return PreservedAnalyses::all(); // -flexfat-no-check-blacklist
   const TargetLibraryInfo &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   bool Changed = FlexFat(F, TLI).run();
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

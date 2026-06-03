@@ -1,0 +1,4 @@
+# FlexFat blacklist (SpecialCaseList format). The [flexfat] section applies to
+# this tool; fun: globs match function names, src: globs match the module id.
+[flexfat]
+fun:no_check_me
