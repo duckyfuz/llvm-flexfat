@@ -32,3 +32,20 @@ here) before any stack work.
   escaping allocas native.
 - Caveat (SPEC Part III): `MAP_SHARED` stacks also force `fork` interposition to
   avoid parent/child stack aliasing — track as a follow-on.
+
+## MSET differential bugs to re-evaluate once this lands (Unit 11)
+The Unit 11 MSET differential ([STATUS.md](STATUS.md) "Unit 11") deferred **48**
+reference-detected bug types to this unit (heap-only ⇒ globals/stack not lowfat):
+- **42 UNDETECTED** — Stack/Global-**origin** inter-object overflows: no check is
+  inserted on a non-lowfat origin. They become checked once `makeAllocaLowFatPtr`
+  / global lowfatification run.
+- **6 PRECONDITIONS-FAILED** — Heap↔{Global,Stack} mixed pairs: today the
+  high-lowfat-heap / low-normal-global address gulf breaks MSET's `target−origin`
+  address-ordering precondition. The region sub-layout (`heap < global < stack`
+  within every 2³⁵ region) makes that precondition satisfiable again once
+  globals/stack move into their G/S sub-ranges, so these *become constructable* —
+  re-run the differential and confirm parity (the reference detects all 6).
+
+**Acceptance for the stack/global unit must include re-running the MSET
+differential and reclassifying these 48** (expect most → DETECTED). Until then they
+are deferred, *not* parity-confirming.

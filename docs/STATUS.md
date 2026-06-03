@@ -394,12 +394,15 @@ reference-only deltas (every one maps to an intentional difference):
 
 | # | Delta bucket | FlexFat verdict | Maps to (intentional difference) |
 |---|---|---|---|
-| 42 | Stack/Global-**origin** Inter-Object spatial | UNDETECTED | **Heap-only / Part II** — the origin object is never lowfatified, so no check is inserted; the neighbor is valid memory ⇒ no trap. |
+| 42 | Stack/Global-**origin** Inter-Object spatial | UNDETECTED | **Part-II-scope (deferred)** — the origin object is never lowfatified, so no check is inserted; the neighbor is valid memory ⇒ no trap. |
+| 6 | Heap↔{Global,Stack} mixed pairs | **PRECONDITIONS FAILED** | **Part-II-scope (deferred)** — *not* a permanent layout property. The mix of a high-lowfat heap object and a low-normal (not-yet-lowfat) global/stack object breaks the test's address-ordering precondition, so MSET can't construct the bug *today*. Once Part II lowfatifies globals/stack the precondition is satisfiable again (provably — see below) and the bug must be **re-evaluated**, exactly as the reference detects it. |
 | 12 | `Misuse-of-free` (temporal) | UNDETECTED | **Spatial-only by design** — FlexFat has no temporal/use-after-free detection. |
-| 6 | Heap↔{Global,Stack} cross-domain adjacency | **PRECONDITIONS FAILED** | **Heap-only layout divergence** — the lowfat allocator relocates heap into high 2³⁵-stride regions, so a heap object *cannot* be made adjacent to a low-address global/stack object; MSET can't even construct the bug. Not a detection miss. |
-| 6 | **Heap→Heap** Linear (Inter-Object ×4 + Non-Object ×2) | UNDETECTED | **Offset-0 same-size-class adjacency blind spot** (inherent LowFat encoding limitation — see below). |
+| 6 | **Heap→Heap** Linear (Inter-Object ×4 + Non-Object ×2) | UNDETECTED | **Offset-0 same-size-class adjacency blind spot** (inherent LowFat encoding limitation, shared with the reference — see below). |
 
-`42 + 12 + 6 + 6 = 66.` ✔
+`42 + 6 + 12 + 6 = 66.` ✔ — **48 are Part-II-scope deferrals** (42 UNDETECTED +
+6 PRECONDITIONS-FAILED; same root cause, different MSET symptom), 12 spatial-only,
+6 the shared encoding blind spot. **The only miss that is *not* closed by finishing
+the planned scope is the 6-type Heap→Heap blind spot.**
 
 #### Hardened config (`-flexfat-check-whole-access`) — FlexFat detects 30 / reference 36
 FlexFat's detected set is **identical to the base config (the same 30 types)** —
@@ -411,10 +414,75 @@ reference-only.**
   — i.e. parity-confirming, not false positives. The 36-type hardened oracle is a
   narrower reference run that simply didn't score those Global/Stack-origin types;
   FlexFat (and the base reference) legitimately detect them.
-- The **9 reference-only** = 3 `PRECONDITIONS FAILED` (Heap↔Global cross-domain
-  adjacency, as above) + **6 `UNDETECTED` that are exactly the same Heap→Heap
+- The **9 reference-only** = 3 `PRECONDITIONS FAILED` (Heap↔Global mixed pairs,
+  Part-II-scope, as above) + **6 `UNDETECTED` that are exactly the same Heap→Heap
   Linear set as the base config**. Whole-access checking does not close any of
   them — see below.
+
+### The 6 PRECONDITIONS-FAILED are Part-II-scope, not a permanent layout property
+A `PRECONDITIONS FAILED` could be either (a) a *designed, permanent* property of the
+region scheme that will still hold after Part II lowfatifies globals/stack — i.e.
+genuinely parity-confirming — or (b) an artifact of globals/stack *not being lowfat
+yet*, in which case it is the same deferred Part-II miss as the 42 UNDETECTED ones
+and must not wear (a)'s label. It is **(b)**, settled two independent ways.
+
+**Mechanism (why it fails today).** MSET signals `PRECONDITIONS FAILED` from *inside
+the test binary*: the generated case `_exit(PRECONDITIONS_FAILED_VALUE)`s when its
+own runtime precondition check fails (`sanitizer.cpp:492`). For
+`…Overflow … Heap Global` the generated body (`linear_ooba_heap_global_inter_object_
+overflow_direct_write_*.c`) is a heap `origin = malloc(8)` and a global
+`char target[8]`, walked forward byte-by-byte until the pointer reaches `target`:
+```c
+if ( !((ssize_t)(GET_ADDR_BITS(target) - GET_ADDR_BITS(origin)) >= 0) )
+    _exit(PRECONDITIONS_FAILED_VALUE);            // target must sit ABOVE origin
+while ( GET_ADDR_BITS(&origin[reach_index]) != GET_ADDR_BITS(target) ) {
+    origin[reach_index] = 0xFF;  ++reach_index;    // linear overflow, caught at origin's bound
+}
+```
+The precondition is **address ordering**, not physical adjacency: `target` (the
+overflow destination) must be above `origin`. Under heap-only FlexFat the heap
+`origin` is relocated to a high 2³⁵-stride region (≥ 32 GiB) while the global
+`target` stays in low `.data` (a few MiB), so `target − origin < 0` → the binary
+self-exits PRECONDITIONS_FAILED. The underflow cases (`…Global Heap`, `…Stack Heap`)
+are the mirror: they need `target` *below* `origin`, equally broken by the same gulf.
+
+**Why Part II restores it — provably (falsifies (a)).** The reference's region
+*sub*-layout (committed `golden/nonpow2/lowfat_config.c:9-14`) fixes the
+within-region ordering of the three allocation kinds — heap at the bottom, globals
+in the middle, stack at the top:
+
+| sub-range | offset within each 2³⁵ region | ≈ |
+|---|---|---|
+| `LOWFAT_HEAP_MEMORY` | `[0, 17179803648)` | `[0, 16 GiB)` |
+| — gap — | 28 672 B (`PROT_NONE`) | |
+| `LOWFAT_GLOBAL_MEMORY` | `[17179832320, 25769766912)` | `[16 GiB, 24 GiB)` |
+| — gap — | 36 864 B | |
+| `LOWFAT_STACK_MEMORY` | `[25769803776, 2³⁵)` | `[24 GiB, 32 GiB)` |
+
+So in **any** size-class region `k`, `addr(stack) > addr(global) > addr(heap)` is
+*structurally guaranteed* (16 GiB / 24 GiB offset floors). Once Part II places a
+global/stack object into the G/S sub-range of its region, the `target − origin ≥ 0`
+precondition for `Heap→Global`/`Heap→Stack` overflow — and its mirror for the
+`Global/Stack→Heap` underflows — is **satisfiable, indeed always-true for same-class
+objects**. The gaps make the objects non-*adjacent*, but the bug never needed
+adjacency: the linear walk is caught the instant it leaves `origin`'s bound, long
+before traversing 16 GiB of heap + the gap. So the layout fact the user asked for
+points to (b): the scheme *will* let MSET construct these bugs post-Part-II.
+
+**Empirical confirmation.** The reference — which *has* globals+stack lowfatified —
+**detected all 6** of these types (present in `lowfat_original_detected.txt`; 3 also
+in the hardened `lowfat_detected.txt`). A permanent-property (a) reading would
+require the reference to fail to construct them too; it does not. Heap-origin cases
+(`Heap Global`, `Heap Stack`) will then hit FlexFat's *existing* heap bounds check
+(the same one that already catches `Heap→Heap` non-linear and every `Heap→{Global,
+Stack}` that MSET *can* set up today — see the base table's parity rows) and should
+reach **parity**; the `Global/Stack`-origin underflows depend on Part II actually
+inserting the check on the now-lowfat origin.
+
+**Classification: these 6 are deferred — re-evaluate when Part II lands**, grouped
+with the 42 UNDETECTED as Part-II-scope. They are *not* counted as parity-confirming
+and *not* a permanent design win. (Tracked alongside the SHM/stack dependency in
+[STACK_UNIT.md](STACK_UNIT.md).)
 
 ### The one residual: the Heap→Heap offset-0 adjacency blind spot (classified, not papered over)
 The only genuine "FlexFat ran a heap-origin bug and didn't catch it" deltas are

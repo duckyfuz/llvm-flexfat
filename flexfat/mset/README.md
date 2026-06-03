@@ -31,12 +31,16 @@ committed reference oracle (`MSET/build/lowfat_original_detected.txt`,
 `MSET/build/lowfat_detected.txt`).
 
 ## Result
-The full bug-set diff and the classification of every delta against FlexFat's
-documented intentional differences (heap-only/Part II, spatial-only, offset-0
-adjacency blind spot, layout-induced precondition divergence) live in
+The full bug-set diff and the classification of every delta live in
 [`docs/STATUS.md`](../../docs/STATUS.md) under "Unit 11 — MSET differential".
 Headline: **FlexFat's detected set is a strict subset of the reference's — zero
-false detections, zero unexplained misses.**
+false detections, zero unexplained misses.** Of the 66 base-config deltas: **48 are
+Part-II-scope deferrals** (Stack/Global lowfatification not yet done — 42 UNDETECTED
++ 6 PRECONDITIONS-FAILED, the latter unconstructable *today* only because of the
+heap/normal address gulf, satisfiable again post-Part-II — see STATUS.md for the
+layout proof), 12 are spatial-only (temporal), and **6 are the inherent LowFat
+Heap→Heap offset-0 adjacency blind spot** (shared with the reference). Only the last
+6 are not closed by finishing the planned scope.
 
 ## Note on the temporal phase
 FlexFat is **spatial-only**; it detects no use-after-free / double-free. Several
