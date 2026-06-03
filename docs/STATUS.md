@@ -209,12 +209,24 @@ before the intrinsic, reporting `Dst+len`).
   (`7`) is a compile-time immediate, so the runtime `heap_select` `clzll`/`lzcnt`
   dispatch is gone. A dynamic `malloc(n)` stays `jmp lowfat_malloc` (which does
   the dispatch internally). Pinned by `optimize_malloc.ll`.
-- **`kLowFatSizes[]` is duplicated in the pass.** `flexfatHeapSelect` replicates
-  the runtime `lowfat_heap_select` host-side from a copy of the generated
-  `lowfat_config.c` `lowfat_sizes[]` (61 non-POW2 classes). Both come from the
-  Unit 2 generator and **must stay in sync**; if `sizes.cfg` changes, regenerate
-  both. (The reference gets this for free by `#include`-ing the generated config
-  into the pass TU; our pass lives in `llvm/`, the config in `compiler-rt/`.)
+- **The pass size table is single-sourced and drift-guarded** (hardening past
+  the original "duplicated, keep in sync"). `flexfatHeapSelect` reads
+  `llvm/lib/Transforms/Instrumentation/FlexFatSizes.inc`, a **generated** artifact
+  the Unit 2 generator (`flexfat/config/lowfat-config.c`) now emits in the *same
+  run* as the runtime's `lowfat_sizes[]` — so the pass cannot hand-drift from the
+  runtime. Drift is caught two ways, both in `check-flexfat`:
+  - **Byte-for-byte:** `flexfat/config/test/sizes-sync.test` asserts the pass's
+    `.inc` values equal the runtime `lowfat_config.c` `lowfat_sizes[]` values (and
+    the pass `.inc` equals the committed golden `.inc`; the parity tests tie
+    golden to a fresh regen). Verified to fail on a one-value corruption.
+  - **Behaviorally:** `compiler-rt/test/flexfat/TestCases/malloc_class.c` —
+    a constant `malloc(100)` is folded to `lowfat_malloc_index(7, 100)`; the e2e
+    asserts the object lands in the runtime's region 7 / class 112 (`p[111]`
+    passes, `p[112]` traps with `size = 112`). If the tables drift, the object
+    lands in a different class → the in-bounds run traps (false positive) or the
+    OOB run fails to trap (missed bug).
+  The desync this prevents is silent and correctness-affecting: a stale index
+  folds a constant malloc into the wrong region, decoded against the wrong size.
 - **replaceUnsafeLibFuncs is per-call, not module RAUW.** A New-PM function pass
   must not `replaceAllUsesWith` a module-level declaration, so we redirect each
   call site (`CallBase::setCalledFunction`). Divergence from the reference: rare

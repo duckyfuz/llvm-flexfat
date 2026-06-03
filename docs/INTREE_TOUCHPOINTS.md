@@ -188,3 +188,11 @@ resolve against the Units 3–5 runtime — the e2e are the real integration tes
 - **+** `compiler-rt/test/flexfat/TestCases/memcpy_oob.c` — a memcpy overrun traps with `operation = memcpy` (`size = 16`, `overflow = +84`).
 - **+** `compiler-rt/test/flexfat/TestCases/memset_oob.c` — a memset overrun traps with `operation = memset`.
 - **+** `compiler-rt/test/flexfat/TestCases/mem_inbounds.c` — in-bounds memcpy/memset (+ a constant-malloc path) exit 0.
+
+### Size-table single-sourcing + drift guards (Unit 9 hardening)
+- **~** `flexfat/config/lowfat-config.c` — the generator now also emits `flexfat_sizes.inc` (the size-class table body) from the same run as `lowfat_config.c`'s `lowfat_sizes[]`.
+- **+** `flexfat/config/golden/{nonpow2,pow2}/flexfat_sizes.inc` — committed golden for the new artifact.
+- **+** `llvm/lib/Transforms/Instrumentation/FlexFatSizes.inc` — the pass's copy (generated, == golden nonpow2); `FlexFat.cpp`'s `kLowFatSizes[]` now `#include`s it instead of a hand-copied array.
+- **~** `flexfat/config/test/{nonpow2,pow2}-parity.test` — also diff the regenerated `.inc` against golden.
+- **+** `flexfat/config/test/sizes-sync.test` — byte-for-byte drift guard: pass `.inc` values == runtime `lowfat_sizes[]` values (and pass `.inc` == golden `.inc`).
+- **+** `compiler-rt/test/flexfat/TestCases/malloc_class.c` — behavioral drift guard: `malloc(100)` → region 7 / class 112; `p[111]` passes, `p[112]` traps with `size = 112`.

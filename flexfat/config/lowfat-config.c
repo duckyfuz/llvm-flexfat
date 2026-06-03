@@ -209,8 +209,8 @@ static void spawn_error_worker(pthread_t *thread, pthread_mutex_t *lock,
 }
 
 static void compile(FILE *stream, FILE *hdr_stream, FILE *ld_stream,
-    size_t *sizes, size_t *magics, size_t *errors, size_t region_size,
-    size_t sizes_len, bool pow2, bool legacy);
+    FILE *inc_stream, size_t *sizes, size_t *magics, size_t *errors,
+    size_t region_size, size_t sizes_len, bool pow2, bool legacy);
 
 #define OPTION_NO_ERROR_GEN             1
 #define OPTION_NO_MEMORY_ALIAS          2
@@ -487,11 +487,24 @@ int main(int argc, char **argv)
             strerror(errno));
         return EXIT_FAILURE;
     }
-    compile(stream, hdr_stream, ld_stream, sizes, magics, errors,
+    // flexfat_sizes.inc: the size-class table body, single-sourced for the
+    // FlexFat LLVM pass (which folds heap_select at compile time) and the
+    // runtime.  Both consume the same generated values; see the byte-for-byte
+    // drift guard in flexfat/config/test and the LLVM pass FlexFatSizes.inc.
+    filename = "flexfat_sizes.inc";
+    FILE *inc_stream = fopen(filename, "w");
+    if (inc_stream == NULL)
+    {
+        fprintf(stderr, "error: failed to open file \"%s\": %s\n", filename,
+            strerror(errno));
+        return EXIT_FAILURE;
+    }
+    compile(stream, hdr_stream, ld_stream, inc_stream, sizes, magics, errors,
         region_size, sizes_len, ispow2, legacy);
     fclose(stream);
     fclose(hdr_stream);
     fclose(ld_stream);
+    fclose(inc_stream);
 
     printf("Done...\n");
     return 0;
@@ -515,8 +528,8 @@ static size_t stack_select(size_t *sizes, size_t sizes_len, size_t size)
  * Output the low-fat-pointer configuration for the given parameters.
  */
 static void compile(FILE *stream, FILE *hdr_stream, FILE *ld_stream,
-    size_t *sizes, size_t *magics, size_t *errors, size_t region_size,
-    size_t sizes_len, bool pow2, bool legacy)
+    FILE *inc_stream, size_t *sizes, size_t *magics, size_t *errors,
+    size_t region_size, size_t sizes_len, bool pow2, bool legacy)
 {
     /*
      * Region layout:
@@ -691,12 +704,19 @@ static void compile(FILE *stream, FILE *hdr_stream, FILE *ld_stream,
         "__attribute__((__section__(\"LOWFAT_CONST_DATA\")))\n");
     fprintf(stream, "\n");
 
-    // lowfat_sizes
+    // lowfat_sizes (and the single-sourced flexfat_sizes.inc body, identical
+    // values, consumed by the LLVM pass's host-side heap_select).
+    fprintf(inc_stream, "/* AUTOMATICALLY GENERATED -- do not edit. */\n");
+    fprintf(inc_stream, "/* Source: flexfat/config/sizes.cfg via "
+        "flexfat/config/lowfat-config.c. */\n");
     fprintf(stream, "static const LOWFAT_CONST_DATA size_t "
         "lowfat_sizes[] =\n");
     fprintf(stream, "{\n");
     for (size_t i = 0; i < sizes_len; i++)
+    {
         fprintf(stream, "\t%zu, /* idx=%zu */\n", sizes[i], i);
+        fprintf(inc_stream, "%zu, /* idx=%zu */\n", sizes[i], i);
+    }
     fprintf(stream, "};\n");
     fprintf(stream, "\n");
 

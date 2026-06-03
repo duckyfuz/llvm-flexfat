@@ -100,23 +100,16 @@ static cl::opt<bool> ClNoReplaceMalloc(
     cl::desc("FlexFat: do not replace malloc()/free()/... with lowfat_* "
              "(disables heap protection of pass-compiled allocations)"));
 
-// Heap size classes, copied verbatim from the generated
-// compiler-rt/lib/flexfat/lowfat_config.c `lowfat_sizes[]` (non-POW2 default).
-// MUST stay in sync with the runtime: both are emitted by the Unit 2 generator
-// from sizes.cfg. Region index `i` (1-based, as returned by heap_select and
-// consumed by lowfat_malloc_index) has class size kLowFatSizes[i-1].
+// Heap size classes (non-POW2 default). SINGLE-SOURCED with the runtime: the
+// Unit 2 generator (flexfat/config/lowfat-config.c) emits this `.inc` and the
+// runtime's lowfat_sizes[] from the same sizes.cfg run, so the pass cannot
+// hand-drift from the runtime. A byte-for-byte drift guard
+// (flexfat/config/test/sizes-sync.test) and a behavioral e2e
+// (compiler-rt/test/flexfat/TestCases/malloc_class.c) fail the build if they
+// ever diverge. Region index `i` (1-based) has class size kLowFatSizes[i-1].
 static constexpr uint64_t kLowFatSizes[] = {
-    16,         32,         48,         64,         80,         96,
-    112,        128,        144,        160,        192,        224,
-    256,        272,        320,        384,        448,        512,
-    528,        640,        768,        896,        1024,       1040,
-    1280,       1536,       1792,       2048,       2064,       2560,
-    3072,       3584,       4096,       4112,       5120,       6144,
-    7168,       8192,       8208,       10240,      12288,      16384,
-    32768,      65536,      131072,     262144,     524288,     1048576,
-    2097152,    4194304,    8388608,    16777216,   33554432,   67108864,
-    134217728,  268435456,  536870912,  1073741824, 2147483648, 4294967296,
-    8589934592};
+#include "FlexFatSizes.inc"
+};
 static constexpr unsigned kNumRegions =
     sizeof(kLowFatSizes) / sizeof(kLowFatSizes[0]);
 

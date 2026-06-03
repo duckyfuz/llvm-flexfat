@@ -10,3 +10,4 @@
 # RUN: diff -u %S/../golden/pow2/lowfat_config.h %t.d/lowfat_config.h
 # RUN: diff -u %S/../golden/pow2/lowfat_config.c %t.d/lowfat_config.c
 # RUN: diff -u %S/../golden/pow2/lowfat.ld       %t.d/lowfat.ld
+# RUN: diff -u %S/../golden/pow2/flexfat_sizes.inc %t.d/flexfat_sizes.inc
