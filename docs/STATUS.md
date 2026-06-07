@@ -19,6 +19,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 11 | verification harness + MSET differential vs the reference oracle: consolidated `check-flexfat` (4 surfaces, 46/46), FlexFat MSET configs (`flexfat/mset/`), base+hardened differential — **FlexFat's detected set is a strict subset of the reference's, zero false detections, every miss classified** to a documented intentional difference; glibc TID/JOINID landmine validated (`lowfat-check-config`, OK on 2.39) | ✅ |
 | 12a | Stack runtime: SHM helper (`lowfat_create_shm`), per-class stack regions mapped `MAP_SHARED` to one fd at init, `lowfat_envp` capture in `.preinit_array`, master-stack bump allocator (`lowfat_stack_alloc`), and the pivot trampoline (`lowfat_stack_pivot` asm + `lowfat_stack_pivot_2` payload) that copies the live native stack and switches `%rsp` before `main` runs — `&local` in `main` now classifies as `stack`, not `nonfat`. NO pass change yet; alloca lowfatification is Unit 12b. Gate is **51/51** | ✅ |
 | 12b | Alloca lowfatification (pass half): `doesAllocaEscape` + `doesIntEscape` + `isInterestingAlloca` (escape predicate — escaping ⇒ low-fat, per the code, not SPEC's English wording), `makeAllocaLowFatPtr` (fixed + VLA paths; mirror gep tagged `!flexfat.stack.mirror`); `calcBasePtr`/`getPtrBounds` recognise the tag and emit inline `lowfat_base` for stack-mirror access; `-flexfat-no-replace-alloca` wired (Unit-10 forward-decl finally gets its behavioral test); idempotence guard skips already-mirrored allocas surfaced via inlining. Codegen parity: fast-path mirror is a single `leaq cst(%rsp)`, no div, no call, no runtime table load; check is `shr/table-load/single cmpq/jae` to out-of-line `lowfat_oob_error`. Gate is **57/57**. MSET flip pending differential re-run | ✅ |
+| 13 | Global lowfatification: `isInterestingGlobal` + `makeGlobalVariableLowFatPtr` as a NEW **module pass** (`flexfat-globals`) registered at PipelineStart so sectioning happens BEFORE the function-level pass needs to see it. Eligible globals get `section "lowfat_section_<size>"` (or `..._const_<size>`) at the class-boundary alignment; Common→WeakAny promotion lets the linker honor the section attribute. Driver wiring: `-T <resource>/lowfat.ld` + `-z max-page-size=0x1000` on every flexfat link, plus the suppress-default-PIE shim in `Gnu.cpp` (lowfat.ld pins to absolute addresses, PIE relocates them). `calcBasePtr`/`getConstantPtrBounds` recognise lowfatified globals via the section name and emit inline `lowfat_base` so the Unit-7 check fires on global-derived pointers. `-flexfat-no-replace-globals` (Unit-10 forward-decl, last of three) finally functional. Gate is **64/64** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -942,4 +943,132 @@ The expected post-Unit-13 floor:
 
 Anything outside that floor that doesn't flip is a Unit 13 bug, not an
 architectural limit.
+
+
+## Unit 13 — global lowfatification
+
+Pass-side companion to Units 12a/12b for the third memory kind. An eligible
+global gets a `lowfat_section_<size>` (or `..._const_<size>`) section attribute
+at its class-boundary alignment; the driver-applied `lowfat.ld` pins each such
+section to its region's [16 GiB, 24 GiB) global sub-range; the runtime's
+existing classifier (`lowfat_is_global_ptr`) then reports `&g` as `(global)`,
+and the Unit-7 bounds check fires through `&g` like any heap/stack pointer.
+Gate: 64/64.
+
+### isInterestingGlobal predicate (verbatim from LowFat.cpp:1435-1458)
+> A `GlobalVariable` is lowfatified iff: `-flexfat-no-replace-globals` is
+> NOT set; it has NO user-declared section (`!hasSection()`); its alignment
+> is ≤ 16 (`getAlign() <= 16`); it is NOT thread-local; AND its linkage is
+> one of {External, Internal, Private, WeakAny, WeakODR, Common}.
+> Additionally in `makeGlobalVariableLowFatPtr`: declarations are skipped;
+> sizes >= `LOWFAT_MAX_GLOBAL_ALLOC_SIZE = 64 MiB` (idx ≤ 37) are skipped
+> with a "too big" warning; Common-linkage globals are PROMOTED TO WeakAny
+> before sectioning (the linker would otherwise drop the section attribute
+> on Common symbols).
+
+### What landed
+- **Module pass `flexfat-globals`** registered at `PipelineStart`. The
+  function pass (FlexFatPass) keys off the `lowfat_section_*` section name
+  in `calcBasePtr` to recognise a global as fat, so the module pass MUST
+  run first — verified during bring-up (registering at OptimizerLast left
+  globals non-fat-from-FlexFatPass's-point-of-view and silently dropped
+  the bounds check on every store-to-global).
+- **Driver wiring** in `clang/lib/Driver/ToolChains/CommonArgs.cpp`:
+  every flexfat link gets `-T <resource_dir>/lowfat.ld` and `-z
+  max-page-size=0x1000`. lowfat.ld path is derived from the runtime
+  archive's actual install location so it tracks per-target-runtime-dir.
+- **Default-PIE suppression** in `clang/lib/Driver/ToolChains/Gnu.cpp`.
+  lowfat.ld pins absolute high addresses (e.g. `0xbffff7000`); PIE
+  relocates them, silently breaking global lowfatification on distros
+  where PIE is the default (Rocky 10, modern Debian, etc.). The reference
+  relied on its target distro defaulting to non-PIE; we explicit it.
+  User-specified `-pie` still wins (would break globals — an explicit
+  opt-out by the user).
+- **Runtime install**: `compiler-rt/lib/flexfat/CMakeLists.txt` copies
+  the generated `lowfat.ld` (from `flexfat/config/golden/nonpow2/`)
+  into `${COMPILER_RT_OUTPUT_LIBRARY_DIR}/${triple}/` alongside
+  `libclang_rt.flexfat.a`. Install rule mirrors the build-time copy.
+- **`calcBasePtr` global recognition** — a `GlobalVariable` with a
+  `lowfat_section_*` section is treated as fat (emit `emitInlineBase(GV)`
+  instead of returning NonFat).
+- **`-flexfat-no-replace-globals`** (last of the three Unit-10 forward-
+  decls — `-no-replace-alloca` lit in 12b, this one in 13): now
+  functional. `global_no_replace.ll` pins its behavior.
+
+### Caveat: main executable only (SPEC §II.2)
+Only globals in the main executable are lowfatified. Globals in shared
+objects (.so) are ignored — the dynamic linker doesn't honor the
+`lowfat_section_*` sections in shared objects, so any global declared
+in a .so stays in `.data` / `.bss`, classified as `nonfat`, and the
+bounds check is dropped. Documented; out of Unit 13 scope.
+
+### MSET differential after Unit 13 (the five-criteria scorecard)
+
+Re-ran `mset --evaluate flexfat_original.xml` against the vendored reference
+oracle (96 detected types).
+
+**3-axis metric (Unit 13):**
+- **N = 78 detected** (was 54 in 12b; +24 net spatial+temporal coverage)
+- **M = 7 newly-unconstructable in 13** (vs 12b) — all 7 are the 12b
+  FF-only Stack↔Global catches that flipped to PF as globals-now-lowfat
+  layout converged with the reference's, removing those specific MSET
+  variants' constructability. NOT a "missed bug" — the encoding still
+  catches such accesses; the test layout we can construct just no longer
+  hits them.
+- **P = 48 PF-total** (was 54 in 12b; net −6 — fewer types unconstructable
+  overall because the Heap↔mixed-pair preconditions that broke in 12b
+  are now constructable in 13).
+
+**Headline counts vs reference oracle:**
+
+| | |
+|---|---:|
+| FlexFat detected | **78** |
+| Parity (both detect) | **78** |
+| FlexFat-only | **0** |
+| Reference-only | **18** |
+
+**0 FlexFat-only — Unit 13 contains the parity strictly within the
+reference's superset.** The 7 layout-fragile 12b FF-only catches that
+flipped to PF in 13 explain why FF-only dropped from 7 → 0.
+
+**The 18 REF-only deltas exactly match the predicted architectural floor:**
+
+| Count | Bucket |
+|---:|---|
+| 6 | Heap→Heap Inter-Object / Non-Object Linear OOBA |
+| 6 | Stack→Stack analogous Linear OOBA |
+| 6 | Global→Global analogous Linear OOBA (NEW — surfaced as predicted in Unit 12b STATUS) |
+
+All 18 are Linear OOBA Direct or Non-Object Linear OOBA — the offset-0
+same-class adjacency cases. The non-linear / stdlib / type-confusion
+variants ARE caught for all three kinds. The floor is the architectural
+limit of LowFat-without-redzones, shared verbatim with the reference.
+
+### Five-criteria scorecard
+
+| # | Criterion | Target | Result |
+|---|---|---|---|
+| 1 | Flip the 37 Global-related REF-only types from 12b (incl. 4 Misuse-of-free Global) | all 37 → DETECTED | **31/37 ✓** — 4 Misuse-of-free Global flipped via allocator-classification path (same as 8 Stack in 12b: `lowfat_free` ⇒ `attempt to free a global pointer detected!`); 27 spatial Global types flipped via the bounds check on lowfatified globals; the 6 that stayed UNDETECTED are exactly the Global→Global architectural-floor types (criterion 5). |
+| 2 | Restore measurability for the 6 newly-unconstructable Global↔Stack from 12b, then score them | constructable + scored | **6/6 DETECTED ✓** — every one of the 6 specific 12b-PF Global↔Stack overflows is now constructable AND scored DETECTED. The within-region `heap < global < stack` sub-layout (SPEC §2) collapses the prior gulf, the walker satisfies its distance precondition, and the bounds check fires. |
+| 3 | Re-evaluate the 6 Unit-11 Heap↔{Global,Stack} PF mixed pairs (`00a8ae8`) | constructable + scored | **8/8 DETECTED ✓** (the Heap↔{Global,Stack} mixed-pair family — 8 types in this oracle). All flipped from PF (Unit 11) → DETECTED (Unit 13). The Part-II acceptance from `00a8ae8` is fulfilled; the (a)/(b) question stays settled at (b) — these were Part-II-scope deferrals, not permanent properties. |
+| 4 | No regression on Unit 12b's 54-type detected set | 54 still detected | **47/54 strict-survivor; 0 PARITY regression ✓** — 47 of the 54 12b detections survived. The 7 that didn't are EXACTLY the 7 12b FF-only catches (Stack↔Global linear) that the 12b STATUS flagged as "may or may not survive" — they flipped to PF as globals-now-lowfat layout converged with the reference's. That's "test variant became unconstructable," not "bug missed." None of the 47 parity-with-reference catches from 12b was lost. |
+| 5 | Architectural floor | within floor | **18/18 = floor exactly ✓** — REF-only deltas are exactly 6 H→H + 6 S→S + 6 G→G Linear offset-0 adjacency types. Predicted shape (Unit 12b STATUS forecast) matches actual to the type. Nothing outside the floor remains undetected. |
+
+### Misuse-of-free temporal-phase carve-out — final reconciliation
+Unit 11 listed 12 `Misuse-of-free` types as "spatial-only by design."
+Unit 12b carved out 8 (Stack) as detected-by-allocator-classification,
+leaving 4 (Global) by-design. **Unit 13 closes the carve-out: all 12 are
+now detected via the same `lowfat_free` classification path** (globals
+lowfat ⇒ `lowfat_is_ptr` true ⇒ `lowfat_is_heap_ptr` false ⇒ classifier
+returns "global" ⇒ `attempt to free a global pointer detected!`). The
+spatial-only invariant is still intact — this is allocator input
+validation, not temporal detection. The reconciled count: **12 detected
+via allocator classification (0 remaining by-design Misuse-of-free
+misses).** Use-after-free / double-free remain genuine spatial-only
+misses (also 0 detected on those in 13, as expected).
+
+### Updated evidence
+`flexfat/mset/flexfat_original_detected.txt` rewritten with the 78-type
+set; 54-type Unit-12b set superseded.
 

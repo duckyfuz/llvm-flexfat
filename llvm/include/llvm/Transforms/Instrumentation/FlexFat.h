@@ -34,6 +34,7 @@
 
 namespace llvm {
 class Function;
+class Module;
 
 /// Public interface to the FlexFat function pass.
 class FlexFatPass : public PassInfoMixin<FlexFatPass> {
@@ -44,6 +45,23 @@ public:
   // `optnone` functions (which clang attaches to every function at -O0).
   // Without this, the function-pass adaptor would skip it at -O0, defeating the
   // reference's EP_EnabledOnOptLevel0 placement.
+  static bool isRequired() { return true; }
+};
+
+/// Unit 13: module pass for global-variable lowfatification. Eligible globals
+/// (see isInterestingGlobal in FlexFat.cpp — not thread-local, ordinary
+/// linkage, no user section/oversized-alignment, size ≤
+/// LOWFAT_MAX_GLOBAL_ALLOC_SIZE) are placed in `lowfat_section_<size>` (or
+/// `lowfat_section_const_<size>`) with their class-boundary alignment. The
+/// driver-applied `lowfat.ld` pins those sections to each region's
+/// [16 GiB, 24 GiB) global sub-range, so `&g` lands inside a low-fat region
+/// and the Unit-7 bounds check fires through it just like a heap/stack ptr.
+class FlexFatGlobalsPass : public PassInfoMixin<FlexFatGlobalsPass> {
+public:
+  LLVM_ABI PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+
+  // Same isRequired() reasoning as the function pass: instrumentation must
+  // run at every -O level.
   static bool isRequired() { return true; }
 };
 

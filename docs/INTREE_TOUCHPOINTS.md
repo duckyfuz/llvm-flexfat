@@ -352,3 +352,74 @@ bounds-check sweep.
   overflow on an escaping local traps with the deterministic report
   fields (`operation = write`, `pointer = … (stack)`, `size = 32` — the
   class-size bump-up).
+
+## Unit 13 — global lowfatification (pass + driver + runtime install)
+
+### Pass
+- **+** `llvm/include/llvm/Transforms/Instrumentation/FlexFat.h` — declare
+  `FlexFatGlobalsPass` (module pass) alongside the function pass.
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp`:
+  - **+** `kMaxGlobalAllocSize = 67108864` (64 MiB cap).
+  - **+** `isInterestingGlobal` (port of LowFat.cpp:1435-1458).
+  - **+** `makeGlobalVariableLowFatPtr` (port of LowFat.cpp:1467-1505):
+    skip declarations; warn-and-skip oversized; promote Common→WeakAny;
+    align to class boundary; write `section "lowfat_section_<size>"` or
+    `..._const_<size>` per `isConstant()`.
+  - **+** `FlexFatGlobalsPass::run` — snapshot `M.globals()` then process.
+  - **~** `calcBasePtr` — a `GlobalVariable` with a `lowfat_section_*`
+    section is treated as fat; emit `emitInlineBase(GV)`.
+  - **~** `getConstantPtrBounds` — comment update; semantics unchanged
+    (returns source `TypeAllocSize` so static analysis still elides
+    provably in-bounds accesses, and the dynamic check fires for the rest).
+- **~** `llvm/lib/Passes/PassRegistry.def` — add
+  `MODULE_PASS("flexfat-globals", FlexFatGlobalsPass())`.
+- **~** `clang/lib/CodeGen/BackendUtil.cpp` — `addFlexFat` now registers
+  `FlexFatGlobalsPass` at PipelineStart so it runs BEFORE the function
+  pipeline (which contains FlexFatPass and depends on the section being
+  set when calcBasePtr inspects globals).
+
+### Driver
+- **~** `clang/lib/Driver/ToolChains/CommonArgs.cpp` — on every flexfat
+  link, push `-T <resource>/lowfat.ld` (path derived from the runtime
+  archive's actual location, so it tracks per-target-runtime-dir layout)
+  and `-z max-page-size=0x1000` (default 2 MiB pages × thousands of empty
+  lowfat sections would otherwise blow the executable to GiB).
+- **~** `clang/lib/Driver/ToolChains/Gnu.cpp` — suppress default-PIE
+  when `-fsanitize=flexfat` is active and the user didn't explicitly
+  ask for `-pie`. lowfat.ld pins sections to absolute addresses (e.g.
+  `0xbffff7000`); PIE relocates them, which silently breaks global
+  lowfatification on distros where PIE is the default (Rocky 10,
+  modern Debian, etc.). User-specified `-pie` still wins.
+
+### Runtime install
+- **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — copy
+  `flexfat/config/golden/nonpow2/lowfat.ld` into
+  `${COMPILER_RT_OUTPUT_LIBRARY_DIR}/${triple}/` (same directory as
+  `libclang_rt.flexfat.a`) at build time; install it to the matching
+  path at install time. Path-derivation in the driver assumes this
+  exact placement.
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/global_lowfatify.ll` —
+  mutable global → `lowfat_section_<size>` at class align; const →
+  `lowfat_section_const_<size>`.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/global_excluded.ll` —
+  thread-local, user-section, alignment-> 16, declaration-only,
+  oversized (> 64 MiB) all stay untouched.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/global_common.ll` —
+  Common-linkage promoted to WeakAny + sectioned.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/global_no_replace.ll` —
+  `-flexfat-no-replace-globals` suppresses; the Unit-10 inert
+  forward-decl finally has its behavioral test.
+
+### e2e (surface 3)
+- **+** `compiler-rt/test/flexfat/TestCases/global_classify.c` — the
+  link-level classifier test: a regular `int g;` lands in `[16 GiB,
+  24 GiB)` of its lowfat region, `lowfat_is_global_ptr(&g) == true`,
+  `lowfat_base(&g) == &g`, `lowfat_size(&g) == 16`. Proves the linker
+  half (lowfat.ld INSERT AFTER + max-page-size + no-PIE).
+- **+** `compiler-rt/test/flexfat/TestCases/global_oob.c` — global
+  buffer overflow traps with `pointer = … (global)`, `size = 32`
+  (class bump-up from 16).
+- **+** `compiler-rt/test/flexfat/TestCases/global_clean.c` — large
+  mixed mutable+const globals, clean exit at -O0 and -O2.

@@ -1760,6 +1760,27 @@ bool tools::addSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     CmdArgs.push_back(Args.MakeArgString(S));
   }
 
+  // FlexFat Unit 13: every link with -fsanitize=flexfat must apply
+  // lowfat.ld (so the lowfat_section_<size> assignments from
+  // FlexFatGlobalsPass land in their pinned high-address slots), and
+  // force 4 KiB page size so ld doesn't blow the executable up to GiB
+  // sizes (default 2 MiB pages × thousands of empty sections). The
+  // linker script is installed next to libclang_rt.flexfat.a — derive
+  // its path from the runtime library's actual location so it tracks
+  // any per-target-runtime-dir layout choice the toolchain made
+  // (TC.getCompilerRTPath() resolves to lib/linux/ on some setups while
+  // the runtime archive actually lives in lib/<triple>/).
+  if (SanArgs.needsFlexfatRt()) {
+    SmallString<256> RtPath(
+        TC.getCompilerRT(Args, "flexfat", ToolChain::FT_Static));
+    llvm::sys::path::remove_filename(RtPath);
+    llvm::sys::path::append(RtPath, "lowfat.ld");
+    CmdArgs.push_back("-T");
+    CmdArgs.push_back(Args.MakeArgString(RtPath));
+    CmdArgs.push_back("-z");
+    CmdArgs.push_back("max-page-size=0x1000");
+  }
+
   // Add shared runtimes before adding fuzzer and its dependencies.
   for (auto RT : SharedRuntimes)
     addSanitizerRuntime(TC, Args, CmdArgs, RT, true, false);

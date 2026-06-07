@@ -608,6 +608,13 @@ Bounds FlexFat::getConstantPtrBounds(Constant *C) {
 
   Bounds B = Bounds::nonFat();
   if (auto *GV = dyn_cast<GlobalVariable>(C)) {
+    // Unit 13: a lowfatified global is fat — its base is recoverable via the
+    // standard magic-multiply, and the runtime bounds it to the class size
+    // (which differs from the source size). Static analysis can still elide
+    // in-bounds accesses through the SOURCE size — accessing beyond [0,size)
+    // would be UB even if it falls within the rounded-up class — so keep the
+    // ub at the source TypeAllocSize, but mark the lowfat tier so the dynamic
+    // check still fires for everything we can't prove safe.
     Type *Ty = GV->getValueType();
     if (Ty->isSized()) {
       uint64_t Size = DL.getTypeAllocSize(Ty);
@@ -749,8 +756,17 @@ Value *FlexFat::calcBasePtr(Value *Ptr) {
     // never appear directly under a checked access — every use has been
     // RAUW'd to a !flexfat.stack.mirror gep (handled above).
     Base = NonFat;
+  } else if (auto *GV = dyn_cast<GlobalVariable>(Ptr)) {
+    // Unit 13: a global with a `lowfat_section_*` section is in a lowfat
+    // region, so its base is recoverable via the same magic-multiply as any
+    // other fat pointer. Globals without that section (uninstrumented or
+    // excluded) stay non-fat.
+    if (GV->hasSection() && GV->getSection().starts_with("lowfat_section_"))
+      Base = emitInlineBase(GV);
+    else
+      Base = NonFat;
   } else if (isa<Constant>(Ptr)) {
-    // Globals/constants are not lowfatified yet; non-fat.
+    // Non-global constants (e.g. inttoptr immediates) — non-fat.
     Base = NonFat;
   } else if (auto *Sel = dyn_cast<SelectInst>(Ptr)) {
     Value *A = calcBasePtr(Sel->getTrueValue());
@@ -1140,5 +1156,98 @@ PreservedAnalyses FlexFatPass::run(Function &F, FunctionAnalysisManager &AM) {
     return PreservedAnalyses::all(); // -flexfat-no-check-blacklist
   const TargetLibraryInfo &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   bool Changed = FlexFat(F, TLI).run();
+  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+//===----------------------------------------------------------------------===//
+// Unit 13: global-variable lowfatification (module pass).
+//===----------------------------------------------------------------------===//
+
+// Largest global the lowfat region scheme can hold per region (per
+// lowfat_config.h: LOWFAT_MAX_GLOBAL_ALLOC_SIZE = 64 MiB). The reference's
+// check is `clzll(size) <= clzll(MAX) = 37` ⇒ too big.
+constexpr uint64_t kMaxGlobalAllocSize = 67108864; // 64 MiB
+
+// LowFat.cpp:1435-1458 — port verbatim. The reference uses getAlignment()
+// (legacy MaybeAlign-as-uint); under modern LLVM that's getAlign().value().
+// All exclusions checked here; size-cap + Common-promotion live in the
+// transform itself per the reference.
+static bool isInterestingGlobal(GlobalVariable *GV) {
+  if (ClNoReplaceGlobals)
+    return false;
+  if (GV->hasSection())                 // user-declared section
+    return false;
+  if (GV->getAlign().valueOrOne().value() > 16) // user-declared alignment > 16
+    return false;
+  if (GV->isThreadLocal())              // TLS not supported
+    return false;
+  switch (GV->getLinkage()) {
+  case GlobalValue::ExternalLinkage:
+  case GlobalValue::InternalLinkage:
+  case GlobalValue::PrivateLinkage:
+  case GlobalValue::WeakAnyLinkage:
+  case GlobalValue::WeakODRLinkage:
+  case GlobalValue::CommonLinkage:
+    break;
+  default:
+    return false;                       // no "fancy" linkage
+  }
+  return true;
+}
+
+// LowFat.cpp:1467-1505 — port verbatim. Skips declarations; warns and skips
+// oversized globals; promotes Common to WeakAny (linker would otherwise drop
+// the section attribute on Common symbols); sets alignment to the class
+// boundary and writes the lowfat section name.
+static bool makeGlobalVariableLowFatPtr(Module &M, GlobalVariable *GV) {
+  if (GV->isDeclaration())
+    return false;
+  if (!isInterestingGlobal(GV))
+    return false;
+
+  // Common linkage ⇒ linker ignores `section` attr and places in BSS. Promote
+  // to WeakAny so the section sticks. (May break legacy code that depends on
+  // common-symbol merge semantics; same behavior as the reference.)
+  if (GV->hasCommonLinkage())
+    GV->setLinkage(GlobalValue::WeakAnyLinkage);
+
+  const DataLayout &DL = M.getDataLayout();
+  Type *Ty = GV->getValueType();
+  uint64_t size = DL.getTypeAllocSize(Ty).getFixedValue();
+  if (size == 0)
+    return false;
+  uint64_t idx = (uint64_t)__builtin_clzll(size);
+  if (idx <= (uint64_t)__builtin_clzll(kMaxGlobalAllocSize)) {
+    M.getContext().diagnose(FlexFatDiag(
+        "FlexFat: global '" + GV->getName() +
+        "' cannot be made low-fat (size > LOWFAT_MAX_GLOBAL_ALLOC_SIZE)"));
+    return false;
+  }
+
+  uint64_t newSize = kStackSizes[idx];
+  uint64_t mask = kStackMasks[idx];
+  uint64_t alignBytes = (uint64_t)(~mask) + 1;
+  if (Align(alignBytes) > GV->getAlign().valueOrOne())
+    GV->setAlignment(Align(alignBytes));
+
+  std::string section("lowfat_section_");
+  if (GV->isConstant())
+    section += "const_";
+  section += std::to_string(newSize);
+  GV->setSection(section);
+  return true;
+}
+
+PreservedAnalyses FlexFatGlobalsPass::run(Module &M, ModuleAnalysisManager &) {
+  if (ClNoReplaceGlobals)
+    return PreservedAnalyses::all();
+  bool Changed = false;
+  // Snapshot the global list first — makeGlobalVariableLowFatPtr can mutate
+  // linkage, which on some LLVM revisions perturbs iteration of M.globals().
+  SmallVector<GlobalVariable *, 16> Worklist;
+  for (GlobalVariable &GV : M.globals())
+    Worklist.push_back(&GV);
+  for (GlobalVariable *GV : Worklist)
+    Changed |= makeGlobalVariableLowFatPtr(M, GV);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

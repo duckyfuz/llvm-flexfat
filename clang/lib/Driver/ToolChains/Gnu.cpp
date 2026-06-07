@@ -16,6 +16,7 @@
 #include "Arch/Sparc.h"
 #include "Arch/SystemZ.h"
 #include "clang/Config/config.h" // for GCC_INSTALL_PREFIX
+#include "clang/Driver/SanitizerArgs.h"
 #include "clang/Driver/CommonArgs.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
@@ -361,6 +362,15 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     if (!IsShared) {
       IsPIE = Args.hasFlag(options::OPT_pie, options::OPT_no_pie,
                            ToolChain.isPIEDefault(Args));
+      // FlexFat Unit 13: globals lowfatification needs lowfat.ld to pin
+      // sections to absolute high addresses (>4 GiB), which PIE relocates.
+      // The reference's distros default to non-PIE; on platforms where PIE
+      // is the default (Rocky 10, modern Debian, …) we explicitly suppress
+      // it. User-specified `-pie` still wins (would break globals — at
+      // that point it's an explicit opt-out by the user).
+      if (IsPIE && ToolChain.getSanitizerArgs(Args).needsFlexfatRt() &&
+          !Args.hasArg(options::OPT_pie))
+        IsPIE = false;
       if (IsPIE)
         CmdArgs.push_back("-pie");
       CmdArgs.push_back("-dynamic-linker");

@@ -806,6 +806,15 @@ static void addFlexFat(const LangOptions &LangOpts, PassBuilder &PB) {
       [](FunctionPassManager &FPM, OptimizationLevel Level) {
         FPM.addPass(FlexFatPass());
       });
+  // Unit 13: globals lowfatification — module pass at PipelineStart so it
+  // runs BEFORE the function pipeline (and therefore before FlexFatPass on
+  // each function). The function pass's calcBasePtr / getPtrBounds key off
+  // the `lowfat_section_*` section attribute that this module pass writes,
+  // so the order matters: sectioning must happen first.
+  PB.registerPipelineStartEPCallback(
+      [](ModulePassManager &MPM, OptimizationLevel Level) {
+        MPM.addPass(FlexFatGlobalsPass());
+      });
 }
 
 void addLowerAllowCheckPass(const CodeGenOptions &CodeGenOpts,
