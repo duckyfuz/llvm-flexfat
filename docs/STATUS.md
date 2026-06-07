@@ -1389,6 +1389,15 @@ tool that perturbs the semantics of the code it instruments has a
 correctness hole senior to any feature work. The verdict landed
 BEFORE Unit 15.
 
+**Era-drift watch (one-liner for the next reader)**:
+`doesAllocaEscape`'s `Call ⇒ doesNotAccessMemory else escape` clause
+inherits clang/LLVM-4.0-era intrinsic memory-attribute assumptions;
+any future "everything is suddenly lowfatified" perf regression
+should suspect a new intrinsic falling through it. Companion test
+pinning the category: `benign_intrinsics_no_escape.ll` (lifetime +
+dbg.declare + assume(ptrtoint&N==0) all asserted non-escape). Grow
+that test when adding a new intrinsic carve-out.
+
 ### Remaining known by-design gap
 Direct `clone()` callers (programs not going through `fork()` or
 `pthread_create()`) remain unsupported, matching the reference.
