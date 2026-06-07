@@ -283,3 +283,72 @@ Runtime-only changes; the pass is unchanged (alloca lowfatification is Unit
 - **+** `compiler-rt/test/flexfat/TestCases/stack_heavy_clean.c` — e2e: a
   stack-heavy program (1000-deep recursion, 8 KiB local, args/env access) at
   -O0 and -O2 must exit 0 — pivot regression-catch.
+
+## Unit 12b — alloca lowfatification (pass half)
+
+Pass-only changes; no runtime touchpoints (the runtime side is 12a). The pass
+adds an escape-gated alloca-lowfatification pre-pass before the existing
+bounds-check sweep.
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp`:
+  - **+** static `doesIntEscape` + `doesAllocaEscape` + `isInterestingAlloca`
+    (ports of LowFat.cpp:810-846, :1343-1414, :1419-1430). Escape rule:
+    escaping ⇒ low-fat, non-escaping ⇒ native (the reference's direction,
+    not SPEC line 336's English wording).
+  - **+** `kStackMirrorMD = "flexfat.stack.mirror"` metadata kind, tagged on
+    the constant-offset mirror gep produced by `makeAllocaLowFatPtr`.
+  - **+** `kStackSizes[]`/`kStackMasks[]`/`kStackOffsets[]` — in-pass tables
+    byte-identical to the runtime's `lowfat_stack_*` arrays (idx 0..64),
+    used by the fixed-alloca fast path to fold every constant at compile time.
+  - **+** `kMaxStackAllocSize = 33554432` — the runtime's 32 MiB cap; allocas
+    larger than this stay native.
+  - **+** `FlexFat::makeAllocaLowFatPtr(AllocaInst*)` (port of LowFat.cpp:
+    1512-1677). Two paths: fixed (idx, newSize, mask, offset all immediates,
+    optional byte-array replacement at the class boundary) and VLA
+    (`llvm.ctlz.i64`, runtime table loads for offset/size/mask,
+    `and+inttoptr` align, `llvm.stackrestore`). Inline IR throughout — the
+    reference's `addLowFatFuncs` helper-call path is intentionally NOT
+    ported (Unit 7 architecture decision, "no fast-path call").
+  - **+** `FlexFat::getStackTable(StringRef)` — declares the extern
+    `lowfat_stack_{offsets,sizes,masks}` globals (read-only, exported by
+    `lowfat_config.c`). Used by the VLA path only.
+  - **~** `calcBasePtr` — a GEP carrying `!flexfat.stack.mirror` is treated
+    as a fat pointer in its own right (`emitInlineBase` on the GEP), not
+    walked back through to the non-fat alloca.
+  - **~** `getPtrBounds` — same metadata: mirror gep → `Bounds::empty()` so
+    a direct deref is elided (input-pointer convention) but any positive
+    offset is checked.
+  - **~** `-flexfat-no-replace-alloca` description updated (no longer
+    "inert"); the flag is now functional.
+  - **+** Phase-0 of `FlexFat::run()`: scan for `isInterestingAlloca`,
+    lowfatify each. Runs BEFORE the load/store / mem-intrinsic / libcall
+    phases so the bounds-check path sees mirror geps.
+  - **+** Idempotence guard in `isInterestingAlloca` — skip allocas whose
+    user list already contains a mirror-tagged gep (fires after inlining
+    when a callee's lowfat alloca enters our function).
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/stack_lowfatify.ll` — fixed
+  alloca whose address is stored escapes; pinned: byte-array replacement
+  at the class boundary, mirror gep with the immediate offset, lifetime
+  calls dropped.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/stack_escape_via_gep.ll` —
+  indirect escape through a GEP-derived pointer still triggers lowfat;
+  pins the recursive predicate.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/stack_nonescaping.ll` — load/
+  cmp/select/self-store-only alloca stays native; no mirror, no
+  replacement.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/stack_vla.ll` — VLA path:
+  `llvm.ctlz.i64`, inline table loads from
+  `@lowfat_stack_{offsets,sizes,masks}`, `and+inttoptr` align,
+  `llvm.stackrestore`, mirror gep.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/stack_no_replace_alloca.ll`
+  — `-flexfat-no-replace-alloca` suppresses the entire transform (the
+  Unit-10 flag finally gets its behavioral test).
+
+### e2e (surface 3)
+- **+** `compiler-rt/test/flexfat/TestCases/stack_oob.c` — a stack buffer
+  overflow on an escaping local traps with the deterministic report
+  fields (`operation = write`, `pointer = … (stack)`, `size = 32` — the
+  class-size bump-up).

@@ -129,14 +129,16 @@ static cl::opt<bool> ClCheckWholeAccess(
     cl::desc("FlexFat: OOB-check the whole access [ptr, ptr+sizeof(*ptr)) "
              "rather than just the byte at ptr"));
 
-// Forward-declared: stack/global lowfatification is Part II; these flags will
-// gate it then. Inert today (no alloca/global replacement is emitted).
+// Unit 12b: suppress alloca lowfatification (the escape-gated mirror
+// transform). Default = checks on (escaping allocas get lowfatified).
 static cl::opt<bool> ClNoReplaceAlloca(
     "flexfat-no-replace-alloca", cl::Hidden, cl::init(false),
-    cl::desc("FlexFat: do not lowfatify stack allocations (Part II; inert)"));
+    cl::desc("FlexFat: do not lowfatify stack allocations (escaping allocas "
+             "stay native; no mirror inserted, no stack OOB checks)"));
+// Forward-declared: globals lowfatification is Unit 13; flag is inert.
 static cl::opt<bool> ClNoReplaceGlobals(
     "flexfat-no-replace-globals", cl::Hidden, cl::init(false),
-    cl::desc("FlexFat: do not lowfatify globals (Part II; inert)"));
+    cl::desc("FlexFat: do not lowfatify globals (Unit 13; inert)"));
 
 static cl::opt<std::string> ClBlacklist(
     "flexfat-no-check-blacklist", cl::Hidden, cl::init("-"),
@@ -198,6 +200,110 @@ static bool isBlacklisted(Function &F) {
          SCL->inSection("flexfat", "fun", F.getName());
 }
 
+// Mirror metadata kind: tagged onto the mirror gep produced by
+// makeAllocaLowFatPtr so calcBasePtr / getPtrBounds recognise it as a fat
+// (lowfat) stack pointer instead of walking back through to the (non-fat)
+// alloca. See Unit 12b doc in STATUS.md.
+static constexpr const char kStackMirrorMD[] = "flexfat.stack.mirror";
+
+// LowFat.cpp:810-846. Does the given pointer-derived integer "escape"? Used
+// by doesAllocaEscape's PtrToInt branch to decide whether the address of a
+// local has truly escaped (stored into memory, passed to a call, etc.) or
+// only used in a comparison/branch (which doesn't expose the address).
+static bool doesIntEscape(llvm::Value *Val, llvm::SmallPtrSetImpl<llvm::Value *> &Seen) {
+  if (!Seen.insert(Val).second)
+    return false;
+  if (Val->getType()->isVoidTy())
+    return true;  // unrecognized — conservatively escape
+  for (User *U : Val->users()) {
+    if (isa<ReturnInst>(U) || isa<CallInst>(U) || isa<InvokeInst>(U) ||
+        isa<StoreInst>(U) || isa<IntToPtrInst>(U))
+      return true;
+    if (isa<CmpInst>(U) || isa<BranchInst>(U) || isa<SwitchInst>(U))
+      continue;
+    if (doesIntEscape(U, Seen))
+      return true;
+  }
+  return false;
+}
+
+// LowFat.cpp:1343-1414. Returns true iff the alloca's address is observable
+// outside direct-use channels (the predicate for "needs lowfatification").
+// Direct uses that do NOT count as escapes: load through the pointer, cmp
+// (address comparison), self-store of a value through the address,
+// return-of-local (UB but doesn't escape), lifetime intrinsics, and calls to
+// doesNotAccessMemory functions. RAUW-relevant: this walks recursively
+// through gep/bitcast/select/phi.
+static bool doesAllocaEscape(llvm::Value *Val,
+                             llvm::SmallPtrSetImpl<llvm::Value *> &Seen) {
+  if (!Seen.insert(Val).second)
+    return false;
+  if (Val->getType()->isVoidTy())
+    return true;
+  for (User *U : Val->users()) {
+    if (isa<ReturnInst>(U))
+      continue; // returning a local is UB but address doesn't escape
+    if (isa<LoadInst>(U) || isa<CmpInst>(U))
+      continue;
+    if (auto *S = dyn_cast<StoreInst>(U)) {
+      // Self-store (storing some value TO the address) is fine; storing the
+      // address itself somewhere is an escape.
+      if (S->getPointerOperand() == Val)
+        continue;
+      return true;
+    }
+    if (isa<PtrToIntInst>(U)) {
+      llvm::SmallPtrSet<llvm::Value *, 8> IntSeen;
+      if (doesIntEscape(U, IntSeen))
+        return true;
+      continue;
+    }
+    if (auto *Call = dyn_cast<CallInst>(U)) {
+      Function *F = Call->getCalledFunction();
+      if (F && F->doesNotAccessMemory())
+        continue;
+      return true;
+    }
+    if (auto *Inv = dyn_cast<InvokeInst>(U)) {
+      Function *F = Inv->getCalledFunction();
+      if (F && F->doesNotAccessMemory())
+        continue;
+      return true;
+    }
+    if (isa<GetElementPtrInst>(U) || isa<BitCastInst>(U) ||
+        isa<SelectInst>(U) || isa<PHINode>(U)) {
+      if (doesAllocaEscape(U, Seen))
+        return true;
+      continue;
+    }
+    // Unknown user — conservatively treat as escape (matches the reference's
+    // "(BUG) unknown alloca user" branch).
+    return true;
+  }
+  return false;
+}
+
+// LowFat.cpp:1419-1430. Wrapper: gated by -flexfat-no-replace-alloca.
+static bool isInterestingAlloca(llvm::Instruction *I) {
+  if (ClNoReplaceAlloca)
+    return false;
+  auto *A = dyn_cast<AllocaInst>(I);
+  if (!A)
+    return false;
+  // Idempotence guard: skip allocas that are already lowfatified — their
+  // user list contains a !flexfat.stack.mirror gep. This fires when the
+  // pass runs on a function into which a (previously processed) callee was
+  // inlined, so the callee's lowfat alloca is now visible to us. Without
+  // this, the inlined alloca would be re-class-sized one tier up and
+  // double-mirrored, with the inner mirror landing in an unmapped region.
+  for (User *U : A->users())
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(U))
+      if (GEP->hasMetadata(kStackMirrorMD))
+        return false;
+  llvm::SmallPtrSet<llvm::Value *, 8> Seen;
+  return doesAllocaEscape(A, Seen);
+}
+
 // Heap size classes (non-POW2 default). SINGLE-SOURCED with the runtime: the
 // Unit 2 generator (flexfat/config/lowfat-config.c) emits this `.inc` and the
 // runtime's lowfat_sizes[] from the same sizes.cfg run, so the pass cannot
@@ -228,6 +334,112 @@ namespace {
 constexpr uint64_t kRegionSizeShift = 35;
 constexpr uint64_t kSizesAddr = 0x200000;  // _LOWFAT_SIZES  (size_t[])
 constexpr uint64_t kMagicsAddr = 0x300000; // _LOWFAT_MAGICS (uint64_t[])
+
+// Stack class limit from the runtime: any alloca > LOWFAT_MAX_STACK_ALLOC_SIZE
+// (32 MiB) cannot be mirrored (idx falls below clzll(MAX) = 38).
+constexpr uint64_t kMaxStackAllocSize = 33554432;
+
+// Unit 12b fixed-alloca fast path: the reference looks up
+// `lowfat_stack_{sizes,masks,offsets}[clzll(size)]` at compile time when
+// `size` is a constant, folding the result into immediates so the emitted IR
+// is a single sized alloca + a single constant-offset gep (no runtime table
+// load). These match lowfat_config.c byte-for-byte (idx 0..64). 0-entries
+// flag classes that have no stack support (size > LOWFAT_MAX_STACK_ALLOC_SIZE).
+constexpr uint64_t kStackSizes[65] = {
+    0,        0,        0,        0,        0,        0,        0,
+    0,        0,        0,        0,        0,        0,        0,
+    0,        0,        0,        0,        0,        0,        0,
+    0,        0,        0,        0,        0,        0,        0,
+    0,        0,        0,        0,        0,        0,        0,
+    0,        0,        0,        0,
+    33554432, 16777216, 8388608,  4194304,  2097152,  1048576,  524288,
+    262144,   131072,   65536,    32768,    16384,    8192,     4096,
+    2048,     1024,     512,      256,      128,      64,       32,
+    16,       16,       16,       16,       16};
+
+constexpr uint64_t kStackMasks[65] = {
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0xFFFFFFFFFE000000ull,
+    0xFFFFFFFFFF000000ull,
+    0xFFFFFFFFFF800000ull,
+    0xFFFFFFFFFFC00000ull,
+    0xFFFFFFFFFFE00000ull,
+    0xFFFFFFFFFFF00000ull,
+    0xFFFFFFFFFFF80000ull,
+    0xFFFFFFFFFFFC0000ull,
+    0xFFFFFFFFFFFE0000ull,
+    0xFFFFFFFFFFFF0000ull,
+    0xFFFFFFFFFFFF8000ull,
+    0xFFFFFFFFFFFFC000ull,
+    0xFFFFFFFFFFFFE000ull,
+    0xFFFFFFFFFFFFF000ull,
+    0xFFFFFFFFFFFFF800ull,
+    0xFFFFFFFFFFFFFC00ull,
+    0xFFFFFFFFFFFFFE00ull,
+    0xFFFFFFFFFFFFFF00ull,
+    0xFFFFFFFFFFFFFF80ull,
+    0xFFFFFFFFFFFFFFC0ull,
+    0xFFFFFFFFFFFFFFE0ull,
+    0xFFFFFFFFFFFFFFF0ull,
+    0xFFFFFFFFFFFFFFF0ull,
+    0xFFFFFFFFFFFFFFF0ull,
+    0xFFFFFFFFFFFFFFF0ull,
+    0xFFFFFFFFFFFFFFF0ull,
+};
+
+constexpr int64_t kStackOffsets[65] = {
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,             0,
+    0,             0,             0,             0,
+    -309237645312, -343597383680, -377957122048, -412316860416, -446676598784,
+    -481036337152, -515396075520, -549755813888, -584115552256, -618475290624,
+    -652835028992, -687194767360, -824633720832, -996432412672, -1168231104512,
+    -1340029796352,-1511828488192,-1683627180032,-1855425871872,-1992864825344,
+    -2061584302080,-2095944040448,-2095944040448,-2095944040448,-2095944040448,
+    -2095944040448};
 
 // OOB info codes (lowfat.h: LOWFAT_OOB_ERROR_{READ,WRITE}).
 constexpr unsigned kInfoRead = 0;
@@ -305,6 +517,17 @@ private:
   bool instrumentMemIntrinsic(MemIntrinsic *MI);              // end-pointer checks
   bool replaceLibFunc(CallBase *CB);                          // replaceUnsafeLibFuncs
   bool optimizeMalloc(CallBase *CB);                          // const heap_select fold
+
+  // Unit 12b: escape-gated alloca lowfatification (port of
+  // LowFat.cpp:1512-1677). Replaces an escaping alloca with a sized byte-
+  // array alloca (if the class size differs) at the class boundary, then
+  // emits a constant-offset mirror gep tagged !flexfat.stack.mirror so
+  // calcBasePtr / getPtrBounds recognise the result as a fat (stack)
+  // pointer. Lifetime intrinsics on the alloca are deleted.
+  bool makeAllocaLowFatPtr(AllocaInst *Alloca);
+  // Helpers to declare extern globals exporting the stack-class tables
+  // (consumed only by the VLA path).
+  Constant *getStackTable(StringRef Name);
 
   // Inline a GEP into a fixed runtime table (_LOWFAT_SIZES / _LOWFAT_MAGICS).
   Value *tableSlot(IRBuilder<> &B, uint64_t TableAddr, Value *Idx) {
@@ -428,18 +651,25 @@ Bounds FlexFat::getPtrBounds(Value *Ptr) {
 
   Bounds B = Bounds::nonFat();
   if (auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
-    B = getPtrBounds(GEP->getPointerOperand());
-    // -flexfat-no-check-fields: trust an input-pointer base (empty bounds) up to
-    // the indexed object -- the opaque-pointer analog of [0, sizeof(*ptr)].
-    if (ClNoCheckFields && B.isEmpty() && GEP->getSourceElementType()->isSized())
-      B = Bounds((int64_t)DL.getTypeAllocSize(GEP->getSourceElementType()));
-    if (!B.isUnknown() && !B.isNonFat()) {
-      APInt Off(64, 0);
-      if (cast<GEPOperator>(GEP)->accumulateConstantOffset(DL, Off) &&
-          !Off.isNegative())
-        B.sub(Off.getZExtValue());
-      else
-        B = Bounds::unknown();
+    // A mirror gep is a fat (stack) input pointer in its own right — treat it
+    // like an argument: empty bounds, so direct deref is elided but any
+    // positive offset is checked. Don't walk back to the alloca.
+    if (GEP->hasMetadata(kStackMirrorMD)) {
+      B = Bounds::empty();
+    } else {
+      B = getPtrBounds(GEP->getPointerOperand());
+      // -flexfat-no-check-fields: trust an input-pointer base (empty bounds) up
+      // to the indexed object -- the opaque-pointer analog of [0, sizeof(*ptr)].
+      if (ClNoCheckFields && B.isEmpty() && GEP->getSourceElementType()->isSized())
+        B = Bounds((int64_t)DL.getTypeAllocSize(GEP->getSourceElementType()));
+      if (!B.isUnknown() && !B.isNonFat()) {
+        APInt Off(64, 0);
+        if (cast<GEPOperator>(GEP)->accumulateConstantOffset(DL, Off) &&
+            !Off.isNegative())
+          B.sub(Off.getZExtValue());
+        else
+          B = Bounds::unknown();
+      }
     }
   } else if (auto *AI = dyn_cast<AllocaInst>(Ptr)) {
     auto *CI = dyn_cast<ConstantInt>(AI->getArraySize());
@@ -504,13 +734,20 @@ Value *FlexFat::calcBasePtr(Value *Ptr) {
   Value *Base = NonFat;
 
   if (auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
-    Base = calcBasePtr(GEP->getPointerOperand());
+    // A mirror gep (Unit 12b) is a fat (stack) pointer in its own right —
+    // don't walk back through it to the non-fat alloca underneath.
+    if (GEP->hasMetadata(kStackMirrorMD))
+      Base = emitInlineBase(GEP);
+    else
+      Base = calcBasePtr(GEP->getPointerOperand());
   } else if (auto *BC = dyn_cast<BitCastInst>(Ptr)) {
     Base = calcBasePtr(BC->getOperand(0));
   } else if (auto *ASC = dyn_cast<AddrSpaceCastInst>(Ptr)) {
     Base = calcBasePtr(ASC->getOperand(0));
   } else if (isa<AllocaInst>(Ptr)) {
-    // Stack lowfatification is a later unit; treat allocas as non-fat for now.
+    // Non-escaping allocas: not lowfatified, so non-fat. Escaping allocas
+    // never appear directly under a checked access — every use has been
+    // RAUW'd to a !flexfat.stack.mirror gep (handled above).
     Base = NonFat;
   } else if (isa<Constant>(Ptr)) {
     // Globals/constants are not lowfatified yet; non-fat.
@@ -696,7 +933,161 @@ bool FlexFat::optimizeMalloc(CallBase *CB) {
   return true;
 }
 
+Constant *FlexFat::getStackTable(StringRef Name) {
+  // Externally declared in compiler-rt/lib/flexfat/lowfat_config.c as
+  // `size_t lowfat_stack_*[64+1]`. We declare it as `[0 x i64]` so the
+  // type pin still mirrors the linker symbol; the GEP source element type
+  // makes the array semantics explicit under opaque pointers.
+  ArrayType *TableTy = ArrayType::get(I64Ty, 0);
+  Constant *G = M.getOrInsertGlobal(Name, TableTy);
+  if (auto *GV = dyn_cast<GlobalVariable>(G))
+    GV->setConstant(true);
+  return G;
+}
+
+// Port of LowFat.cpp:1512-1677: replace an escaping alloca with a sized
+// byte-array alloca at the size-class boundary and a constant-offset mirror
+// gep tagged !flexfat.stack.mirror. Per the Unit-7 architecture decision,
+// the addLowFatFuncs path (helper-call IR + bundled inliner) is replaced
+// with inline post-inline IR — runtime table loads only on the VLA path.
+bool FlexFat::makeAllocaLowFatPtr(AllocaInst *Alloca) {
+  Value *ArraySize = Alloca->getArraySize();
+  Type *Ty = Alloca->getAllocatedType();
+  ConstantInt *ISize = dyn_cast<ConstantInt>(ArraySize);
+  auto IP = nextInsertPoint(Alloca);
+  IRBuilder<> B(IP.first, IP.second);
+
+  Value *Offset = nullptr;
+  Value *AllocedPtr = nullptr;
+  Value *NoReplace1 = nullptr;
+  bool delAlloca = false;
+
+  if (ISize) {
+    // FIXED-SIZE PATH (the common case). Every lookup folds to a compile-
+    // time immediate: idx, newSize, mask, offset all decided here, no
+    // runtime table load.
+    uint64_t TyAllocSize = DL.getTypeAllocSize(Ty).getFixedValue();
+    uint64_t size = TyAllocSize * ISize->getZExtValue();
+    if (size == 0)
+      return false; // degenerate; leave native
+    uint64_t idx = (uint64_t)__builtin_clzll(size);
+    // clzll(LOWFAT_MAX_STACK_ALLOC_SIZE) = 38 ⇒ idx<=38 means too big.
+    if (idx <= (uint64_t)__builtin_clzll(kMaxStackAllocSize))
+      return false;
+    uint64_t newSize = kStackSizes[idx];
+    uint64_t mask = kStackMasks[idx];
+    int64_t off = kStackOffsets[idx];
+    uint64_t alignBytes = (uint64_t)(~mask) + 1;
+
+    if (Align(alignBytes) > Alloca->getAlign())
+      Alloca->setAlignment(Align(alignBytes));
+
+    if (newSize != size) {
+      // Replace with byte-array alloca of newSize at the class boundary.
+      AllocaInst *NewAlloca = B.CreateAlloca(I8Ty, B.getInt64(newSize));
+      NewAlloca->setAlignment(Alloca->getAlign());
+      AllocedPtr = NewAlloca;
+      delAlloca = true;
+    } else {
+      // Original alloca is already class-sized; keep it (with the new align).
+      AllocedPtr = Alloca;
+    }
+    Offset = B.getInt64(off);
+    NoReplace1 = AllocedPtr;
+  } else {
+    // VLA PATH: idx and tables go through inline IR (no helper call).
+    delAlloca = true;
+    uint64_t TyAllocSize = DL.getTypeAllocSize(Ty).getFixedValue();
+    Value *Size =
+        B.CreateMul(B.getInt64(TyAllocSize), ArraySize);
+    // idx = ctlz.i64(size, /*is_zero_poison=*/true)
+    Function *Ctlz =
+        Intrinsic::getOrInsertDeclaration(&M, Intrinsic::ctlz, {I64Ty});
+    CallInst *IdxC = B.CreateCall(Ctlz, {Size, B.getInt1(true)});
+    IdxC->setTailCall(true);
+    Value *Idx = IdxC;
+
+    // offset = lowfat_stack_offsets[idx]
+    Constant *Offs = getStackTable("lowfat_stack_offsets");
+    ArrayType *TableTy = ArrayType::get(I64Ty, 0);
+    Value *OffSlot = B.CreateGEP(TableTy, Offs, {B.getInt64(0), Idx});
+    Offset = B.CreateAlignedLoad(I64Ty, OffSlot, Align(8));
+
+    // newSize = lowfat_stack_sizes[idx]
+    Constant *Sizes = getStackTable("lowfat_stack_sizes");
+    Value *SzSlot = B.CreateGEP(TableTy, Sizes, {B.getInt64(0), Idx});
+    Value *NewSz = B.CreateAlignedLoad(I64Ty, SzSlot, Align(8));
+
+    // Replacement byte-array alloca, then align via the masks table.
+    AllocaInst *NewAlloca = B.CreateAlloca(I8Ty, NewSz);
+    Value *SP = NewAlloca;
+    Constant *Masks = getStackTable("lowfat_stack_masks");
+    Value *MaskSlot = B.CreateGEP(TableTy, Masks, {B.getInt64(0), Idx});
+    Value *Mask = B.CreateAlignedLoad(I64Ty, MaskSlot, Align(8));
+    Value *SPInt = B.CreatePtrToInt(SP, I64Ty);
+    Value *Aligned = B.CreateAnd(SPInt, Mask);
+    SP = B.CreateIntToPtr(Aligned, PtrTy);
+    // stackrestore(SP) — discard the unaligned head so the function's stack
+    // ends at the now-aligned address.
+    Function *Restore =
+        Intrinsic::getOrInsertDeclaration(&M, Intrinsic::stackrestore, {PtrTy});
+    CallInst *RestoreC = B.CreateCall(Restore, {SP});
+    RestoreC->setTailCall(true);
+
+    AllocedPtr = SP;
+    NoReplace1 = SP;
+  }
+
+  // The mirror: a constant-offset gep on the aligned alloca pointer. Tag it
+  // with !flexfat.stack.mirror so the bounds-check path treats the result as
+  // a fat (stack) pointer (calcBasePtr emits inlined lowfat_base on it).
+  Value *MirroredPtr = B.CreateGEP(I8Ty, AllocedPtr, Offset);
+  if (auto *MGEP = dyn_cast<GetElementPtrInst>(MirroredPtr))
+    MGEP->setMetadata(kStackMirrorMD, MDNode::get(Ctx, {}));
+  Value *NoReplace2 = MirroredPtr;
+
+  // RAUW: every USER of the original alloca that isn't one of the values we
+  // used in the construction (NoReplace1/NoReplace2) is rewritten to use the
+  // mirror. Lifetime intrinsics get DELETED — the size on the marker no
+  // longer matches the (possibly grown) allocation, and the reference's
+  // bookkeeping is too painful to keep in sync.
+  SmallVector<User *, 8> Replace, Lifetimes;
+  for (User *U : Alloca->users()) {
+    if (U == NoReplace1 || U == NoReplace2)
+      continue;
+    if (auto *Intr = dyn_cast<IntrinsicInst>(U)) {
+      Intrinsic::ID ID = Intr->getIntrinsicID();
+      if (ID == Intrinsic::lifetime_start || ID == Intrinsic::lifetime_end) {
+        Lifetimes.push_back(U);
+        continue;
+      }
+    }
+    Replace.push_back(U);
+  }
+  for (User *U : Replace)
+    U->replaceUsesOfWith(Alloca, MirroredPtr);
+  for (User *U : Lifetimes)
+    if (auto *L = dyn_cast<Instruction>(U))
+      L->eraseFromParent();
+  if (delAlloca)
+    Alloca->eraseFromParent();
+  return true;
+}
+
 bool FlexFat::run() {
+  bool Changed = false;
+  // Phase 0 (Unit 12b): lowfatify every alloca whose address escapes. Done
+  // BEFORE the load/store sweep so the bounds-check phase sees the mirror
+  // pointer (a real fat pointer) for any access through the alloca.
+  if (!ClNoReplaceAlloca) {
+    SmallVector<AllocaInst *, 8> Allocas;
+    for (Instruction &I : instructions(F))
+      if (isInterestingAlloca(&I))
+        Allocas.push_back(cast<AllocaInst>(&I));
+    for (AllocaInst *A : Allocas)
+      Changed |= makeAllocaLowFatPtr(A);
+  }
+
   // Phase 1: collect interesting instructions without mutating IR (the
   // getInterestingInsts sweep). Loads/stores and the mem-intrinsics get bounds
   // checks; named libc calls get replaced.
@@ -727,7 +1118,6 @@ bool FlexFat::run() {
       LibCalls.push_back(CB); // filtered in replaceLibFunc
   }
 
-  bool Changed = false;
   // Phase 2: load/store bounds checks.
   for (auto &[I, Ptr, Info, AccessSize] : LoadStores)
     Changed |= checkAccess(I, Ptr, Info, AccessSize);

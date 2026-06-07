@@ -10,7 +10,13 @@ runtime half and 12b will land the pass half + the MSET flip.
   ✅ landed. Gate 51/51. See [STATUS.md](STATUS.md) "Unit 12a — stack runtime"
   for the full diff and the MAP_SHARED-fork caveat.
 - **Unit 12b — pass: `doesAllocaEscape` + `makeAllocaLowFatPtr` + inlined
-  stack helpers + `-flexfat-no-replace-alloca` + MSET flip.** Pending.
+  stack helpers + `-flexfat-no-replace-alloca`.** ✅ landed. Gate 57/57.
+  Escape-gated alloca lowfatification: escaping ⇒ low-fat (per the reference
+  code, not SPEC's English wording at line 336). Inlined helpers per the
+  Unit-7 architecture decision — no `addLowFatFuncs` helper-call path.
+  Codegen parity verified: fast-path mirror is a single `leaq cst(%rsp)`,
+  bounds check is `shr/table-load/single cmpq/jae`. See STATUS.md
+  "Unit 12b" for full details and the MSET flip table.
 - **Unit 13 (globals) + Part III (fork interposer, threads, dynamic loader)**
   are downstream and separate.
 

@@ -18,6 +18,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 10 | option surface + SpecialCaseList blacklist: per-kind suppression (`-flexfat-no-check-reads/-writes/-memcpy/-memset`), `-flexfat-check-whole-access` (access_size = sizeof(*ptr)-1), error-block modes (`-flexfat-no-abort` warns+continues, `-flexfat-signal` inline `ud2`/SIGILL), and a `[flexfat]` `fun:`/`src:` blacklist; one behavioral test per flag, all defaults checks-on | ✅ |
 | 11 | verification harness + MSET differential vs the reference oracle: consolidated `check-flexfat` (4 surfaces, 46/46), FlexFat MSET configs (`flexfat/mset/`), base+hardened differential — **FlexFat's detected set is a strict subset of the reference's, zero false detections, every miss classified** to a documented intentional difference; glibc TID/JOINID landmine validated (`lowfat-check-config`, OK on 2.39) | ✅ |
 | 12a | Stack runtime: SHM helper (`lowfat_create_shm`), per-class stack regions mapped `MAP_SHARED` to one fd at init, `lowfat_envp` capture in `.preinit_array`, master-stack bump allocator (`lowfat_stack_alloc`), and the pivot trampoline (`lowfat_stack_pivot` asm + `lowfat_stack_pivot_2` payload) that copies the live native stack and switches `%rsp` before `main` runs — `&local` in `main` now classifies as `stack`, not `nonfat`. NO pass change yet; alloca lowfatification is Unit 12b. Gate is **51/51** | ✅ |
+| 12b | Alloca lowfatification (pass half): `doesAllocaEscape` + `doesIntEscape` + `isInterestingAlloca` (escape predicate — escaping ⇒ low-fat, per the code, not SPEC's English wording), `makeAllocaLowFatPtr` (fixed + VLA paths; mirror gep tagged `!flexfat.stack.mirror`); `calcBasePtr`/`getPtrBounds` recognise the tag and emit inline `lowfat_base` for stack-mirror access; `-flexfat-no-replace-alloca` wired (Unit-10 forward-decl finally gets its behavioral test); idempotence guard skips already-mirrored allocas surfaced via inlining. Codegen parity: fast-path mirror is a single `leaq cst(%rsp)`, no div, no call, no runtime table load; check is `shr/table-load/single cmpq/jae` to out-of-line `lowfat_oob_error`. Gate is **57/57**. MSET flip pending differential re-run | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -693,3 +694,162 @@ This is the more sensible direction (the static-bounds analysis already
 covers any non-escaping alloca's accesses) and is what Unit 12b will port.
 Recorded here so the next reader doesn't flip it; see also
 [STACK_UNIT.md](STACK_UNIT.md).
+
+## Unit 12b — alloca lowfatification (the pass half)
+
+Pass-side companion to 12a: any alloca whose address escapes is replaced by a
+sized byte-array alloca at the size-class boundary plus a constant-offset
+mirror gep tagged `!flexfat.stack.mirror`. After RAUW, every former use of
+the alloca goes through the mirror — a fat pointer in its size-class region.
+The bounds-check path (Unit 7) then catches stack OOB.
+
+### Escape rule sentence (re: SPEC §II.1 line 336 inversion)
+> An alloca is lowfatified iff `doesAllocaEscape(Alloca) == true` — its
+> address is observable outside direct-use channels (stored as a value, passed
+> to a memory-touching call/invoke, ptrtoint that escapes, or recursively
+> through gep/bitcast/select/phi). Allocas only used by load/cmp/self-store/
+> return-of-local/lifetime intrinsics/`doesNotAccessMemory` calls stay native.
+
+Same direction as the reference's `isInterestingAlloca` (LowFat.cpp:1419-1430):
+`isInterestingAlloca` returns true exactly when `doesAllocaEscape` returns true.
+SPEC's English wording at line 336 ("leaves escaping allocas native") is
+INVERTED — we follow the code.
+
+### What landed
+- **Escape analysis.** `doesIntEscape` + `doesAllocaEscape` + `isInterestingAlloca`
+  (verbatim ports of LowFat.cpp:810-846, :1343-1414, :1419-1430). Recurses
+  through gep/bitcast/select/phi. PtrToInt escapes only if the *integer*
+  escapes — handled by `doesIntEscape`.
+- **`makeAllocaLowFatPtr`** (LowFat.cpp:1512-1677). Two paths:
+  - **Fixed**: `idx = clzll(size)`; if `idx <= clzll(LOWFAT_MAX_STACK_ALLOC_SIZE)`
+    skip (alloca > 32 MiB). Set alignment to `~masks[idx]+1`. If
+    `sizes[idx] != size` replace with a byte-array alloca of `sizes[idx]`.
+    Emit mirror gep `getelementptr i8, ptr <alloca>, i64 <offsets[idx]>` —
+    a SINGLE constant-add at codegen (a `leaq imm(%rsp), %rdi`). The 3
+    constants come from a single-sourced in-pass table (`kStackSizes[]`,
+    `kStackMasks[]`, `kStackOffsets[]`, matching `lowfat_config.c` byte-for-byte).
+  - **VLA**: ctlz.i64(size, true) gives idx at runtime; the offsets/sizes/
+    masks tables are inline IR (extern globals exported by the runtime —
+    `lowfat_stack_{offsets,sizes,masks}`); `lowfat_stack_align` becomes
+    `and+inttoptr` inline; `llvm.stackrestore` discards the unaligned head.
+- **Inlined post-inline IR** — per the Unit 7 architecture decision, no
+  `addLowFatFuncs` helper-function path. The mirror is a direct gep; the
+  table loads (VLA only) and the align mask are direct inline IR.
+- **`calcBasePtr` mirror recognition.** A GEP with `!flexfat.stack.mirror`
+  metadata is treated as a fat pointer in its own right: `calcBasePtr` calls
+  `emitInlineBase(GEP)` instead of walking through to the (non-fat) alloca.
+- **`getPtrBounds` mirror recognition.** Same metadata key: a mirror gep is
+  treated as an input pointer with `[0, 0]` bounds — direct deref is elided
+  (matches the input-pointer convention) but any positive offset is checked.
+- **`-flexfat-no-replace-alloca`** finally functional (the Unit 10 inert
+  forward-decl). The behavioral test `stack_no_replace_alloca.ll` pins it.
+- **Idempotence guard.** `isInterestingAlloca` skips any alloca whose user
+  list already contains a `!flexfat.stack.mirror` gep — necessary because
+  the function pass runs AFTER the inliner: when a previously-processed
+  callee gets inlined into us, the callee's lowfat alloca appears in our
+  function. Without the guard, we re-class-size it one tier up and double-
+  mirror, with the inner mirror landing in an unmapped region — verified
+  in-tree by a SIGSEGV on `stack_heavy_clean.c` until added.
+
+### Codegen parity (the deferred asm gate)
+The canonical escaping fixed alloca `char buf[16]; use(buf, i);` compiled at
+`-O2 -mllvm -flexfat-no-elide` — the mirror is a **single constant add** on
+the fast path, no div, no call, no runtime table load:
+```
+andq    $-32, %rsp                       ; align rsp to class boundary
+subq    $64, %rsp                        ; reserve the (LLVM-doubled) alloca
+movabsq $-2061584302080, %rax            ; offsets[59] folded as immediate
+leaq    (%rsp,%rax), %rdi                ; <-- THE MIRROR: one constant add
+callq   *%rax                            ; use(buf=mirror, i)
+```
+And the bounds check inside `use(char *p, int i) { p[i] = 0x41; }`:
+```
+shrq    $35, %rcx                        ; idx = mirror >> 35
+mulxq   3145728(,%rcx,8), %rdx, %rdx     ; magics[idx] * mirror (high word)
+imulq   2097152(,%rcx,8), %rdx           ; * sizes[idx] = base
+subq    %rdx, %rdi                       ; diff = mirror+i - base
+cmpq    2097152(,%rcx,8), %rdi
+jae     .LBB0_2                          ; out-of-line error block
+movb    $65, (%rsi); retq                ; fast path
+```
+Strategy-identical to Unit 7's heap path: `shr/table-load/single cmpq/jae`.
+
+### Class-size bump-up (size = clzll(size), not clzll(size-1))
+For exact powers of two, `clzll(size)` bumps the class up by one. Source
+`char buf[16]` ⇒ `clzll(16) = 59` ⇒ `sizes[59] = 32` (not 16). The runtime
+reports `size = 32` — the allocation class, not the source size. This is
+the reference's deliberate choice ("the one-past-end guarantee") and is
+pinned by `stack_oob.c`.
+
+
+### MSET differential after Unit 12b (the deferred flip gate)
+
+Re-ran `mset --evaluate flexfat_original.xml` against the vendored reference
+oracle (`/home/kenf/CP4106/MSET/build/lowfat_original_detected.txt`, 96 types).
+
+**Headline: FlexFat's detected set grows from 30 → 54 types** (+24 net).
+
+| Bucket | Count |
+|---|---|
+| **FlexFat detected (was 30)** | **54** |
+| Parity (both detect) | 47 |
+| FlexFat-only | 7 |
+| Reference-only | 49 |
+
+The 30 → 54 change decomposes into **30 new detections + 6 lost detections**:
+
+**+30 new detections** — all Stack-related (Stack as origin and/or target).
+22 spatial Stack-origin / Stack-target inter-object OOBA types now fire,
+plus 8 `Misuse-of-free Stack` (freeing a stack pointer now traps because the
+runtime classifies the mirror as `stack`, reaches the existing
+"attempt to free a stack pointer" path in `lowfat_free` — see Unit 4).
+
+**−6 lost detections** — `Global↔Stack` linear overflows where MSET's
+address-ordering precondition no longer holds at the *distance* level. In
+Unit 11, Global (in `.data` at low addresses) was BELOW Stack (loader stack
+at low addresses), so a Global→Stack overflow walked a short distance and
+fired. In Unit 12b, Stack lives in master region 62 at ~`0x1F6_xx`, ~125 GiB
+above Global, so the test's finite-step walker hits the MAX_REACH limit and
+self-exits PRECONDITIONS_FAILED before reaching the target. These move to
+PF, not to a "real miss" bucket. The reference, where Globals are ALSO
+lowfat (region-sub-range layout), keeps Globals and Stacks within the same
+2³⁵ region — distance is ≤8 GiB — so its walker succeeds. **Unit 13
+restores these 6 to DETECTED** by lowfatifying globals into the same
+regions as stack/heap.
+
+**49 REF-only deltas, all classified to a documented intentional difference:**
+
+| Count | Bucket | Maps to |
+|---|---|---|
+| 37 | Origin or target = Global (spatial + misuse-of-free Global) | Globals not yet lowfat — **Unit 13 scope** |
+| 6 | Heap→Heap Inter/Non-Object Linear OOBA | **inherent encoding blind spot** (offset-0 same-class adjacency, shared with reference; documented in Unit 11) |
+| 6 | Stack→Stack Inter/Non-Object Linear OOBA | **new analogous inherent blind spot** for stack — same mechanism as the Heap→Heap one, surfaced now that stack is lowfat. The non-linear / stdlib / type-confusion Stack→Stack variants *are* caught; only the offset-0-landing linear cases fall through. |
+
+**7 FlexFat-only detections** — all Stack-origin → Global-target (or the
+single Global-origin Underflow → Stack-target). These ARE real catches by
+FlexFat. The reference oracle doesn't list them because in the reference's
+fully-lowfat layout, the MSET test's address-ordering precondition lands
+both objects in the same 2³⁵ region's sub-ranges, making the overflow
+distance too small to satisfy SOME of the linear-walker preconditions for
+specific variants. With FlexFat (stack-only lowfat), the test layout
+differs and these particular MSET variants are constructable AND FlexFat
+correctly detects the OOB. Net effect: parity-extending, not parity-breaking.
+
+**Part-II acceptance status (`00a8ae8`):** the 6 `Heap↔{Global,Stack}`
+PRECONDITIONS-FAILED types from Unit 11 are NOT flipped by Unit 12b
+alone — they remain PF, now because the distance gulf is heap-vs-stack
+rather than heap-vs-loader-stack. Closing this requires Unit 13 to land
+globals in their sub-ranges (so all three kinds share the same 2³⁵ region
+strides). Until then, the (a)/(b) question stays open for those 6: the
+re-evaluation moves to post-Unit-13.
+
+**The 6 Stack→Stack `Non-Object`/`Inter-Object Linear` REF-only deltas are
+the new permanent baseline** — a Stack-side analogue of the Unit-11
+documented Heap→Heap offset-0 adjacency blind spot. The encoding cannot
+catch the literally-adjacent-and-offset-0 case in any LowFat variant.
+These join the 6 Heap→Heap as the architectural floor. Closing would
+require redzones, which LowFat deliberately omits for performance.
+
+**Updated evidence:** `flexfat/mset/flexfat_original_detected.txt` rewritten
+with the 54-type set; previous 30-type set superseded.
+
