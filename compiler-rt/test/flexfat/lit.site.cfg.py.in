@@ -1,0 +1,23 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+# Tool-specific config options.
+config.name_suffix = "@FLEXFAT_TEST_CONFIG_SUFFIX@"
+config.flexfat_lit_source_dir = "@FLEXFAT_LIT_SOURCE_DIR@"
+config.target_cflags = "@FLEXFAT_TEST_TARGET_CFLAGS@"
+config.target_arch = "@FLEXFAT_TEST_TARGET_ARCH@"
+config.clang = "@FLEXFAT_TEST_TARGET_CC@"
+config.flexfat_src_dir = "@COMPILER_RT_SOURCE_DIR@/lib/flexfat"
+# Unit 17: variant the build was configured for. lit.cfg.py turns this into
+# the `flexfat-pow2` / `flexfat-nonpow2` features so variant-specific tests
+# can REQUIRES the right one.
+config.flexfat_is_pow2 = ("@LLVM_FLEXFAT_POW2@" == "ON")
+config.built_with_llvm = ("@COMPILER_RT_STANDALONE_BUILD@" != "TRUE")
+
+if config.built_with_llvm:
+    config.available_features.add("built-in-llvm-tree")
+
+# Load common config for all compiler-rt lit tests.
+lit_config.load_config(config, "@COMPILER_RT_BINARY_DIR@/test/lit.common.configured")
+
+# Load tool-specific config that would do the real work.
+lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/lit.cfg.py")

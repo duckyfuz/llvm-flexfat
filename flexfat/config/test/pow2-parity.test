@@ -1,0 +1,13 @@
+# FlexFat config generator — POW2 (CUSTOM / sizes2.cfg) table parity.
+#
+# Build the FlexFat config generator, regenerate the POW2 size/magic tables and
+# linker script from "sizes2.cfg 32", and assert the output is byte-identical to
+# the committed golden (the reference LowFat POW2 lowfat_config.{c,h}/lowfat.ld).
+#
+# RUN: %cc -O2 -o %t.gen %S/../lowfat-config.c -lm -lpthread
+# RUN: rm -rf %t.d && mkdir -p %t.d && cp %S/../sizes2.cfg %t.d/
+# RUN: cd %t.d && %t.gen sizes2.cfg 32
+# RUN: diff -u %S/../golden/pow2/lowfat_config.h %t.d/lowfat_config.h
+# RUN: diff -u %S/../golden/pow2/lowfat_config.c %t.d/lowfat_config.c
+# RUN: diff -u %S/../golden/pow2/lowfat.ld       %t.d/lowfat.ld
+# RUN: diff -u %S/../golden/pow2/flexfat_sizes.inc %t.d/flexfat_sizes.inc

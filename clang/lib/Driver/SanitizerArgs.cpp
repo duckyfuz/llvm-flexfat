@@ -1697,6 +1697,21 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
   if (Sanitizers.has(SanitizerKind::MemtagStack) &&
       !hasTargetFeatureMTE(CmdArgs))
     TC.getDriver().Diag(diag::err_stack_tagging_requires_hardware_feature);
+
+  if (Sanitizers.has(SanitizerKind::FlexFat)) {
+    // FlexFat's runtime lives at fixed high addresses (the SIZES/MAGICS tables
+    // at 0x200000/0x300000 and the 2^35-stride regions), and its inlined
+    // base/bounds lowering uses lzcnt and a 128-bit reciprocal multiply. Force
+    // the large code model and the BMI/BMI2/LZCNT feature set, matching the
+    // reference build's `-mcmodel=large -mbmi -mbmi2 -mlzcnt`.
+    CmdArgs.push_back("-mcmodel=large");
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back("+lzcnt");
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back("+bmi");
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back("+bmi2");
+  }
 }
 
 SanitizerMask parseArgValues(const Driver &D, const llvm::opt::Arg *A,
@@ -1724,7 +1739,14 @@ SanitizerMask parseArgValues(const Driver &D, const llvm::opt::Arg *A,
     if (A->getOption().matches(options::OPT_fsanitize_EQ) &&
         0 == strcmp("all", Value))
       Kind = SanitizerMask();
-    else
+    else if (0 == strcmp("lowfat", Value)) {
+      // FlexFat: `lowfat` is a deprecated alias for `flexfat`.
+      Kind = SanitizerKind::FlexFat;
+      if (DiagnoseErrors)
+        D.Diag(clang::diag::warn_drv_deprecated_arg)
+            << "-fsanitize=lowfat" << /*hasReplacement=*/1
+            << "-fsanitize=flexfat";
+    } else
       Kind = parseSanitizerValue(Value, /*AllowGroups=*/true);
 
     if (Kind)

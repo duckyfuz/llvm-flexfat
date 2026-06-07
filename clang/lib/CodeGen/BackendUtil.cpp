@@ -70,6 +70,7 @@
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
 #include "llvm/Transforms/Instrumentation/BoundsChecking.h"
 #include "llvm/Transforms/Instrumentation/DataFlowSanitizer.h"
+#include "llvm/Transforms/Instrumentation/FlexFat.h"
 #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
 #include "llvm/Transforms/Instrumentation/HWAddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
@@ -791,6 +792,31 @@ static void addSanitizers(const Triple &TargetTriple,
   }
 }
 
+// FlexFat: schedule the (still no-op) bounds-checking pass at the LowFat
+// reference's pipeline point. LowFat 4.0 registered createLowFatPass() at
+// EP_ScalarOptimizerLate + EP_EnabledOnOptLevel0 so its checks run right after
+// mem2reg and remain visible to the rest of the optimizer (which is what keeps
+// the bounds checks cheap), at every optimization level. The new-PM analog is
+// the ScalarOptimizerLate extension point, which this tree's pipeline builder
+// fires at both -O0 and -O1+.
+static void addFlexFat(const LangOptions &LangOpts, PassBuilder &PB) {
+  if (!LangOpts.Sanitize.has(SanitizerKind::FlexFat))
+    return;
+  PB.registerScalarOptimizerLateEPCallback(
+      [](FunctionPassManager &FPM, OptimizationLevel Level) {
+        FPM.addPass(FlexFatPass());
+      });
+  // Unit 13: globals lowfatification — module pass at PipelineStart so it
+  // runs BEFORE the function pipeline (and therefore before FlexFatPass on
+  // each function). The function pass's calcBasePtr / getPtrBounds key off
+  // the `lowfat_section_*` section attribute that this module pass writes,
+  // so the order matters: sectioning must happen first.
+  PB.registerPipelineStartEPCallback(
+      [](ModulePassManager &MPM, OptimizationLevel Level) {
+        MPM.addPass(FlexFatGlobalsPass());
+      });
+}
+
 void addLowerAllowCheckPass(const CodeGenOptions &CodeGenOpts,
                             const LangOptions &LangOpts, PassBuilder &PB) {
   // SanitizeSkipHotCutoffs: doubles with range [0, 1]
@@ -1071,6 +1097,7 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
     if (!IsThinLTOPostLink) {
       // Most sanitizers only run during PreLink stage.
       addSanitizers(TargetTriple, CodeGenOpts, LangOpts, PB);
+      addFlexFat(LangOpts, PB);
       addKCFIPass(TargetTriple, LangOpts, PB);
       addLowerAllowCheckPass(CodeGenOpts, LangOpts, PB);
 

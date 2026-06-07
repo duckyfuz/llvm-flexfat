@@ -1,0 +1,24 @@
+# FlexFat size-class table drift guard (Unit 2 + Unit 17 variant-aware).
+#
+# The LLVM pass folds heap_select() at compile time from one of two committed
+# size tables: FlexFatSizes_nonpow2.inc (default) or FlexFatSizes_pow2.inc
+# (LLVM_FLEXFAT_POW2=ON). The runtime allocates from lowfat_sizes[] in the
+# build-dir copy of the variant-selected lowfat_config.c (configure_file from
+# the golden, per Unit 17). If pass and runtime ever drift WITHIN a variant,
+# constant malloc(K) folds to the WRONG region index, the runtime allocator
+# places the object in a different size class, and lowfat_base/size decode
+# it against the wrong class -- a silent miscompile (a false positive on a
+# legal access, or a missed trap on an OOB one).
+#
+# Both committed pass tables must equal the corresponding goldens:
+# RUN: diff -u %S/../golden/nonpow2/flexfat_sizes.inc %S/../../../llvm/lib/Transforms/Instrumentation/FlexFatSizes_nonpow2.inc
+# RUN: diff -u %S/../golden/pow2/flexfat_sizes.inc    %S/../../../llvm/lib/Transforms/Instrumentation/FlexFatSizes_pow2.inc
+#
+# ...and each pass table's values must equal the corresponding runtime
+# lowfat_sizes[] values (committed golden runtime config):
+# RUN: grep -oE '^[0-9]+' %S/../../../llvm/lib/Transforms/Instrumentation/FlexFatSizes_nonpow2.inc > %t.pass.nonpow2
+# RUN: sed -n '/lowfat_sizes\[\] =/,/^};/p' %S/../golden/nonpow2/lowfat_config.c | grep -oE '[0-9]+,' | tr -d ',' > %t.rt.nonpow2
+# RUN: diff -u %t.pass.nonpow2 %t.rt.nonpow2
+# RUN: grep -oE '^[0-9]+' %S/../../../llvm/lib/Transforms/Instrumentation/FlexFatSizes_pow2.inc > %t.pass.pow2
+# RUN: sed -n '/lowfat_sizes\[\] =/,/^};/p' %S/../golden/pow2/lowfat_config.c | grep -oE '[0-9]+,' | tr -d ',' > %t.rt.pow2
+# RUN: diff -u %t.pass.pow2 %t.rt.pow2
