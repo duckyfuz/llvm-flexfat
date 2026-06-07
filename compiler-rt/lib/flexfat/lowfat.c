@@ -360,6 +360,9 @@ void lowfat_oob_check(unsigned info, const void *ptr, size_t size0,
 #define LOWFAT_STACKS_START                                                    \
   ((void *)((LOWFAT_STACK_REGION * LOWFAT_REGION_SIZE) +                       \
             LOWFAT_STACK_MEMORY_OFFSET))
+#define LOWFAT_STACK_BASE(ptr)                                                 \
+  ((void *)((const uint8_t *)(ptr) -                                           \
+            ((uintptr_t)(ptr) % LOWFAT_STACK_SIZE)))
 
 // Saved by lowfat_preinit; lowfat_stack_pivot_2 walks back from this to find
 // the high end of the initial native stack (envp lives at the base).
@@ -368,18 +371,82 @@ static LOWFAT_DATA char **lowfat_envp = NULL;
 static LOWFAT_DATA size_t lowfat_stack_freeidx = 0;
 static LOWFAT_DATA lowfat_mutex_t lowfat_stack_mutex;
 
-// Allocate a master-stack slot, then mprotect read+write the slot's mirror in
-// every size-class region listed in lowfat_stacks[]. Single-thread Part-I
-// scope: no freelist reuse, no Fisher-Yates ASLR (added with thread support
-// in Part III). The first call (from the pivot) gets slot 0.
+// Unit 14a: Fisher-Yates shuffle of slot indices. Initialized in
+// lowfat_init from lowfat_rand so the order in which pthread_create
+// consumes the 128 slots is unpredictable to an attacker who knows the
+// region scheme. Non-static so the gtest can verify the permutation
+// property (every value in [0, 128) appears exactly once).
+uint16_t lowfat_stack_perm[LOWFAT_NUM_THREAD_STACKS] = {0};
+
+// Unit 14a: freelist of slots whose previous owner thread has died (its
+// pthread_t descriptor is still readable because the descriptor lives on
+// the lowfat stack the thread used). lowfat_stack_alloc walks this list
+// first; lowfat_is_thread_dead reads the TID/JOINID offsets to decide
+// reclaimability. The build gate from this same unit pins those offsets
+// against the host glibc.
+struct lowfat_stack_freelist_s {
+  pthread_t thread;
+  struct lowfat_stack_freelist_s *next;
+};
+static LOWFAT_DATA struct lowfat_stack_freelist_s *lowfat_stack_freelist = NULL;
+
+// LowFat.cpp:1138-1151 — read the kernel-managed TID and the glibc-managed
+// joinid at the offsets the build gate validated. Two final states are
+// "definitely dead": tid == -1 (the join() final-clear sentinel) or
+// tid == 0 && joinid == thread (detached thread's self-marker). Anything
+// else is alive-or-zombie; the caller skips this freelist entry.
+static bool lowfat_is_thread_dead(pthread_t thread) {
+  pid_t *tid_ptr = (pid_t *)((uint8_t *)thread + LOWFAT_TID_OFFSET);
+  pthread_t *joinid_ptr =
+      (pthread_t *)((uint8_t *)thread + LOWFAT_JOINID_OFFSET);
+  if (*tid_ptr > 0)
+    return false;        // still active
+  else if (*tid_ptr != 0)
+    return true;         // dead + joined (tid = -1)
+  else if (*joinid_ptr == thread)
+    return true;         // dead + detached (joinid = thread)
+  else
+    return false;        // zombie waiting to be joined
+}
+
+// LowFat.cpp:1152-1156 — used by lowfat_force_stack_free to synthesize a
+// definitely-dead pthread_t for the failure-recovery freelist push.
+static void lowfat_force_thread_dead(pthread_t thread) {
+  pid_t *tid_ptr = (pid_t *)((uint8_t *)thread + LOWFAT_TID_OFFSET);
+  *tid_ptr = -1;
+}
+
+// Allocate a master-stack slot, mprotect read+write across every mirror.
+// Walks the freelist first (reclaiming any dead-thread slot) before
+// bump-allocating via the Fisher-Yates permutation. The pivot's first
+// call returns the first permuted slot.
 void *lowfat_stack_alloc(void) {
   lowfat_mutex_lock(&lowfat_stack_mutex);
+
+  // STEP (1): freelist walk — first dead-thread entry wins.
+  struct lowfat_stack_freelist_s *prev = NULL;
+  struct lowfat_stack_freelist_s *curr = lowfat_stack_freelist;
+  while (curr != NULL) {
+    if (lowfat_is_thread_dead(curr->thread)) {
+      if (prev != NULL)
+        prev->next = curr->next;
+      else
+        lowfat_stack_freelist = curr->next;
+      uint8_t *stack = (uint8_t *)LOWFAT_STACK_BASE(curr);
+      lowfat_mutex_unlock(&lowfat_stack_mutex);
+      return stack;
+    }
+    prev = curr;
+    curr = curr->next;
+  }
+
+  // STEP (2): bump-allocate via the Fisher-Yates permutation.
   if (lowfat_stack_freeidx >= LOWFAT_NUM_THREAD_STACKS) {
     lowfat_mutex_unlock(&lowfat_stack_mutex);
     errno = ENOMEM;
     return NULL;
   }
-  size_t stack_idx = lowfat_stack_freeidx++;
+  size_t stack_idx = lowfat_stack_perm[lowfat_stack_freeidx++];
   lowfat_mutex_unlock(&lowfat_stack_mutex);
 
   uint8_t *stack = (uint8_t *)LOWFAT_STACKS_START + stack_idx * LOWFAT_STACK_SIZE;
@@ -394,6 +461,37 @@ void *lowfat_stack_alloc(void) {
       return NULL;
   }
   return stack;
+}
+
+// Add `thread`'s stack to the reclamation freelist. The node lives in the
+// last sizeof(node) bytes of the slot itself (no separate allocation).
+// Idempotent: the slot stays "in use" until lowfat_stack_alloc's freelist
+// walk sees lowfat_is_thread_dead(thread) == true.
+static void lowfat_stack_free(pthread_t thread) {
+  uint8_t *nptr = (uint8_t *)LOWFAT_STACK_BASE(thread);
+  nptr += LOWFAT_STACK_SIZE - sizeof(struct lowfat_stack_freelist_s);
+  struct lowfat_stack_freelist_s *node =
+      (struct lowfat_stack_freelist_s *)nptr;
+  node->thread = thread;
+  lowfat_mutex_lock(&lowfat_stack_mutex);
+  node->next = lowfat_stack_freelist;
+  lowfat_stack_freelist = node;
+  lowfat_mutex_unlock(&lowfat_stack_mutex);
+}
+
+// LowFat.cpp:1235-1245 — recovery path when the real pthread_create
+// failed AFTER we allocated a stack: synthesize a fake "already-dead"
+// pthread_t at the top of the slot, force its tid to -1, and push it to
+// the freelist so the slot is immediately reclaimable. Non-static so the
+// gtest can simulate dead-thread reclamation without spawning a real
+// pthread (the test that would have caught a wrong TID_OFFSET as silent
+// corruption, now doubly defended by the build gate).
+void lowfat_force_stack_free(void *stack) {
+  uint8_t *ptr = (uint8_t *)LOWFAT_STACK_BASE(stack);
+  ptr += LOWFAT_STACK_SIZE - LOWFAT_PAGE_SIZE;
+  pthread_t fake_thread = (pthread_t)ptr;
+  lowfat_force_thread_dead(fake_thread);
+  lowfat_stack_free(fake_thread);
 }
 
 // The pivot's payload (port of lowfat.c:524-575): walk envp to find the high
@@ -461,6 +559,83 @@ __asm__(
     "\tcallq *%rax\n"
     "\tmovq %rax, %rsp\n"
     "\tretq\n");
+
+//===----------------------------------------------------------------------===//
+// Unit 14a: pthread_create interposer.
+//
+// Modern glibc (post-2.34) folded libpthread into libc.so.6 — the symbol
+// is still pthread_create with the same signature, and dlsym(RTLD_NEXT,
+// "pthread_create") finds it. The reference's LowFat targeted glibc 2.27
+// where libpthread was still separate; the only material difference for
+// us is that the dlsym lookup walks the libc image instead of a separate
+// libpthread image, which is opaque to user code (sname/signature
+// unchanged) and works identically. Flagged here so future-us doesn't
+// chase a non-issue.
+//===----------------------------------------------------------------------===//
+
+#ifndef LOWFAT_NO_REPLACE_PTHREAD_CREATE
+
+typedef int (*pthread_create_t)(pthread_t *, const pthread_attr_t *,
+                                void *(*)(void *), void *);
+
+extern int lowfat_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                                 void *(*start_routine)(void *), void *arg)
+    LOWFAT_ALIAS("pthread_create");
+
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                   void *(*start_routine)(void *), void *arg) {
+  static pthread_create_t real_pthread_create = NULL;
+  if (real_pthread_create == NULL) {
+    real_pthread_create =
+        (pthread_create_t)dlsym(RTLD_NEXT, "pthread_create");
+    if (real_pthread_create == NULL || real_pthread_create == pthread_create)
+      lowfat_error("failed to find real pthread_create");
+  }
+
+  // Honor the caller's attributes EXCEPT the stack — we replace it with a
+  // lowfat slot. If the user supplied a custom stack, warn (their pointer
+  // would not be a lowfat address) but proceed with ours.
+  pthread_attr_t newattr;
+  int err;
+  if (attr != NULL) {
+    void *user_stack = NULL;
+    size_t user_size = 0;
+    err = pthread_attr_getstack(attr, &user_stack, &user_size);
+    if (err == 0 && (user_stack != NULL || user_size != 0))
+      lowfat_warning(
+          "custom pthread stack will be replaced with a lowfat stack");
+    memcpy(&newattr, attr, sizeof(newattr));
+  } else {
+    err = pthread_attr_init(&newattr);
+    if (err != 0)
+      lowfat_error("pthread_attr_init failed: %s", strerror(err));
+  }
+
+  void *stack = lowfat_stack_alloc();
+  if (stack == NULL)
+    lowfat_error("failed to allocate stack for new thread");
+  size_t stack_size =
+      LOWFAT_STACK_SIZE - sizeof(struct lowfat_stack_freelist_s);
+
+  err = pthread_attr_setstack(&newattr, stack, stack_size);
+  if (err != 0)
+    lowfat_error("pthread_attr_setstack failed: %s", strerror(err));
+
+  err = real_pthread_create(thread, &newattr, start_routine, arg);
+  if (err != 0) {
+    // pthread_create failed AFTER we allocated the slot — recover the
+    // slot via lowfat_force_stack_free (synthesizes a dead pthread_t at
+    // the top of the slot so the next lowfat_stack_alloc walk reclaims).
+    lowfat_force_stack_free(stack);
+    return err;
+  }
+  // Push the slot to the freelist immediately. It is NOT really free
+  // until the thread terminates AND lowfat_is_thread_dead returns true.
+  lowfat_stack_free(*thread);
+  return 0;
+}
+
+#endif // LOWFAT_NO_REPLACE_PTHREAD_CREATE
 
 //===----------------------------------------------------------------------===//
 // Init: build the tables, reserve the regions, initialise the allocator.
@@ -542,6 +717,23 @@ void LOWFAT_CONSTRUCTOR lowfat_init(void) {
   // at every mirror — the foundation for lowfat_stack_mirror's constant add.
   if (!lowfat_mutex_init(&lowfat_stack_mutex))
     lowfat_init_error("failed to init stack mutex");
+
+  // Unit 14a: Fisher-Yates shuffle of the slot-index permutation. Seeded
+  // by lowfat_rand (already used for the shm path suffix). Done before
+  // the pivot so the very first slot pick (for main's lowfat stack) is
+  // already shuffled — the master thread's stack address is not
+  // predictable just because it's the first one allocated.
+  for (size_t i = 0; i < LOWFAT_NUM_THREAD_STACKS; i++)
+    lowfat_stack_perm[i] = (uint16_t)i;
+  for (size_t i = LOWFAT_NUM_THREAD_STACKS - 1; i > 0; i--) {
+    uint16_t j;
+    lowfat_rand(&j, sizeof(j));
+    j = j % (uint16_t)(i + 1);
+    uint16_t tmp = lowfat_stack_perm[i];
+    lowfat_stack_perm[i] = lowfat_stack_perm[j];
+    lowfat_stack_perm[j] = tmp;
+  }
+
   {
     int fd = lowfat_create_shm(LOWFAT_STACK_MEMORY_SIZE);
     if (fd < 0)

@@ -423,3 +423,56 @@ bounds-check sweep.
   (class bump-up from 16).
 - **+** `compiler-rt/test/flexfat/TestCases/global_clean.c` — large
   mixed mutable+const globals, clean exit at -O0 and -O2.
+
+## Unit 14a — threads + build gate
+
+Runtime, build-system, and tests; no LLVM/clang side.
+
+### Build gate
+- **~** `flexfat/config/lowfat-check-config.c` — rewrite for build-gate
+  use: expected-vs-found error messages, cond-var sync so the JOINID
+  check is guaranteed to follow the worker's TID check (the reference
+  version had a race that could print `OK` before the worker ran).
+- **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — `add_custom_command`
+  builds the validator with the host C compiler, includes the configured
+  `lowfat_config.c`, runs it as a build step whose success writes a
+  stamp; runtime archive (`flexfat`) DEPENDS on the stamp.
+
+### Runtime (threads)
+- **~** `compiler-rt/lib/flexfat/lowfat.c`:
+  - **+** `LOWFAT_STACK_BASE(ptr)` macro.
+  - **+** `lowfat_stack_perm[LOWFAT_NUM_THREAD_STACKS]` (Fisher-Yates
+    permutation; non-static for gtest verification).
+  - **+** `struct lowfat_stack_freelist_s` + `lowfat_stack_freelist`.
+  - **+** `lowfat_is_thread_dead` + `lowfat_force_thread_dead`
+    (read/write TID/JOINID at the build-validated offsets).
+  - **+** `lowfat_stack_free(pthread_t)` and `lowfat_force_stack_free
+    (void *)` (the failure-recovery path; non-static for gtest).
+  - **~** `lowfat_stack_alloc` rewritten: walks freelist first, then
+    bump-allocates via `lowfat_stack_perm[freeidx]`.
+  - **~** `lowfat_init`: Fisher-Yates shuffle of `lowfat_stack_perm`
+    BEFORE the pivot.
+  - **+** `pthread_create` interposer via `dlsym(RTLD_NEXT, ...)` +
+    `pthread_attr_setstack`. Gated by `LOWFAT_NO_REPLACE_PTHREAD_CREATE`
+    so the gtest no-replace variant keeps glibc's pthread_create.
+- **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — add
+  `-DLOWFAT_NO_REPLACE_PTHREAD_CREATE` to `RTFlexfat_noreplace`.
+
+### Tests
+- **+** `compiler-rt/lib/flexfat/tests/flexfat_threads_test.cpp` —
+  4 gtests: `FisherYatesIsPermutation` (every value in [0, 128) appears
+  exactly once), `AllocReturnsInStackSubrange` (class-aligned + lowfat
+  stack classifier), `SlotReclamationAfterForceFree` (TID-final-state
+  reclamation round-trip), `ConcurrentAllocStress` (4 threads × 200
+  alloc/free iterations across 6 size classes — first real concurrency
+  exercise for the Unit-4 per-region malloc mutexes).
+- **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — add the new source.
+- **+** `compiler-rt/test/flexfat/TestCases/thread_classify.c` — e2e: a
+  `pthread_create`d worker takes `&local` and asserts `lowfat_is_ptr` +
+  `lowfat_is_stack_ptr` both true. Pins "interposer ran and gave the
+  worker a lowfat slot."
+- **+** `compiler-rt/test/flexfat/TestCases/thread_stack_oob.c` — e2e:
+  stack OOB inside a spawned thread traps with `pointer = … (stack)`,
+  `size = 32`.
+- **+** `compiler-rt/test/flexfat/TestCases/threads_alloc_stress.c` —
+  e2e: 4 threads × 2000 malloc/free iterations × 6 classes, -O0 and -O2.

@@ -20,6 +20,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 12a | Stack runtime: SHM helper (`lowfat_create_shm`), per-class stack regions mapped `MAP_SHARED` to one fd at init, `lowfat_envp` capture in `.preinit_array`, master-stack bump allocator (`lowfat_stack_alloc`), and the pivot trampoline (`lowfat_stack_pivot` asm + `lowfat_stack_pivot_2` payload) that copies the live native stack and switches `%rsp` before `main` runs — `&local` in `main` now classifies as `stack`, not `nonfat`. NO pass change yet; alloca lowfatification is Unit 12b. Gate is **51/51** | ✅ |
 | 12b | Alloca lowfatification (pass half): `doesAllocaEscape` + `doesIntEscape` + `isInterestingAlloca` (escape predicate — escaping ⇒ low-fat, per the code, not SPEC's English wording), `makeAllocaLowFatPtr` (fixed + VLA paths; mirror gep tagged `!flexfat.stack.mirror`); `calcBasePtr`/`getPtrBounds` recognise the tag and emit inline `lowfat_base` for stack-mirror access; `-flexfat-no-replace-alloca` wired (Unit-10 forward-decl finally gets its behavioral test); idempotence guard skips already-mirrored allocas surfaced via inlining. Codegen parity: fast-path mirror is a single `leaq cst(%rsp)`, no div, no call, no runtime table load; check is `shr/table-load/single cmpq/jae` to out-of-line `lowfat_oob_error`. Gate is **57/57**. MSET flip pending differential re-run | ✅ |
 | 13 | Global lowfatification: `isInterestingGlobal` + `makeGlobalVariableLowFatPtr` as a NEW **module pass** (`flexfat-globals`) registered at PipelineStart so sectioning happens BEFORE the function-level pass needs to see it. Eligible globals get `section "lowfat_section_<size>"` (or `..._const_<size>`) at the class-boundary alignment; Common→WeakAny promotion lets the linker honor the section attribute. Driver wiring: `-T <resource>/lowfat.ld` + `-z max-page-size=0x1000` on every flexfat link, plus the suppress-default-PIE shim in `Gnu.cpp` (lowfat.ld pins to absolute addresses, PIE relocates them). `calcBasePtr`/`getConstantPtrBounds` recognise lowfatified globals via the section name and emit inline `lowfat_base` so the Unit-7 check fires on global-derived pointers. `-flexfat-no-replace-globals` (Unit-10 forward-decl, last of three) finally functional. Gate is **64/64** | ✅ |
+| 14a | Threads + build gate: `pthread_create` interposer (`dlsym(RTLD_NEXT, …)`) allocates a lowfat slot via `lowfat_stack_alloc`, sets it via `pthread_attr_setstack`, and pushes the slot to a reclamation freelist; `lowfat_is_thread_dead` reads TID/JOINID at the configured offsets to reclaim slots when their owner thread has joined (`tid==-1`) or detached + died (`tid==0 && joinid==thread`); Fisher-Yates shuffle of `lowfat_stack_perm[128]` ASLRs the slot pick order. **Build gate** — `flexfat_check_config` builds & runs the offset validator against host glibc at compile time; mismatch fails the build with named expected-vs-found offsets (negative control confirmed: corrupt JOINID → build fails with the exact message; restore → green). Fork interposer is Unit 14b — until then, the gtest threadsafe death-test mitigation from 12a stays. Gate is **71/71** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -1137,4 +1138,115 @@ Stack}" classification appears to have conflated two distinct buckets
 unconstructable" that 12b later named separately). The total movement
 all-DETECTED in 13 either way, but the bucket labels deserved more
 precision than they got.
+
+
+## Unit 14a — threads + build gate
+
+Two halves of the same unit:
+
+### Build gate (TID/JOINID offset validation)
+
+glibc declares `struct pthread` PRIVATE in `descr.h` and changes the
+layout across versions without ABI notice. We've already observed two
+correct JOINID values across glibc generations (0x620 on host glibc 2.39,
+0x628 on the upstream LowFat pin's target glibc; see "REFERENCE pinning"
+above). Dead-thread reclamation reads TID and JOINID directly at those
+offsets; a wrong offset silently corrupts stack-slot ownership — the
+runtime would reclaim a slot whose thread is still alive, then
+`pthread_create` would hand the same stack to a new thread, two threads
+would race over the same stack, and the corruption would surface as
+arbitrary later crashes or silent OOB.
+
+Unit 14a promotes `flexfat/config/lowfat-check-config.c` from a manual
+check into a **build-time gate** wired into `compiler-rt/lib/flexfat/
+CMakeLists.txt`. CMake builds the validator with the host C compiler
+against the configured `lowfat_config.c`, runs it as a post-build step
+whose success writes a stamp file, and pins the runtime archive
+(`libclang_rt.flexfat.a`) as DEPENDS on that stamp. On mismatch the
+validator prints expected-vs-found:
+
+```
+FlexFat build-gate failure: glibc pthread JOINID offset does not
+match the configured constant.
+
+  JOINID_OFFSET: configured 0x628
+    value at that offset: 0x0
+    expected value:        0x7fe4e4bcc6c0
+
+glibc declares `struct pthread` layout PRIVATE in descr.h and
+changes it without ABI notice (observed: JOINID 0x620 on glibc
+2.39, 0x628 on the upstream LowFat pin's target glibc). …
+```
+
+The validator also fixes a race in the reference version: the original
+worker `sleep(1)`s in a loop after TID-checking, so main can detach +
+JOINID-check + print `OK` before the worker has actually run. Our
+version uses a pthread cond var so the JOINID check is guaranteed to
+happen after the worker's TID check.
+
+The DEPENDS list of the validator binary includes BOTH
+`lowfat-check-config.c` and the included `flexfat/config/golden/nonpow2/
+lowfat_config.c` — without the second, a config edit doesn't trigger a
+re-build of the validator and the gate silently keeps prior offsets
+baked in. **Negative control verified end-to-end**: corrupting
+`LOWFAT_JOINID_OFFSET` from 0x620 to 0x628 in the committed
+`lowfat_config.c`, then `rm` the stamp, then `ninja flexfat_check_config`
+fails with the named-offsets message; restoring 0x620 + re-stamping
+passes. Build cycle ~2s.
+
+### Threads (pthread_create interposition + reclamation + ASLR)
+
+Runtime port of LowFat.cpp's `lowfat_threads.c`:
+
+- **`lowfat_stack_perm[128]`** — Fisher-Yates permutation initialized in
+  `lowfat_init` from `lowfat_rand` BEFORE the pivot, so the master
+  thread's slot pick is already shuffled. Exposed (non-static) so the
+  gtest can verify the permutation property without touching internals.
+- **Freelist of dead-thread slots** — `lowfat_stack_alloc` walks it
+  first; `lowfat_is_thread_dead` is the predicate. The freelist node
+  lives in the last `sizeof(node)` bytes of the slot itself (no separate
+  allocation).
+- **Two final states for reclamation** (`tid==-1` ⇒ joined; `tid==0 &&
+  joinid==thread` ⇒ detached + dead) — anything else is alive-or-zombie,
+  the walker skips. Both reads are at the offsets the build gate just
+  validated.
+- **`pthread_create` interposer** — `dlsym(RTLD_NEXT, "pthread_create")`
+  + `pthread_attr_setstack` to a fresh lowfat slot + push to freelist.
+  Recovery: if real `pthread_create` fails AFTER we allocated the slot,
+  `lowfat_force_stack_free` synthesizes a fake dead pthread_t at the top
+  of the slot so the next walk reclaims.
+
+### glibc-version deviations from the reference
+
+The reference targets glibc 2.27 (pre-2.34, separate libpthread.so.0).
+Notes for the post-2.34 host glibc we build against:
+
+- **Symbol location**: post-2.34 glibc folded libpthread into libc.so.6,
+  but the symbol is still `pthread_create` with the same signature.
+  `dlsym(RTLD_NEXT, "pthread_create")` resolves it from libc instead of
+  libpthread; behavior identical from the caller's perspective. No code
+  change needed. Flagged here so future-us doesn't chase a non-issue.
+- **`struct pthread` layout**: JOINID moved from 0x628 to 0x620 across
+  the version range our runtime spans. The build gate is the response.
+- **`lowfat_warning` on custom stacks**: SAME as the reference — if the
+  user passes a pre-allocated stack via `pthread_attr_setstack`, we
+  override with a lowfat slot and warn. Behavior unchanged.
+
+### Fork interposer NOT in 14a (separate unit, 14b)
+
+The bare-`fork()` MAP_SHARED hazard documented in 12a is NOT closed by
+14a. Until the fork interposer lands (Unit 14b), tests that fork()
+without exec() still alias parent/child physical stack bytes. Mitigation:
+the gtest threadsafe death-test setting from 12a **stays** in
+`flexfat_test_main.cpp`. Revert candidate moves to 14b's acceptance
+checklist alongside the bare-fork e2e (red against 14a, green after 14b).
+
+### What 14a leaves for 14b
+1. `lowfat_fork.c` port (`clone(SIGCHLD)` on tmp stack → `lowfat_create_shm`
+   per-class fresh stacks for child → `memcpy` parent stack → `longjmp`).
+2. Bare-fork e2e: red against 14a, green after 14b. This is the empirical
+   proof of the hazard 12a documented.
+3. Death-test threadsafe revert (or document why it stays).
+4. Known gap: direct `clone()` calls remain unsupported (matching the
+   reference's choice).
 

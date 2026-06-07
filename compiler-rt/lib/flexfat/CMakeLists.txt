@@ -45,7 +45,14 @@ add_compiler_rt_object_libraries(RTFlexfat_noreplace
   ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
   CFLAGS ${FLEXFAT_CFLAGS}
         -DLOWFAT_NO_REPLACE_STD_MALLOC
-        -DLOWFAT_NO_REPLACE_STD_FREE)
+        -DLOWFAT_NO_REPLACE_STD_FREE
+        # Unit 14a: keep gtest's own pthread_create on real glibc so its
+        # workers run on stock kernel stacks (gtest death-test infra and
+        # the test harness assume that). The Unit-4 per-region malloc
+        # mutexes are still exercised concurrently via lowfat_malloc /
+        # lowfat_free called from those stock-stack worker threads — that
+        # is the test we actually need.
+        -DLOWFAT_NO_REPLACE_PTHREAD_CREATE)
 
 foreach(arch ${FLEXFAT_SUPPORTED_ARCH})
   add_compiler_rt_runtime(clang_rt.flexfat
@@ -83,6 +90,50 @@ install(FILES ${FLEXFAT_GOLDEN_LD}
         DESTINATION
           ${COMPILER_RT_INSTALL_LIBRARY_DIR}/${COMPILER_RT_DEFAULT_TARGET_TRIPLE}
         COMPONENT flexfat)
+
+# Unit 14a: build-time TID/JOINID offset gate.
+#
+# glibc declares `struct pthread` PRIVATE in descr.h and changes the layout
+# across versions (we've already observed JOINID at both 0x620 and 0x628).
+# Dead-thread reclamation reads those offsets directly. If they're wrong,
+# the runtime silently corrupts stack-slot ownership; this gate makes that
+# a loud build failure instead.
+#
+# Build the validator with the host compiler and `lowfat_config.c` on the
+# include path so it sees the configured LOWFAT_{TID,JOINID}_OFFSET. Run it
+# at build time; success writes a stamp file that libclang_rt.flexfat
+# depends on. Failure prints expected-vs-found offsets and stops the build.
+set(FLEXFAT_CHECK_CONFIG_SRC
+  ${CMAKE_SOURCE_DIR}/../flexfat/config/lowfat-check-config.c)
+set(FLEXFAT_CHECK_CONFIG_INC
+  ${CMAKE_SOURCE_DIR}/../flexfat/config/golden/nonpow2/lowfat_config.c)
+set(FLEXFAT_CHECK_CONFIG_BIN
+  ${CMAKE_CURRENT_BINARY_DIR}/lowfat-check-config-validator)
+set(FLEXFAT_CHECK_CONFIG_STAMP
+  ${CMAKE_CURRENT_BINARY_DIR}/lowfat-check-config.stamp)
+add_custom_command(
+  OUTPUT ${FLEXFAT_CHECK_CONFIG_BIN}
+  COMMAND ${CMAKE_C_COMPILER} -O2 -Wall
+          -I${CMAKE_SOURCE_DIR}/../flexfat/config/golden/nonpow2
+          -Wno-unused-function -Wno-unused-variable
+          -o ${FLEXFAT_CHECK_CONFIG_BIN}
+          ${FLEXFAT_CHECK_CONFIG_SRC}
+          -lpthread
+  # DEPENDS on both the validator and the lowfat_config.c whose offsets it
+  # consumes (#included from the validator source) — without the latter, a
+  # config edit doesn't trigger a re-build of the validator and the gate
+  # silently keeps the prior offsets baked in.
+  DEPENDS ${FLEXFAT_CHECK_CONFIG_SRC} ${FLEXFAT_CHECK_CONFIG_INC}
+  COMMENT "Building FlexFat TID/JOINID offset validator")
+add_custom_command(
+  OUTPUT ${FLEXFAT_CHECK_CONFIG_STAMP}
+  COMMAND ${FLEXFAT_CHECK_CONFIG_BIN}
+  COMMAND ${CMAKE_COMMAND} -E touch ${FLEXFAT_CHECK_CONFIG_STAMP}
+  DEPENDS ${FLEXFAT_CHECK_CONFIG_BIN}
+  COMMENT "Validating FlexFat TID/JOINID offsets against host glibc")
+add_custom_target(flexfat_check_config ALL
+  DEPENDS ${FLEXFAT_CHECK_CONFIG_STAMP})
+add_dependencies(flexfat flexfat_check_config)
 
 if(COMPILER_RT_INCLUDE_TESTS)
   add_subdirectory(tests)
