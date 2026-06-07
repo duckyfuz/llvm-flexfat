@@ -679,3 +679,27 @@ target — performance is measured, not asserted.
 - **+** `flexfat/perf/results/stats_pow2.txt` — STATISTIC counters
   under the POW2 build; identical to non-POW2 because the sizes table
   shape doesn't change check density on this corpus.
+
+
+## Unit 17 follow-up — link-time variant assertion (cross-skew guard)
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp` — `emitVariantAssertion`
+  emits an extern reference to `__flexfat_variant_{pow2,nonpow2}` (chosen
+  by `FLEXFAT_IS_POW2`) plus a private `__flexfat_variant_keepalive`
+  constant pointing at it, with `llvm.used` pinning. `isInterestingGlobal`
+  carves out the `__flexfat_variant_` name prefix so the Globals pass
+  doesn't section the scaffolding.
+
+### Runtime
+- **~** `compiler-rt/lib/flexfat/lowfat.c` — defines exactly ONE of
+  `__flexfat_variant_pow2` / `__flexfat_variant_nonpow2`, chosen by
+  `LOWFAT_IS_POW2` from the variant-selected `lowfat_config.c`. A
+  cross-variant link fails with `undefined reference to
+  __flexfat_variant_{pow2,nonpow2}`.
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/variant_marker_nonpow2.ll`
+  — `REQUIRES: flexfat-nonpow2`. Pins the pass's non-POW2 marker emission.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/variant_marker_pow2.ll`
+  — `REQUIRES: flexfat-pow2`. Pins the pass's POW2 marker emission.

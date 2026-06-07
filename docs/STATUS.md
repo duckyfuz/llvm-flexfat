@@ -1989,3 +1989,96 @@ shape doesn't change check density on this corpus).
 The mandated "support both variants" of CLAUDE.md is now end-to-end true.
 The "config+encoding parity only" framing implicit in the prior table rows
 no longer applies.
+
+
+## Unit 17 follow-up — three-axis variant-skew audit
+
+Post-Unit-17 audit of the variant plumbing against three failure axes
+raised after the initial port. Recorded here as the closing fix on the
+cross-variant-desync surface.
+
+### (1) Does `sizes-sync.test` actually run per-variant?
+
+Yes, **on the COMMITTED artifacts**. The test now performs four byte-diffs:
+- `golden/nonpow2/flexfat_sizes.inc` == `FlexFatSizes_nonpow2.inc` (pass)
+- `golden/pow2/flexfat_sizes.inc`    == `FlexFatSizes_pow2.inc`    (pass)
+- `FlexFatSizes_nonpow2.inc` values  == `golden/nonpow2/lowfat_config.c`'s `lowfat_sizes[]` (runtime)
+- `FlexFatSizes_pow2.inc`    values  == `golden/pow2/lowfat_config.c`'s `lowfat_sizes[]` (runtime)
+
+So both variants are guarded against drift across pass + runtime + generator
+in any build configuration. The test does NOT inspect the BUILT artifact
+(it can't — lit doesn't see compile flags); that surface is handled by (3).
+
+### (2) Is `pow2_heap_boundary.c` a folded-index probe?
+
+Yes. Verified by reading the emitted IR under `LLVM_FLEXFAT_POW2=ON`:
+```
+%0 = tail call ptr @lowfat_malloc_index(i64 3, i64 63)
+```
+`malloc(63)` is a constant, `optimizeMalloc` folds it host-side via
+`flexfatHeapSelect(63)`, which for POW2 returns idx 3 (class 64). If the
+pass were stuck on the non-POW2 sizes table, `flexfatHeapSelect(63)` would
+return 4 — and under the POW2 runtime, idx 4 maps to size class 128. The
+test's `size = 64` CHECK line would fail to match (the report would show
+128), AND `p[64]` would silently fall within the 128-byte class and not
+trap. So this test pins three things at once: pass folds the correct idx
+host-side; runtime services that idx in the right class; the trap fires
+at the exact one-byte boundary. **It is the malloc_class.c equivalent for
+POW2.**
+
+### (3) Could a stale build serve a mismatched pair?
+
+Yes — and the single CMake option alone does not prevent this. CMake
+re-runs `configure_file` when the option changes, and ninja rebuilds the
+pass with new `-DFLEXFAT_IS_POW2=…` flags, but a hand-edited
+CMakeCache, a dirty build dir from a half-completed reconfigure, or a
+hand-swapped runtime archive (which is exactly how Unit 16's first
+attempt was done) can produce a mismatched binary that's not caught
+structurally.
+
+**Fix landed (defensive, link-time-loud)**: the FlexFat pass emits an
+extern reference to one of two variant-tagged symbols
+(`__flexfat_variant_pow2` / `__flexfat_variant_nonpow2`, chosen by the
+pass's compile-time `FLEXFAT_IS_POW2`), held alive by a private
+`__flexfat_variant_keepalive` constant pointer that survives
+dead-stripping via `llvm.used`. The runtime
+(`compiler-rt/lib/flexfat/lowfat.c`) defines exactly ONE of the two
+symbols, chosen by the runtime's own `LOWFAT_IS_POW2` (from the
+variant-selected `lowfat_config.c`).
+
+Cross-link demonstrations (both verified post-fix):
+- Consistent build (same variant pass + runtime): links cleanly.
+- **Mismatched build, non-POW2 .o + POW2 runtime archive:**
+  ```
+  /usr/bin/ld: hc.o:(lowfat_section_const_16+0x0):
+    undefined reference to `__flexfat_variant_nonpow2'
+  collect2: error: ld returned 1 exit status
+  ```
+- **Mismatched build, POW2 .o + non-POW2 runtime archive:**
+  ```
+  /usr/bin/ld: hc_pow2.o:(.data.rel.ro..L__flexfat_variant_keepalive+0x0):
+    undefined reference to `__flexfat_variant_pow2'
+  collect2: error: ld returned 1 exit status
+  ```
+
+The skew dies LOUDLY at link time, named, before the binary ever runs.
+No silent corrupt-quietly path remains on this axis.
+
+**Pinned by IR tests**: `variant_marker_nonpow2.ll`
+(`REQUIRES: flexfat-nonpow2`) and `variant_marker_pow2.ll`
+(`REQUIRES: flexfat-pow2`) assert the pass emits the right variant
+symbol plus the keepalive + `llvm.used` pinning, and that the OTHER
+variant symbol does NOT appear. So the link-time guard itself is now a
+gate line, not just a runtime-execution observation.
+
+**`isInterestingGlobal` carve-out**: the new keepalive constant matches
+the name prefix `__flexfat_variant_` and is explicitly skipped by the
+Globals pass — it is pass-internal scaffolding, not a user object to
+section into a lowfat region.
+
+### Gate post-follow-up
+- Non-POW2 default: **88 tests, 86 passed, 2 unsupported** (the POW2 e2e
+  + the POW2 marker IR test).
+- POW2 (`LLVM_FLEXFAT_POW2=ON`): **84 tests, 70 passed, 14 unsupported**
+  (the 13 `REQUIRES: flexfat-nonpow2` set + the non-POW2 marker IR test).
+- **0 failed in either variant.**

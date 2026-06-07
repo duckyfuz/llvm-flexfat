@@ -51,6 +51,7 @@
 #include "llvm/Support/SpecialCaseList.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <string>
 
 using namespace llvm;
@@ -1319,6 +1320,13 @@ constexpr uint64_t kMaxGlobalAllocSize = 67108864; // 64 MiB
 static bool isInterestingGlobal(GlobalVariable *GV) {
   if (ClNoReplaceGlobals)
     return false;
+  // Unit 17 follow-up: the variant-assertion keepalive (a private constant
+  // pointing at __flexfat_variant_{pow2,nonpow2}) is pass-internal scaffolding,
+  // not a user object. Don't section it -- sectioning would put the keepalive
+  // into a lowfat region and make global_excluded.ll's "no spurious section"
+  // CHECK-NOT fire on our own marker.
+  if (GV->getName().starts_with("__flexfat_variant_"))
+    return false;
   if (GV->hasSection())                 // user-declared section
     return false;
   if (GV->getAlign().valueOrOne().value() > 16) // user-declared alignment > 16
@@ -1382,9 +1390,49 @@ static bool makeGlobalVariableLowFatPtr(Module &M, GlobalVariable *GV) {
   return true;
 }
 
+// Unit 17 follow-up: emit a link-time variant assertion. The pass declares an
+// extern reference to a variant-tagged symbol that the matching runtime
+// defines, then emits a private constant pointing to it. The constant carries
+// a relocation that the linker MUST resolve -- a mismatched pair (pass POW2 +
+// runtime non-POW2, or vice versa) fails the LINK with "undefined reference
+// to __flexfat_variant_{pow2,nonpow2}", catching the silent-miscompile axis
+// (right idx range, wrong region) before the binary runs. The pass-side name
+// is fixed by FLEXFAT_IS_POW2; the runtime defines exactly one of the two.
+// `llvm.used` keeps the private referrer alive past dead-stripping.
+static void emitVariantAssertion(Module &M) {
+  LLVMContext &Ctx = M.getContext();
+  IntegerType *I8 = Type::getInt8Ty(Ctx);
+  PointerType *PtrTy = PointerType::getUnqual(Ctx);
+  static constexpr StringLiteral PassVariantSym =
+#if FLEXFAT_IS_POW2
+      "__flexfat_variant_pow2";
+#else
+      "__flexfat_variant_nonpow2";
+#endif
+  // Extern declaration: the runtime provides the matching definition.
+  GlobalVariable *Marker = M.getGlobalVariable(PassVariantSym);
+  if (!Marker) {
+    Marker = new GlobalVariable(M, I8, /*isConstant=*/true,
+                                GlobalValue::ExternalLinkage,
+                                /*Initializer=*/nullptr, PassVariantSym);
+  }
+  // Private referrer: a constant whose initializer IS the variant symbol's
+  // address. This is what carries the link-time relocation.
+  if (!M.getGlobalVariable("__flexfat_variant_keepalive")) {
+    GlobalVariable *KeepAlive = new GlobalVariable(
+        M, PtrTy, /*isConstant=*/true, GlobalValue::PrivateLinkage,
+        Marker, "__flexfat_variant_keepalive");
+    appendToUsed(M, {KeepAlive});
+  }
+}
+
 PreservedAnalyses FlexFatGlobalsPass::run(Module &M, ModuleAnalysisManager &) {
+  // Variant assertion runs unconditionally -- even when ClNoReplaceGlobals
+  // suppresses sectioning, the pass and runtime were still built per variant
+  // and the mismatch must still fail to link.
+  emitVariantAssertion(M);
   if (ClNoReplaceGlobals)
-    return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
   bool Changed = false;
   // Snapshot the global list first — makeGlobalVariableLowFatPtr can mutate
   // linkage, which on some LLVM revisions perturbs iteration of M.globals().
@@ -1393,5 +1441,6 @@ PreservedAnalyses FlexFatGlobalsPass::run(Module &M, ModuleAnalysisManager &) {
     Worklist.push_back(&GV);
   for (GlobalVariable *GV : Worklist)
     Changed |= makeGlobalVariableLowFatPtr(M, GV);
-  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  // PreservedAnalyses::none() always: we added the variant marker.
+  return PreservedAnalyses::none();
 }

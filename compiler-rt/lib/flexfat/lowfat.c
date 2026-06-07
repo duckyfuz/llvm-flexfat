@@ -71,6 +71,21 @@
 #include <lowfat_config.c>
 #include "lowfat.h"
 
+// Unit 17 follow-up: link-time variant assertion. The FlexFat pass emits an
+// extern reference to ONE of these two symbols (chosen by the pass's compile-
+// time FLEXFAT_IS_POW2). The runtime here defines exactly one -- matching the
+// runtime's own variant. A mismatched pair (pass POW2 + runtime non-POW2 or
+// vice versa) fails to LINK with "undefined reference to
+// __flexfat_variant_{pow2,nonpow2}", catching the silent-miscompile axis
+// (folded idx lands in-range under both variants but selects the wrong size
+// class) before the binary ever runs. The symbol is one byte of read-only
+// data; it carries no value beyond its presence/absence.
+#ifdef LOWFAT_IS_POW2
+const char __flexfat_variant_pow2 = 1;
+#else
+const char __flexfat_variant_nonpow2 = 0;
+#endif
+
 static bool lowfat_malloc_inited = false;
 
 //===----------------------------------------------------------------------===//
