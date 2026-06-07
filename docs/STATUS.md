@@ -1072,3 +1072,69 @@ misses (also 0 detected on those in 13, as expected).
 `flexfat/mset/flexfat_original_detected.txt` rewritten with the 78-type
 set; 54-type Unit-12b set superseded.
 
+### PF ledger (12b 54 → 13 48) — every transition named
+
+The "PF total dropped from 54 → 48" headline hides the actual movement.
+Derived from the committed evidence files plus the MSET run logs:
+
+  - **LEFT PF: 15 types** (all → DETECTED in 13)
+  - **ENTERED PF: 9 types**
+  - **NET: 54 − 15 + 9 = 48** ✓
+
+#### 15 types that LEFT PF (all → 13:DETECTED)
+
+| Bucket | Count | Types | Mechanism |
+|---|---:|---|---|
+| **A. Canonical 11→12b "newly-unconstructable" restored** | 6 | `Inter-Object Linear OOBA Overflow Direct Read/Write Global Stack`; `Inter-Object Linear OOBA Overflow Stdlib Read/Write Global Stack`; `Inter-Object Linear OOBA Underflow Direct Read/Write Stack Global` | These are EXACTLY the 6 Stack↔Global Linear OOBA types Unit 12b lost to PF when Stack moved to master region 62 (~125 GiB above .data Globals). Unit 13's within-region `heap < global < stack` sub-layout collapses the gulf; walker satisfies its distance precondition; bounds check fires. **Criterion 2 fulfilled, verbatim.** |
+| **B. Heap↔mixed PF actually present in 12b** | 3 | `Inter-Object Linear OOBA Overflow Direct Write Heap Global`; `Inter-Object Linear OOBA Overflow Stdlib Write Heap Global`; `Inter-Object Linear OOBA Underflow Direct Write Global Heap` | The ACTUAL Heap-mixed PF subset (ref-detected ∩ 12b-PF ∩ Heap-mixed). All flipped to DETECTED via the same sub-range layout fix. |
+| **C. Non-Linear Global↔Stack rider** | 6 | `Inter-Object Non-Linear OOBA Overflow Direct Read/Write Global Stack`; `Inter-Object Non-Linear OOBA Overflow Stdlib Read/Write Global Stack`; `Inter-Object Non-Linear OOBA Underflow Direct Read/Write Stack Global` | Same constructability mechanism as bucket A but on the Non-Linear OOBA axis — Unit-11 didn't track these explicitly. They rode bucket A's fix unannounced. |
+
+#### 9 types that ENTERED PF
+
+| Bucket | Count | Types | Origin in 12b | Mechanism |
+|---|---:|---|---|---|
+| **D. 12b FF-only Stack-Global catches that flipped** | 7 | `Inter-Object Linear OOBA Overflow Direct Read Stack Global`; `Inter-Object Linear OOBA Overflow Stdlib Read Stack Global`; `Inter-Object Linear OOBA Underflow Direct Read Global Stack`; `Inter-Object Non-Linear OOBA Overflow Direct Read/Write Stack Global`; `Inter-Object Non-Linear OOBA Overflow Stdlib Read/Write Stack Global` | 12b:DETECTED | The 12b FF-only catches the 12b STATUS flagged as "may or may not survive — depends on layout." Globals-now-lowfat layout converged with the reference's, and these specific MSET test variants no longer satisfy preconditions. NOT a "bug missed" — the test variant is the thing that became unconstructable, not the encoding. |
+| **E. NEW: Non-Linear Global→Stack Underflow** | 2 | `Inter-Object Non-Linear OOBA Underflow Direct Read Global Stack`; `Inter-Object Non-Linear OOBA Underflow Direct Write Global Stack` | 12b:UNDETECTED | Were UNDETECTED in 12b (Global was non-fat, no check fired). In 13: Global lowfat, target=Stack (within-region high), origin=Global (within-region middle). For Underflow, target<origin precondition required. target>origin → PF. Layout-collapse PF, not a regression in detection. |
+
+#### Criterion-3 reconciliation — the "8/8" was an overcount
+
+The scorecard claimed "8/8 Heap↔{Global,Stack} mixed pairs → DETECTED."
+The recorded Unit-11 STATUS count was **6 PF**. The ledger forces this
+to add up honestly:
+
+  - My criterion-3 query enumerated **8 types** (Overflow×Direct R/W ×
+    Heap-Global/Heap-Stack + Underflow×Direct R/W × Global-Heap/Stack-Heap).
+  - Of those 8, only **2** were actually 12b-PF: `Heap Global Overflow
+    Direct Write` and `Global Heap Underflow Direct Write` (both in
+    bucket B above).
+  - The other 6 query types were ALREADY DETECTED in 12b and should not
+    have been counted toward "flipping PF → DETECTED."
+  - The **canonical Heap-mixed PF subset in 12b is 3 types** (bucket B
+    above), not 8 — my query missed `Heap Global Overflow Stdlib Write`
+    and over-included 6 already-detected types.
+
+**The Unit-11 STATUS "6 PF" claim itself doesn't match either.** Only 3
+types actually fit the "ref-detected + 12b-PF + Heap↔(Global,Stack)
+mixed" criterion. Unit-11 over-stated by 3 — likely conflating with the
+Stack↔Global "newly-unconstructable" set (bucket A above), which has 6
+types but is Stack-Global, not Heap-mixed. **Two readings reconcile**:
+
+  - **Strict (per Unit-11's "Heap↔mixed" wording):** the canonical
+    Heap-mixed PF subset is **3 types** (bucket B); 3/3 → DETECTED in 13. ✓
+  - **Inclusive (treating "Heap↔mixed" as the broader 11→12b PF growth):**
+    buckets A + B together = **9 types**; 9/9 → DETECTED in 13. ✓
+
+Honest revised criterion-3 statement: **9/9 if measured by "all
+11→12b PF growth" (buckets A+B); 3/3 if measured by the strict
+Heap-mixed bucket Unit-11 named.** The original "8/8" measured neither
+honestly — it was overbroad on the not-actually-PF side and undercounted
+the actually-PF Stdlib-Write Heap-Global type. The Unit-11 "6" is itself
+an artifact of imprecise classification at the time.
+
+**Finding (not a rounding error):** Unit-11 STATUS's "6 PF Heap↔{Global,
+Stack}" classification appears to have conflated two distinct buckets
+(the actual 3-type Heap-mixed PF, plus the 6-type Stack↔Global "newly-
+unconstructable" that 12b later named separately). The total movement
+all-DETECTED in 13 either way, but the bucket labels deserved more
+precision than they got.
+
