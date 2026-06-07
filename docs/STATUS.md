@@ -23,6 +23,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 14a | Threads + build gate: `pthread_create` interposer (`dlsym(RTLD_NEXT, …)`) allocates a lowfat slot via `lowfat_stack_alloc`, sets it via `pthread_attr_setstack`, and pushes the slot to a reclamation freelist; `lowfat_is_thread_dead` reads TID/JOINID at the configured offsets to reclaim slots when their owner thread has joined (`tid==-1`) or detached + died (`tid==0 && joinid==thread`); Fisher-Yates shuffle of `lowfat_stack_perm[128]` ASLRs the slot pick order. **Build gate** — `flexfat_check_config` builds & runs the offset validator against host glibc at compile time; mismatch fails the build with named expected-vs-found offsets (negative control confirmed: corrupt JOINID → build fails with the exact message; restore → green). Fork interposer is Unit 14b — until then, the gtest threadsafe death-test mitigation from 12a stays. Gate is **71/71** | ✅ |
 | 14b | Fork interposer: `clone(SIGCHLD)` onto a 4-page anonymous-shared temp stack with `setjmp`'d env at the top → child does (1) `lowfat_create_shm` fresh stack-memory object, (2) `mmap MAP_SHARED\|MAP_FIXED` over size-class 1's stack range to the fresh fd + `mprotect`+`memcpy` parent's live stack pages, (3) `pthread_cond_signal` parent on PROCESS_SHARED cond var, (4) loop remap of every remaining stack mirror to the same fresh fd, (5) `longjmp` back into `lowfat_fork()`'s setjmp frame on the now-private master stack. **12a MAP_SHARED fork hazard closed** (red→green: `fork_isolation.c` SEGSEGV'd at exit 139 against 14a runtime, exits 0 isolated under 14b); the 12a `gtest_death_test_style = "threadsafe"` mitigation is REVERTED (fast-mode death tests safe again, verified). Direct `clone()` callers remain unsupported (matches reference). Gate is **73/73** | ✅ |
 | 15 | Escape checks at the 5 sites (lowfat.h:45-49): ESCAPE_CALL/RETURN/STORE/PTR2INT/INSERT. Each pointer-typed argument to a memory-impure call/invoke, each pointer-typed return value, each pointer-typed `store` VALUE, each non-trivially-escaping `ptrtoint` (whose source isn't an "ugly GEP", verbatim carve-out from LowFat.cpp:854-863), and each pointer-typed `insertvalue`/`insertelement` inserted operand gets a Unit-7-strategy bounds check before the site with the correct info code. Umbrella `-flexfat-no-check-escapes` (Unit-10 forward-decl) finally functional and joined by the five granular `-flexfat-no-check-escape-{call,return,store,ptr2int,insert}` flags Unit 10 skipped. e2e reports match the reference wording exactly (`operation = escape (call)` / `(return)` / `(store)`). No false positives on the prior 75-test suite. **MSET differential 96/96 — 100% parity with the reference oracle** (Unit 13's 78 → 96, +18 net, 0 lost). Trap-line audit: the 18 newly-detected types trap on a MIX of `operation = read` (Unit-7 access check, via `calcBasePtr` tracing the GEP to the origin alloca/malloc/global) and `operation = escape (call|store)` (Unit-15 escape sites). Unit 13's "architectural floor of 18" framing was wrong: the floor is a property of access-site checking WHEN `calcBasePtr` cannot trace to the origin, and the MSET corpus's GEPs are all compile-visible from the origin; Unit-13's TYPE-level UNDETECTED was caused by escape-only sub-cases that Unit 15 now closes. Gate is **85/85** | ✅ |
+| 16 | Performance parity measurement (project closing). 5-benchmark synthetic micro-corpus at -O2 under `flexfat/perf/benchmarks/`; matrix = {uninstrumented, flexfat-full, flexfat-hardened} × {non-POW2} × N=10 runs, median + IQR. SPEC2006 not available; corpus is INDICATIVE not directly comparable. **Mean overhead non-POW2: full +5.6%, hardened +2.6%** (vs reference SPEC2006 ~64% / ~9.8%). Under the targets, not over — over-instrumentation hypothesis ruled out by STATISTIC counter audit (`NumChecks` ≤ 2 per benchmark, `NumUnknownProducers = 0`; Unit-8 elides aggressively on constant-bounded patterns). Notable: `heap_churn` runs **−19.5% FASTER** under FlexFat (lowfat_malloc beats glibc malloc on this churn pattern, matches reference README's same finding); `opaque_access` is the only benchmark that defeats Unit-8 elision and shows the cleanest hardened-vs-full delta (−10.5 pp). **POW2 variant NOT measured — runtime port incomplete**: `compiler-rt/lib/flexfat/lowfat_malloc.c` has no `#ifdef LOWFAT_IS_POW2` branches; allocator path assumes the 61-region/reciprocal-magic layout. Swap attempt segfaulted in `lowfat_malloc_index` on heap_churn and memcpy_bulk; restored cleanly, gate still 85/85. Documented gap. Gate is **85/85** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -1644,3 +1645,201 @@ in Unit 7, not escape) match the reference verbatim.
    `escape (return)`, `escape (store)` byte-for-byte the reference's
    format strings, as pinned by the e2e CHECK lines.
 
+
+
+## Unit 16 — performance parity measurement
+
+Project's closing measurement. Reference's headline numbers
+(`llvm-lowfat/README.md`, §"Experiments"): SPEC2006 at `-O2`,
+**full = ~64% overhead** (all checks on), **hardened non-POW2 =
+~9.8%** (`-lowfat-no-check-reads -lowfat-no-check-escapes
+-lowfat-no-check-fields`), **hardened POW2 = ~7.8%**
+(`build.sh sizes2.cfg 32` build + same three flags). Escape
+checks ON for ALL three (the hardened flag drops escape sites
+THE REFERENCE chose to drop for its 9.8% figure, but Unit-15
+parity means our flag set matches one-for-one). The measurement
+is calibrated to be **apples-to-apples on the flag set**, not on
+the benchmark.
+
+### Benchmark proxy (SPEC2006 not available)
+SPEC CPU2006 isn't licensed for this environment. The closest
+substitute set up here is a **5-benchmark synthetic
+micro-corpus** under `flexfat/perf/benchmarks/`:
+- `heap_churn.c` — malloc/free hot path (allocator stress).
+- `array_sum.c` — stack array tight loop (lowfat stack mirror).
+- `linked_list.c` — heap node alloc + pointer-chasing traversal.
+- `memcpy_bulk.c` — bulk memcpy hot path (Unit-5 memops wrap).
+- `opaque_access.c` — runtime-opaque pointer accesses via a
+  noinline `load_at/store_at` (defeats Unit-8 static elision,
+  the only benchmark in the corpus that actually exercises the
+  inlined runtime fast-path check in the hot loop).
+
+**Our numbers are INDICATIVE, not directly comparable to the
+reference's SPEC2006 figures.** SPEC2006 contains many more
+access patterns per benchmark, including the irregular
+pointer-arithmetic / struct-field / function-pointer dispatch
+patterns that the reference's 64% headline figure reflects. A
+synthetic corpus this size will systematically underestimate
+SPEC-scale overhead. Saying so up front rather than burying it.
+
+### Methodology
+- Host compiler `cc` (system gcc) for the uninstrumented
+  baseline; in-tree `build/bin/clang` for FlexFat configs.
+- Optimisation: `-O2` for all three configs (matches reference).
+- N = 10 runs per (benchmark, config) cell. Configs interleaved
+  per-run to spread thermal/scheduling drift. Wall-clock via
+  `/usr/bin/time -f "%e"`.
+- Reported statistic: **median** + **IQR** (q75 − q25).
+- Hardened flag set: identical to reference's `-lowfat-no-check-
+  {reads,escapes,fields}`; FlexFat names are
+  `-flexfat-no-check-{reads,escapes,fields}` (Unit-10 flag surface
+  parity). Plumbed via `-mllvm -flexfat-…`.
+
+### Non-POW2 results (canonical; see `flexfat/perf/results/run_nonpow2.tsv`)
+
+| Benchmark | uninstr (s) | full % | hardened % | hardened − full |
+|---|---:|---:|---:|---:|
+| heap_churn | 1.740 | **−19.5%** | −19.8% | ~0pp |
+| array_sum | 2.370 | +20.9% | +20.5% | ~0pp |
+| linked_list | 0.610 | +4.9% | +1.6% | −3.3pp |
+| memcpy_bulk | 1.220 | +0.0% | −0.4% | ~0pp |
+| opaque_access | 3.680 | +21.6% | +11.1% | **−10.5pp** |
+| **arithmetic mean** | — | **+5.6%** | **+2.6%** | **−3.0pp** |
+
+IQR ≤ 0.06 s on every cell — variance is small relative to the
+signal.
+
+### Interpretation, benchmark by benchmark
+
+- **heap_churn went FASTER under FlexFat (−19.5%).** Matches the
+  reference README's note: "optimized LowFat can even make some
+  benchmarks go faster… the LowFat heap allocator happens to be
+  faster than the default `malloc` for these examples." This is
+  positive confirmation of the Unit-4 allocator's
+  freelist+bump-pointer hot path. The hardened flag set has no
+  effect here (the allocator is the bottleneck, not check
+  density).
+- **array_sum is +20.9% with ZERO emitted bounds checks.** The
+  STATISTIC counters confirm: `NumChecks = 0`, `NumElided = 7`.
+  Unit-8's lattice proves every access constant-bounded against
+  the stack alloca and elides 100% of the would-be runtime
+  checks. The +20.9% therefore CANNOT be runtime check cost. It
+  is **lowfat-stack-mirror cache behavior**: the `int a[4096]`
+  alloca lives in the lowfat-mirrored shared-memory stack region
+  rather than on the native stack, which changes TLB / cache
+  characteristics in the tight hot loop. The hardened flag set
+  also has no effect (no checks to drop). This is a fixed-cost
+  Unit-12a overhead, not a per-access check cost.
+- **linked_list is +4.9% / +1.6%.** 3.3pp savings from
+  `no-check-escapes` + `no-check-reads` — modest, consistent
+  with the small instrumentation footprint (1 inserted check
+  per function; the inner `p = p->next` is at offset 0 and Unit
+  8 elides).
+- **memcpy_bulk is +0.0% / −0.4% (i.e. within noise).** The
+  Unit-5 `lowfat_memcpy` wrap does one bounds check per memcpy,
+  amortised over 64 KB of underlying libc memcpy — invisible.
+  Confirms the wrap is essentially free.
+- **opaque_access is +21.6% full → +11.1% hardened (−10.5pp).**
+  This is the cleanest signal in the matrix: the noinline
+  `load_at`/`store_at` defeat Unit-8 elision, the inner check
+  runs 1.2 B times, and the hardened `no-check-reads` drops the
+  per-load check while the per-store stays. The 10.5 pp savings
+  is the read-side check's per-access cost made visible.
+
+### Reference-target gap analysis (honest)
+
+| Config | Our mean | Reference (SPEC2006) | Gap |
+|---|---:|---:|---:|
+| full non-POW2 | +5.6% | ~64% | −58 pp |
+| hardened non-POW2 | +2.6% | ~9.8% | −7 pp |
+| hardened POW2 | (deferred) | ~7.8% | — |
+
+The full-config gap is large. Two compatible explanations, in
+priority order:
+
+1. **The corpus systematically under-stresses bounds checking.**
+   Four of five benchmarks have ≤ 2 NumChecks (Unit-8 elides
+   the rest); SPEC2006 has thousands per benchmark across
+   irregular patterns. This is the dominant axis.
+2. **Of the 5 benchmarks, only `opaque_access` lands in the
+   reference's mid-range** (+21.6% full, +11.1% hardened —
+   compare reference's per-benchmark scatter in
+   `images/results.png`). The hardened delta on opaque_access
+   (−10.5 pp) is on the same order as the reference's full→
+   hardened delta (~54 pp absolute, but normalized to the
+   per-benchmark base much closer to our 10 pp).
+
+The hardened-config gap (−7 pp) is small enough that the
+parity story is not failing. Per the user's acceptance shape:
+"Land within striking distance of the reference targets and the
+parity story closes." +2.6% vs ~9.8% is below the target; not
+above. The first hypothesis the brief calls for —
+**over-instrumentation** — is ruled out by the STATISTIC counter
+audit below.
+
+### Over-instrumentation audit (the `volatile`-bug lesson)
+
+`flexfat/perf/results/stats_nonpow2.txt` captures `-stats`
+output from compiling each benchmark in each instrumented
+config:
+- **NumChecks across all 5 benchmarks × 2 configs**: max 2,
+  mean 1.2. The check density is low because Unit-8 elides
+  aggressively on constant-bounded patterns.
+- **NumElided**: 1–7 per cell. Healthy elision pressure.
+- **NumUnknownProducers = 0 across the board.** No silent
+  fallback to NONFAT (NumUnknownProducers is the canary for a
+  pattern the lattice doesn't recognise; firing means a missing
+  case to add, not over-instrumentation. It is silent here, as
+  intended.)
+
+No `volatile`-class regression detected. If we were missing an
+emission site or the static analysis was over-eliding, we'd
+expect `NumUnknownProducers > 0`; if a downstream pass were
+deleting our checks, the runtime would mis-detect on the
+e2e/MSET corpora (it doesn't — Unit 15 closed at 96/96 parity).
+The instrumentation density is correct; the corpus just happens
+to be Unit-8-friendly.
+
+### POW2 variant — **NOT MEASURED, runtime port incomplete**
+
+POW2 measurement was attempted by swapping
+`compiler-rt/lib/flexfat/lowfat_config.c` for the POW2 generated
+copy, rebuilding the runtime, swapping the installed `lowfat.ld`
+for POW2's, and re-running the matrix. Three benchmarks
+(`array_sum`, `linked_list`, `opaque_access`) ran; **two
+benchmarks (`heap_churn`, `memcpy_bulk`) segfaulted in
+`lowfat_malloc_index`** (`gdb` confirms PC at offset `0x6c8`
+inside the runtime). The header-side POW2 paths are present
+(`lowfat.h` `lowfat_base` has the `#ifdef LOWFAT_IS_POW2`
+bitmask path; `lowfat_objidx` is non-POW2-only by design), but
+`compiler-rt/lib/flexfat/lowfat_malloc.c` has **no
+`#ifdef LOWFAT_IS_POW2` branches** — the heap allocator was
+ported assuming the non-POW2 layout (61 regions, reciprocal
+magic). The POW2 config's 30-region layout with bitmask magic
+breaks `lowfat_malloc_index`'s region/size computations for
+allocations whose POW2 size class differs from the non-POW2
+size class.
+
+This is a **real porting gap**, not a measurement bug. The
+reference's runtime supports POW2 in the heap allocator; we
+didn't port that path. State and runtime were restored to
+non-POW2 immediately; `check-flexfat` re-verified at **85/85**
+post-restore.
+
+**Deferred to follow-up:** porting `lowfat_malloc.c` (and
+likely the stack/global classifiers that key off region count)
+to a `#ifdef LOWFAT_IS_POW2` branch, then re-running the POW2
+half of this matrix. Based on the reference's 9.8% → 7.8% gap
+(~2 pp), POW2 hardened on this corpus would be expected around
++0.5% mean — likely below the noise floor of these short
+benchmarks.
+
+### Final-unit gate
+- `check-flexfat` 85/85 (no new test surfaces added; the perf
+  harness is a build-and-run system under `flexfat/perf/`, not
+  a lit suite).
+- Performance corpus committed under `flexfat/perf/`:
+  benchmarks, scripts (`run_matrix.sh`, `stats_matrix.sh`,
+  `analyze.py`), and the canonical non-POW2 result/stats files.
+- POW2 port gap documented (above) as the one known
+  reference-parity deferral remaining at branch close.

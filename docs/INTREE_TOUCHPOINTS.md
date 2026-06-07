@@ -560,3 +560,45 @@ ptr2int/insert)` — verified verbatim by the e2e CHECKs).
 - **+** `compiler-rt/test/flexfat/TestCases/escape_return_oob.c` —
   noinline function returning an OOB pointer; trap with
   `operation = escape (return)`.
+
+
+## Unit 16 — performance parity measurement
+
+Closing-unit measurement harness. No new lit surfaces; the gate
+remains 85/85. This is a build-and-run system, NOT a check-flexfat
+target — performance is measured, not asserted.
+
+### Benchmark corpus
+- **+** `flexfat/perf/benchmarks/heap_churn.c` — malloc/free hot path.
+- **+** `flexfat/perf/benchmarks/array_sum.c` — stack-array tight loop
+  (lowfat stack mirror).
+- **+** `flexfat/perf/benchmarks/linked_list.c` — heap node alloc +
+  pointer-chasing traversal.
+- **+** `flexfat/perf/benchmarks/memcpy_bulk.c` — bulk memcpy hot path
+  (Unit-5 memops wrap).
+- **+** `flexfat/perf/benchmarks/opaque_access.c` — noinline
+  `load_at`/`store_at` to defeat Unit-8 elision; the only benchmark
+  here that exercises the inlined runtime fast-path check in a hot
+  loop.
+
+### Scripts
+- **+** `flexfat/perf/scripts/run_matrix.sh` — builds the matrix
+  {uninstrumented, flexfat-full, flexfat-hardened} × benchmarks,
+  times N runs per cell (default 10), emits a TSV under
+  `flexfat/perf/results/run_*.tsv`. Configs interleaved per-run to
+  spread thermal/scheduling drift.
+- **+** `flexfat/perf/scripts/stats_matrix.sh` — captures the FlexFat
+  STATISTIC counters (`NumChecks`, `NumElided`, `NumUnknownProducers`)
+  per (benchmark, instrumented-config) via `-mllvm -stats`. The
+  over-instrumentation canary.
+- **+** `flexfat/perf/scripts/analyze.py` — median + IQR + overhead
+  vs uninstrumented + per-config aggregate (arithmetic mean across
+  benchmarks). Reads the newest TSV by default.
+
+### Committed evidence
+- **+** `flexfat/perf/results/run_nonpow2.tsv` — the canonical
+  non-POW2 run, N=10 × 3 configs × 5 benchmarks = 150 timed runs.
+- **+** `flexfat/perf/results/stats_nonpow2.txt` — STATISTIC counter
+  audit confirming the over-instrumentation hypothesis is not in
+  play (max NumChecks = 2, NumUnknownProducers = 0 across the
+  corpus).
