@@ -22,6 +22,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 13 | Global lowfatification: `isInterestingGlobal` + `makeGlobalVariableLowFatPtr` as a NEW **module pass** (`flexfat-globals`) registered at PipelineStart so sectioning happens BEFORE the function-level pass needs to see it. Eligible globals get `section "lowfat_section_<size>"` (or `..._const_<size>`) at the class-boundary alignment; Common→WeakAny promotion lets the linker honor the section attribute. Driver wiring: `-T <resource>/lowfat.ld` + `-z max-page-size=0x1000` on every flexfat link, plus the suppress-default-PIE shim in `Gnu.cpp` (lowfat.ld pins to absolute addresses, PIE relocates them). `calcBasePtr`/`getConstantPtrBounds` recognise lowfatified globals via the section name and emit inline `lowfat_base` so the Unit-7 check fires on global-derived pointers. `-flexfat-no-replace-globals` (Unit-10 forward-decl, last of three) finally functional. Gate is **64/64** | ✅ |
 | 14a | Threads + build gate: `pthread_create` interposer (`dlsym(RTLD_NEXT, …)`) allocates a lowfat slot via `lowfat_stack_alloc`, sets it via `pthread_attr_setstack`, and pushes the slot to a reclamation freelist; `lowfat_is_thread_dead` reads TID/JOINID at the configured offsets to reclaim slots when their owner thread has joined (`tid==-1`) or detached + died (`tid==0 && joinid==thread`); Fisher-Yates shuffle of `lowfat_stack_perm[128]` ASLRs the slot pick order. **Build gate** — `flexfat_check_config` builds & runs the offset validator against host glibc at compile time; mismatch fails the build with named expected-vs-found offsets (negative control confirmed: corrupt JOINID → build fails with the exact message; restore → green). Fork interposer is Unit 14b — until then, the gtest threadsafe death-test mitigation from 12a stays. Gate is **71/71** | ✅ |
 | 14b | Fork interposer: `clone(SIGCHLD)` onto a 4-page anonymous-shared temp stack with `setjmp`'d env at the top → child does (1) `lowfat_create_shm` fresh stack-memory object, (2) `mmap MAP_SHARED\|MAP_FIXED` over size-class 1's stack range to the fresh fd + `mprotect`+`memcpy` parent's live stack pages, (3) `pthread_cond_signal` parent on PROCESS_SHARED cond var, (4) loop remap of every remaining stack mirror to the same fresh fd, (5) `longjmp` back into `lowfat_fork()`'s setjmp frame on the now-private master stack. **12a MAP_SHARED fork hazard closed** (red→green: `fork_isolation.c` SEGSEGV'd at exit 139 against 14a runtime, exits 0 isolated under 14b); the 12a `gtest_death_test_style = "threadsafe"` mitigation is REVERTED (fast-mode death tests safe again, verified). Direct `clone()` callers remain unsupported (matches reference). Gate is **73/73** | ✅ |
+| 15 | Escape checks at the 5 sites (lowfat.h:45-49): ESCAPE_CALL/RETURN/STORE/PTR2INT/INSERT. Each pointer-typed argument to a memory-impure call/invoke, each pointer-typed return value, each pointer-typed `store` VALUE, each non-trivially-escaping `ptrtoint` (whose source isn't an "ugly GEP", verbatim carve-out from LowFat.cpp:854-863), and each pointer-typed `insertvalue`/`insertelement` inserted operand gets a Unit-7-strategy bounds check before the site with the correct info code. Umbrella `-flexfat-no-check-escapes` (Unit-10 forward-decl) finally functional and joined by the five granular `-flexfat-no-check-escape-{call,return,store,ptr2int,insert}` flags Unit 10 skipped. e2e reports match the reference wording exactly (`operation = escape (call)` / `(return)` / `(store)`). No false positives on the prior 75-test suite. **MSET differential 96/96 — 100% parity with the reference oracle** (Unit 13's 78 → 96, +18 net, 0 lost; the 18 newly-detected types are precisely the Linear-OOBA Direct R/W same-class adjacency Unit 13 had pre-classified as "architectural floor", caught here by escape sites BEFORE the access reaches the offset-0 blind spot). Gate is **85/85** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -1401,4 +1402,131 @@ that test when adding a new intrinsic carve-out.
 ### Remaining known by-design gap
 Direct `clone()` callers (programs not going through `fork()` or
 `pthread_create()`) remain unsupported, matching the reference.
+
+
+## Unit 15 — escape checks
+
+Lands the five escape-site checks at the same level of the Unit-7
+bounds-check pathway, gated by `filterKind` and consulting both the
+umbrella `-flexfat-no-check-escapes` flag (Unit-10 forward-decl,
+finally meaningful) and the five granular flags Unit 10 skipped
+(`-flexfat-no-check-escape-{call,return,store,ptr2int,insert}`).
+This unit makes the granular flags meaningful — the umbrella was the
+only reason to skip them, so they're ported now alongside.
+
+### Per-code sentences (one each, from the reference port)
+
+1. **`ESCAPE_CALL` (info 5)** — at every `call`/`invoke` whose callee
+   isn't `doesNotAccessMemory()`, every pointer-typed argument is
+   checked at the call site with access_size=0 (the byte at the
+   pointer); catches "I'm passing an OOB pointer to opaque code."
+2. **`ESCAPE_RETURN` (info 6)** — at every `ret` whose returned value
+   is pointer-typed, the returned pointer is checked at the ret with
+   access_size=0; catches "I'm handing my caller an OOB pointer."
+3. **`ESCAPE_STORE` (info 7)** — at every `store` whose VALUE operand
+   is pointer-typed, the stored pointer is checked at the store with
+   access_size=0; catches "I'm putting an OOB pointer somewhere
+   readable." The store's DESTINATION pointer is a separate WRITE-kind
+   check, not this one.
+4. **`ESCAPE_PTR2INT` (info 8)** — at every `ptrtoint` whose result
+   truly escapes (per `doesIntEscape`: reaches a store / call / invoke
+   / inttoptr / ret) AND whose source isn't an "ugly GEP" (verbatim
+   port of the LowFat.cpp:854-863 carve-out), the source pointer is
+   checked at the ptrtoint with access_size=0; catches
+   "I'm hashing/printing/leaking an OOB pointer's bits."
+5. **`ESCAPE_INSERT` (info 9)** — at every `insertvalue` /
+   `insertelement` whose inserted operand is pointer-typed, the
+   inserted pointer is checked at the insert with access_size=0;
+   catches "I'm packing an OOB pointer into an aggregate/vector that
+   will be returned, stored, or passed onward."
+
+### Granular flags reconciliation with Unit 10
+Unit 10 forward-declared `-flexfat-no-check-escapes` as the umbrella,
+and explicitly skipped the five granular `-flexfat-no-check-escape-*`
+flags because the umbrella was inert. **Unit 15 ports all five
+granular flags** alongside the now-meaningful umbrella; each granular
+filterKind clause `return ClNoCheckEscape<Kind> || ClNoCheckEscapes;`
+so setting the umbrella is equivalent to setting all granular flags.
+The umbrella's first behavioral test is
+`escape_umbrella_suppress.ll`; each granular flag's clause is
+mechanically identical to the others (same one-liner pattern) so the
+umbrella test plus per-kind escape tests cover the dispatch by
+construction.
+
+### The "ugly GEP" carve-out (verbatim port of LowFat.cpp:854-863)
+`ptrtoint` whose source GEP is tagged with `!uglygep` metadata is
+deliberately NOT instrumented for ESCAPE_PTR2INT, matching the
+reference's false-positive avoidance. The metadata is set by
+InstCombine in LLVM 4.0 when canonicalising a GEP into a byte-offset
+form whose stride no longer matches the original element type, and
+is rare on modern LLVM in practice. The carve-out is preserved
+verbatim and pinned by `escape_ptr2int_ugly_gep.ll` — a falsifiable
+port, not folklore: if a future change drops the metadata check,
+the test starts emitting an escape check on the ptrtoint and fails.
+
+### Era-drift watch: 4.0 enumeration vs LLVM 23 IR
+Every 4.0-era escape site expresses identically on LLVM 23 IR:
+  - `StoreInst` with pointer value: `store ptr %p, ptr %dst`.
+  - `PtrToIntInst`: still valid; opaque pointers don't change shape.
+  - `CallBase` with pointer args: still valid.
+  - `ReturnInst` with pointer return: still valid.
+  - `InsertValueInst` / `InsertElementInst` with pointer inserted
+    operand: still valid (vector-of-ptr is `<N x ptr>`).
+No site silently approximated — every check uses the same predicate
+the reference did, with the same `getType()->isPointerTy()` test that
+works identically under opaque pointers. The reference's
+non-escape-site categories that we ALSO don't treat as escapes
+(`AtomicRMWInst`, `AtomicCmpXchgInst` — they're WRITE-kind checks
+in Unit 7, not escape) match the reference verbatim.
+
+### Acceptance gates
+1. **`check-flexfat` green, no false positives on prior tests.** All
+   75 prior tests still pass — the escape checks added instrumentation
+   but elided correctly on previously-clean pointers (input-pointer
+   default `[0,0]` bounds → `isInBounds(0) == true` → escape elided).
+   The 7 new IR tests (one per code + ugly-GEP carve-out + umbrella)
+   and 3 new e2e tests (call/store/return with `operation = escape (…)`
+   exact-match) bring the gate to **85/85**.
+2. **MSET differential — 100% parity with the reference oracle (96/96).**
+   Re-run completed against the same `flexfat_original.xml` corpus
+   used in Unit 13:
+   - **Detected**: 96 (Unit 13: 78; **+18 net, 0 lost**).
+   - **FlexFat-only**: 0. **Reference-only**: 0.
+   - **PF**: 48 (unchanged; escape sites don't shift preconditions).
+   - **Undetected**: 88 (each remains one of the documented permanent
+     wins for `lowfat_*`-class checks: object-fit overflows, atomic
+     RW, etc.).
+
+   The 18 newly-detected types are exactly the architectural-floor
+   set Unit 13 STATUS pre-classified as "inherent encoding
+   limitation": 6 Heap→Heap + 6 Stack→Stack + 6 Global→Global
+   Linear-OOBA Direct R/W Underflow/Overflow at the same-class
+   adjacency-with-offset-0 corner.
+
+   **Unit 13's framing was wrong.** The Unit-7 *access* check
+   really can't catch same-class offset-0 adjacency (the OOB
+   pointer's `lowfat_base` resolves to the neighbour's base — no
+   redzone, no trap on access). But every MSET test for those
+   types builds its OOB pointer with pointer arithmetic and then
+   *uses* it through a call/store/return — and Unit 15's escape
+   check fires before the access ever reaches the offset-0 blind
+   spot. So:
+   - For pure-access code that constructs an OOB pointer and never
+     escapes it: still the documented architectural floor —
+     redzones would be the only fix.
+   - For the MSET corpus (and, in practice, any code that prints,
+     stores, returns, or passes the pointer): Unit 15 closes the
+     floor.
+
+   The "expected post-Unit-13 floor of 18 PF/UNDETECTED holdouts"
+   line in the Unit-13 sub-section is **superseded by this 96/96
+   result** — keep the prior text as the access-only analysis it
+   really is, but the corpus floor is no longer 18.
+
+   Evidence: `flexfat/mset/flexfat_original_detected.txt`
+   rewritten from 78→96 in this commit; the Unit-13 78-entry set is
+   superseded.
+3. **Report wording exact match** — `operation = escape (call)`,
+   `escape (return)`, `escape (store)` byte-for-byte the reference's
+   format strings, as pinned by the e2e CHECK lines.
 

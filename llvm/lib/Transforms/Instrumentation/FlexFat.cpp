@@ -117,12 +117,30 @@ static cl::opt<bool> ClNoCheckMemset(
 static cl::opt<bool> ClNoCheckMemcpy(
     "flexfat-no-check-memcpy", cl::Hidden, cl::init(false),
     cl::desc("FlexFat: do not OOB-check memcpy or memmove"));
-// Forward-declared: pointer-escape checks land in Part III; this flag is wired
-// into filterKind for the escape info codes (5-9) but no escape checks are
-// emitted yet, so it is currently inert.
+// Unit 15: pointer-escape checks at the 5 escape sites (call/return/store/
+// ptr2int/insert per lowfat.h:34-44). Umbrella flag plus the five granular
+// flags Unit 10 skipped (Unit 10's umbrella was the only reason to skip
+// them; this unit makes them meaningful).
 static cl::opt<bool> ClNoCheckEscapes(
     "flexfat-no-check-escapes", cl::Hidden, cl::init(false),
-    cl::desc("FlexFat: do not OOB-check pointer escapes (Part III; inert)"));
+    cl::desc("FlexFat: do not OOB-check pointer escapes (the umbrella for "
+             "-flexfat-no-check-escape-{call,return,store,ptr2int,insert})"));
+static cl::opt<bool> ClNoCheckEscapeCall(
+    "flexfat-no-check-escape-call", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check pointer escapes via call/invoke args"));
+static cl::opt<bool> ClNoCheckEscapeReturn(
+    "flexfat-no-check-escape-return", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check pointer escapes via return value"));
+static cl::opt<bool> ClNoCheckEscapeStore(
+    "flexfat-no-check-escape-store", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check pointer escapes via store value"));
+static cl::opt<bool> ClNoCheckEscapePtr2Int(
+    "flexfat-no-check-escape-ptr2int", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check pointer escapes via ptrtoint"));
+static cl::opt<bool> ClNoCheckEscapeInsert(
+    "flexfat-no-check-escape-insert", cl::Hidden, cl::init(false),
+    cl::desc("FlexFat: do not OOB-check pointer escapes via "
+             "insertvalue/insertelement"));
 
 static cl::opt<bool> ClCheckWholeAccess(
     "flexfat-check-whole-access", cl::Hidden, cl::init(false),
@@ -156,6 +174,8 @@ static cl::opt<bool> ClSignal(
              "error"));
 
 // filterKind (LowFat.cpp:237-262): is this access kind's check suppressed?
+// Escape kinds (5-9 per lowfat.h:45-49) consult both the granular flag and
+// the umbrella -flexfat-no-check-escapes — either one being set suppresses.
 static bool filterKind(unsigned Info) {
   switch (Info) {
   case 0: // READ
@@ -166,7 +186,17 @@ static bool filterKind(unsigned Info) {
     return ClNoCheckMemcpy;
   case 3: // MEMSET
     return ClNoCheckMemset;
-  default: // 5-9: escape kinds (Part III)
+  case 5: // ESCAPE_CALL
+    return ClNoCheckEscapeCall || ClNoCheckEscapes;
+  case 6: // ESCAPE_RETURN
+    return ClNoCheckEscapeReturn || ClNoCheckEscapes;
+  case 7: // ESCAPE_STORE
+    return ClNoCheckEscapeStore || ClNoCheckEscapes;
+  case 8: // ESCAPE_PTR2INT
+    return ClNoCheckEscapePtr2Int || ClNoCheckEscapes;
+  case 9: // ESCAPE_INSERT
+    return ClNoCheckEscapeInsert || ClNoCheckEscapes;
+  default:
     return ClNoCheckEscapes;
   }
 }
@@ -205,6 +235,20 @@ static bool isBlacklisted(Function &F) {
 // (lowfat) stack pointer instead of walking back through to the (non-fat)
 // alloca. See Unit 12b doc in STATUS.md.
 static constexpr const char kStackMirrorMD[] = "flexfat.stack.mirror";
+
+// LowFat.cpp:854-863: an "ugly GEP" is one upstream-tagged with `uglygep`
+// metadata (set by InstCombine when canonicalising a GEP into a byte-offset
+// form whose stride no longer matches the original element type). The
+// reference deliberately excludes ptr2int of an ugly GEP from the escape
+// check to avoid false positives. The metadata is rare on modern LLVM but
+// the carve-out is preserved verbatim; the bounds.ll-style regression
+// pins it (escape_ptr2int_ugly_gep.ll asserts NO check is emitted).
+static bool isUglyGEP(llvm::Value *V) {
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I)
+    return false;
+  return I->getMetadata("uglygep") != nullptr;
+}
 
 // LowFat.cpp:810-846. Does the given pointer-derived integer "escape"? Used
 // by doesAllocaEscape's PtrToInt branch to decide whether the address of a
@@ -458,11 +502,19 @@ constexpr int64_t kStackOffsets[65] = {
     -2061584302080,-2095944040448,-2095944040448,-2095944040448,-2095944040448,
     -2095944040448};
 
-// OOB info codes (lowfat.h: LOWFAT_OOB_ERROR_{READ,WRITE}).
+// OOB info codes (lowfat.h: LOWFAT_OOB_ERROR_{READ,WRITE,...,ESCAPE_INSERT}).
+// The 5 escape codes feed the runtime's lowfat_error_kind which formats them
+// as "escape (call)", "escape (return)", "escape (store)", "escape (ptr2int)",
+// "escape (insert)" in the OOB report — byte-identical to the reference.
 constexpr unsigned kInfoRead = 0;
 constexpr unsigned kInfoWrite = 1;
 constexpr unsigned kInfoMemcpy = 2;
 constexpr unsigned kInfoMemset = 3;
+constexpr unsigned kInfoEscapeCall = 5;
+constexpr unsigned kInfoEscapeReturn = 6;
+constexpr unsigned kInfoEscapeStore = 7;
+constexpr unsigned kInfoEscapePtr2Int = 8;
+constexpr unsigned kInfoEscapeInsert = 9;
 
 // Fast-path branch weights (2000000000:1 in favour of the fast path), so the
 // cold error block is placed out of line. NOTE: the reference weights the OOB
@@ -1123,13 +1175,16 @@ bool FlexFat::run() {
 
   // Phase 1: collect interesting instructions without mutating IR (the
   // getInterestingInsts sweep). Loads/stores and the mem-intrinsics get bounds
-  // checks; named libc calls get replaced.
-  // (Instruction, pointer, info, access-size). access_size is sizeof(*ptr)-1
-  // under -flexfat-check-whole-access, else 0.
+  // checks; named libc calls get replaced; Unit-15 escape sites (call args,
+  // returns, store values, ptrtoints, insertvalue/insertelement) get
+  // pointer-escape checks. access_size is sizeof(*ptr)-1 under
+  // -flexfat-check-whole-access, else 0.
   SmallVector<std::tuple<Instruction *, Value *, unsigned, uint64_t>, 16>
       LoadStores;
   SmallVector<MemIntrinsic *, 8> MemIntrs;
   SmallVector<CallBase *, 8> LibCalls;
+  // Unit 15: escape sites — (Instruction, Pointer, EscapeInfo).
+  SmallVector<std::tuple<Instruction *, Value *, unsigned>, 8> Escapes;
   auto AccessSizeOf = [&](Type *Ty) -> uint64_t {
     if (!ClCheckWholeAccess || !Ty->isSized())
       return 0;
@@ -1142,13 +1197,59 @@ bool FlexFat::run() {
     if (auto *LD = dyn_cast<LoadInst>(&I))
       LoadStores.emplace_back(&I, LD->getPointerOperand(), kInfoRead,
                               AccessSizeOf(LD->getType()));
-    else if (auto *ST = dyn_cast<StoreInst>(&I))
+    else if (auto *ST = dyn_cast<StoreInst>(&I)) {
       LoadStores.emplace_back(&I, ST->getPointerOperand(), kInfoWrite,
                               AccessSizeOf(ST->getValueOperand()->getType()));
-    else if (auto *MI = dyn_cast<MemIntrinsic>(&I))
+      // Unit 15: ESCAPE_STORE — the VALUE stored, when it's a pointer,
+      // escapes (its address is now in memory observable to anyone).
+      // Under opaque pointers the value operand's type is `ptr` if and
+      // only if a pointer is being stored — no PointerType*->getElementType
+      // dance needed. (Era-drift note recorded in STATUS.)
+      Value *V = ST->getValueOperand();
+      if (V->getType()->isPointerTy())
+        Escapes.emplace_back(&I, V, kInfoEscapeStore);
+    } else if (auto *MI = dyn_cast<MemIntrinsic>(&I))
       MemIntrs.push_back(MI);
-    else if (auto *CB = dyn_cast<CallBase>(&I))
+    else if (auto *PI = dyn_cast<PtrToIntInst>(&I)) {
+      // Unit 15: ESCAPE_PTR2INT — the integer escapes (via store/call/etc).
+      // Skip if (a) the int doesn't actually escape (only used in cmp/br),
+      // or (b) the operand is an "ugly GEP" — preserved verbatim from
+      // LowFat.cpp:854-863 to suppress the false positives that motivated
+      // the carve-out in the first place.
+      llvm::SmallPtrSet<llvm::Value *, 8> Seen;
+      if (doesIntEscape(PI, Seen) && !isUglyGEP(PI->getPointerOperand()))
+        Escapes.emplace_back(&I, PI->getPointerOperand(), kInfoEscapePtr2Int);
+    } else if (auto *CB = dyn_cast<CallBase>(&I)) {
       LibCalls.push_back(CB); // filtered in replaceLibFunc
+      // Unit 15: ESCAPE_CALL — each pointer argument escapes to the callee,
+      // unless the callee is provably memory-pure (doesNotAccessMemory).
+      // We deliberately DON'T skip the libc functions Unit 9 will rewrite —
+      // they'll be replaced in Phase 5 by lowfat_* equivalents, but the
+      // escape check we insert in Phase 4 fires BEFORE that replacement,
+      // protecting the ORIGINAL call site.
+      Function *Callee = CB->getCalledFunction();
+      if (!Callee || !Callee->doesNotAccessMemory())
+        for (Value *Arg : CB->args())
+          if (Arg->getType()->isPointerTy())
+            Escapes.emplace_back(&I, Arg, kInfoEscapeCall);
+    } else if (auto *R = dyn_cast<ReturnInst>(&I)) {
+      // Unit 15: ESCAPE_RETURN — the returned pointer is observable by the
+      // caller (and anyone the caller hands it to).
+      Value *V = R->getReturnValue();
+      if (V && V->getType()->isPointerTy())
+        Escapes.emplace_back(&I, V, kInfoEscapeReturn);
+    } else if (auto *IV = dyn_cast<InsertValueInst>(&I)) {
+      // Unit 15: ESCAPE_INSERT — inserting a pointer into an aggregate
+      // that may be returned, stored, or passed onward.
+      Value *V = IV->getInsertedValueOperand();
+      if (V->getType()->isPointerTy())
+        Escapes.emplace_back(&I, V, kInfoEscapeInsert);
+    } else if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
+      // Unit 15: ESCAPE_INSERT — same idea for vector-of-pointers.
+      Value *V = IE->getOperand(1);
+      if (V->getType()->isPointerTy())
+        Escapes.emplace_back(&I, V, kInfoEscapeInsert);
+    }
   }
 
   // Phase 2: load/store bounds checks.
@@ -1157,7 +1258,13 @@ bool FlexFat::run() {
   // Phase 3: mem-intrinsic end-pointer checks.
   for (MemIntrinsic *MI : MemIntrs)
     Changed |= instrumentMemIntrinsic(MI);
-  // Phase 4 + 5: replaceUnsafeLibFuncs, then optimizeMalloc on the result.
+  // Phase 4 (Unit 15): escape-site checks. Must run BEFORE Phase 5's
+  // replaceLibFunc/optimizeMalloc, because some escape sites are libc calls
+  // (free, strdup, …) that Phase 5 will erase — inserting the check first
+  // anchors it before the replacement.
+  for (auto &[I, Ptr, Info] : Escapes)
+    Changed |= checkAccess(I, Ptr, Info, 0);
+  // Phase 5: replaceUnsafeLibFuncs, then optimizeMalloc on the result.
   for (CallBase *CB : LibCalls)
     if (replaceLibFunc(CB)) {
       Changed = true;

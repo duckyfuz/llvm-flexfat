@@ -10,12 +10,18 @@ Misuse-of-free Stdlib Read Stack Freed Memory
 Misuse-of-free Stdlib Write Global (Re)used Memory
 Misuse-of-free Stdlib Write Stack (Re)used Memory
 Misuse-of-free Stdlib Write Stack Freed Memory
+Inter-Object Linear OOBA Overflow Direct Read Global Global
 Inter-Object Linear OOBA Overflow Direct Read Global Stack
 Inter-Object Linear OOBA Overflow Direct Read Heap Global
+Inter-Object Linear OOBA Overflow Direct Read Heap Heap
 Inter-Object Linear OOBA Overflow Direct Read Heap Stack
+Inter-Object Linear OOBA Overflow Direct Read Stack Stack
+Inter-Object Linear OOBA Overflow Direct Write Global Global
 Inter-Object Linear OOBA Overflow Direct Write Global Stack
 Inter-Object Linear OOBA Overflow Direct Write Heap Global
+Inter-Object Linear OOBA Overflow Direct Write Heap Heap
 Inter-Object Linear OOBA Overflow Direct Write Heap Stack
+Inter-Object Linear OOBA Overflow Direct Write Stack Stack
 Inter-Object Linear OOBA Overflow Stdlib Read Global Global
 Inter-Object Linear OOBA Overflow Stdlib Read Global Stack
 Inter-Object Linear OOBA Overflow Stdlib Read Heap Global
@@ -28,12 +34,18 @@ Inter-Object Linear OOBA Overflow Stdlib Write Heap Global
 Inter-Object Linear OOBA Overflow Stdlib Write Heap Heap
 Inter-Object Linear OOBA Overflow Stdlib Write Heap Stack
 Inter-Object Linear OOBA Overflow Stdlib Write Stack Stack
+Inter-Object Linear OOBA Underflow Direct Read Global Global
 Inter-Object Linear OOBA Underflow Direct Read Global Heap
+Inter-Object Linear OOBA Underflow Direct Read Heap Heap
 Inter-Object Linear OOBA Underflow Direct Read Stack Global
 Inter-Object Linear OOBA Underflow Direct Read Stack Heap
+Inter-Object Linear OOBA Underflow Direct Read Stack Stack
+Inter-Object Linear OOBA Underflow Direct Write Global Global
 Inter-Object Linear OOBA Underflow Direct Write Global Heap
+Inter-Object Linear OOBA Underflow Direct Write Heap Heap
 Inter-Object Linear OOBA Underflow Direct Write Stack Global
 Inter-Object Linear OOBA Underflow Direct Write Stack Heap
+Inter-Object Linear OOBA Underflow Direct Write Stack Stack
 Inter-Object Non-Linear OOBA Overflow Direct Read Global Global
 Inter-Object Non-Linear OOBA Overflow Direct Read Global Stack
 Inter-Object Non-Linear OOBA Overflow Direct Read Heap Global
@@ -76,3 +88,9 @@ Inter-Object Type Confusion OOBA Overflow Direct Read Stack Stack
 Inter-Object Type Confusion OOBA Overflow Direct Write Global Global
 Inter-Object Type Confusion OOBA Overflow Direct Write Heap Heap
 Inter-Object Type Confusion OOBA Overflow Direct Write Stack Stack
+Non-Object Linear OOBA Underflow Direct Read Global Global
+Non-Object Linear OOBA Underflow Direct Read Heap Heap
+Non-Object Linear OOBA Underflow Direct Read Stack Stack
+Non-Object Linear OOBA Underflow Direct Write Global Global
+Non-Object Linear OOBA Underflow Direct Write Heap Heap
+Non-Object Linear OOBA Underflow Direct Write Stack Stack

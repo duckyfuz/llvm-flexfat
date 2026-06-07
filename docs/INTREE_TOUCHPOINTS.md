@@ -509,3 +509,54 @@ Runtime + test surface; no LLVM/clang changes.
 - **~** `compiler-rt/lib/flexfat/tests/flexfat_test_main.cpp` — REVERT
   the 12a `gtest_death_test_style = "threadsafe"` override; fast-mode
   death tests are safe under the 14b interposer.
+
+## Unit 15 — escape checks
+
+Pass + tests; no runtime change (the runtime's `lowfat_error_kind`
+already formatted info codes 5-9 as `escape (call/return/store/
+ptr2int/insert)` — verified verbatim by the e2e CHECKs).
+
+### Pass
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp`:
+  - **+** `kInfoEscape{Call,Return,Store,Ptr2Int,Insert}` = 5..9
+    constants matching `lowfat.h:45-49`.
+  - **+** Five granular cl::opt flags:
+    `-flexfat-no-check-escape-{call,return,store,ptr2int,insert}`.
+    The umbrella `-flexfat-no-check-escapes` (Unit-10 forward-decl)
+    description updated — no longer inert.
+  - **~** `filterKind`: each escape info code consults
+    `Cl<Granular> || ClNoCheckEscapes`.
+  - **+** `isUglyGEP` — verbatim port of LowFat.cpp:854-863 (metadata
+    `uglygep` check).
+  - **~** `FlexFat::run` Phase-1 sweep: also collects escape sites
+    (store-of-ptr, ptrtoint with escaping int + non-ugly-gep source,
+    call/invoke ptr args (excl. doesNotAccessMemory callees), ret-ptr,
+    insertvalue/insertelement of ptr).
+  - **+** Phase 4 — Escapes processed via `checkAccess(I, Ptr, Info, 0)`,
+    AFTER load/store + mem-intrinsics, BEFORE libfunc replacement
+    (Phase 5) so escape checks anchor at the original call sites
+    before `replaceLibFunc` erases them.
+
+### IR tests (surface 1)
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_call.ll` — info 5.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_return.ll` — info 6.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_store.ll` — info 7.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_ptr2int.ll` — info 8.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_insert.ll` — info 9
+  (insertvalue + insertelement).
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_ptr2int_ugly_gep.ll`
+  — falsifiable port of the ugly-GEP carve-out: ptr2int of a GEP
+  tagged `!uglygep` MUST NOT emit `lowfat_oob_error(i32 8, …)`.
+- **+** `llvm/test/Instrumentation/FlexFat/X86/escape_umbrella_suppress.ll`
+  — `-flexfat-no-check-escapes` suppresses all 5 codes at once.
+
+### e2e (surface 3)
+- **+** `compiler-rt/test/flexfat/TestCases/escape_call_oob.c` —
+  OOB pointer passed to `printf`; trap with
+  `operation = escape (call)`, `size = 32` (malloc(16) class bump-up).
+- **+** `compiler-rt/test/flexfat/TestCases/escape_store_oob.c` —
+  OOB pointer stored to a global slot; trap with
+  `operation = escape (store)`.
+- **+** `compiler-rt/test/flexfat/TestCases/escape_return_oob.c` —
+  noinline function returning an OOB pointer; trap with
+  `operation = escape (return)`.
