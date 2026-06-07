@@ -31,6 +31,9 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -40,6 +43,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/random.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -636,6 +640,195 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 }
 
 #endif // LOWFAT_NO_REPLACE_PTHREAD_CREATE
+
+//===----------------------------------------------------------------------===//
+// Unit 14b: fork() interposer — closes the 12a MAP_SHARED stack alias.
+//
+// Bare fork() inherits all parent mappings; the lowfat stack regions are
+// MAP_SHARED to one shm fd, so parent and child end up reading/writing
+// the SAME physical stack bytes. The reference fixes this with a clone()-
+// based fork: child runs on a temp stack, mmap()s the parent's stack
+// region addresses MAP_SHARED|MAP_FIXED to a FRESH shm fd (which the
+// parent does NOT see, because the child has its own VM), memcpy()s the
+// parent's live stack content into the new shm, signals the parent, then
+// longjmp()s back into the parent's `lowfat_fork()` setjmp frame on the
+// child's now-private master stack.
+//
+// Modern glibc deviations (post-2.34 unified libc):
+//   * SKIPPED: the reference's step (0) — reset lowfat_seed_pos. Our
+//     lowfat_rand uses getrandom(2) directly (Unit 12a port decision);
+//     there is no application-level seed pool to reset.
+//   * clone() is still in <sched.h> with the same signature; no change.
+//   * pthread_cond_t / pthread_mutex_t with PROCESS_SHARED still work
+//     via futex syscalls. The cond var lives in the temp stack (which
+//     is MAP_SHARED|MAP_ANONYMOUS), so parent and child see the same
+//     memory.
+//   * fork() in modern glibc takes internal locks (malloc arena, atfork);
+//     by interposing at the fork symbol with a clone()-based body we
+//     bypass those entirely. Atfork handlers DO NOT run — matches the
+//     reference's deliberate choice. Documented in STATUS as a known
+//     deviation from POSIX fork() semantics.
+//   * Direct clone() callers stay UNSUPPORTED (matches the reference).
+//===----------------------------------------------------------------------===//
+
+#ifndef LOWFAT_NO_REPLACE_FORK
+
+struct lowfat_fork_info {
+  pthread_mutex_t mutex;
+  pthread_cond_t condvar;
+  bool done;
+  void *stack;     // parent's __builtin_frame_address(0) at fork time
+  jmp_buf env;
+};
+
+// Child runs here on the temp stack — see comments above for the
+// step-by-step. Errors signal `done = false` then abort.
+static int lowfat_fork_child_wrapper(void *arg) {
+  struct lowfat_fork_info *info = (struct lowfat_fork_info *)arg;
+
+  // STEP (1): fresh shm + remap size-class 1's stack range to it.
+  int fd = lowfat_create_shm(LOWFAT_STACK_MEMORY_SIZE);
+  if (fd < 0)
+    goto fail_before_signal;
+  size_t idx = lowfat_stacks[0];
+  uint8_t *stack_lo =
+      (uint8_t *)lowfat_region(idx) + LOWFAT_STACK_MEMORY_OFFSET;
+  void *ptr = mmap(stack_lo, LOWFAT_STACK_MEMORY_SIZE, PROT_NONE,
+                   MAP_SHARED | MAP_FIXED | MAP_NORESERVE, fd, 0);
+  if (ptr != stack_lo)
+    goto fail_before_signal;
+
+  // STEP (2): mprotect+memcpy parent's live stack pages onto the fresh
+  // shm via size-class 1's mirror. Because all size-class mirrors will
+  // alias to the SAME shm by the end of step (3), this one copy
+  // populates them all.
+  uint8_t *copy_lo = (uint8_t *)LOWFAT_PAGES_BASE(info->stack);
+  uint8_t *copy_hi =
+      (uint8_t *)LOWFAT_STACK_BASE(info->stack) + LOWFAT_STACK_SIZE;
+  ptrdiff_t offset = copy_lo - (uint8_t *)LOWFAT_STACKS_START;
+  stack_lo = stack_lo + offset;
+  uint8_t *stack_hi =
+      (uint8_t *)LOWFAT_STACK_BASE(stack_lo) + LOWFAT_STACK_SIZE;
+  uint8_t *prot_lo = stack_hi - LOWFAT_STACK_SIZE + LOWFAT_STACK_GUARD;
+  if (mprotect(prot_lo, stack_hi - prot_lo, PROT_READ | PROT_WRITE) != 0)
+    goto fail_before_signal;
+  memcpy(stack_lo, copy_lo, copy_hi - copy_lo);
+
+  // STEP (2a): copy is complete; wake parent.
+  pthread_mutex_lock(&info->mutex);
+  info->done = true;
+  pthread_cond_signal(&info->condvar);
+  pthread_mutex_unlock(&info->mutex);
+
+  // STEP (3): remap every other stack region (incl. master = 62) onto
+  // the same fresh shm fd. No memcpy needed — the shm content is shared.
+  for (size_t i = 1; (idx = lowfat_stacks[i]) != 0; i++) {
+    uint8_t *sl = (uint8_t *)lowfat_region(idx) + LOWFAT_STACK_MEMORY_OFFSET;
+    void *p = mmap(sl, LOWFAT_STACK_MEMORY_SIZE, PROT_NONE,
+                   MAP_SHARED | MAP_FIXED | MAP_NORESERVE, fd, 0);
+    if ((uint8_t *)p != sl)
+      lowfat_error("fork: failed to mmap region %zu mirror: %s",
+                   idx, strerror(errno));
+    sl = sl + offset;
+    uint8_t *sh = (uint8_t *)LOWFAT_STACK_BASE(sl) + LOWFAT_STACK_SIZE;
+    uint8_t *pl = sh - LOWFAT_STACK_SIZE + LOWFAT_STACK_GUARD;
+    if (mprotect(pl, sh - pl, PROT_READ | PROT_WRITE) != 0)
+      lowfat_error("fork: failed to mprotect region %zu mirror: %s",
+                   idx, strerror(errno));
+  }
+  if (close(fd) != 0)
+    lowfat_error("fork: failed to close shm fd: %s", strerror(errno));
+
+  // STEP (4): jump back into lowfat_fork()'s setjmp frame on the now-
+  // private master stack. Execution resumes at the `if (setjmp(...))`
+  // branch as the child.
+  longjmp(info->env, 1);
+  return 0; // unreachable
+
+fail_before_signal:
+  pthread_mutex_lock(&info->mutex);
+  info->done = false;
+  pthread_cond_signal(&info->condvar);
+  pthread_mutex_unlock(&info->mutex);
+  lowfat_error("fork: child setup failed: %s", strerror(errno));
+  return 0; // unreachable
+}
+
+static LOWFAT_NOINLINE pid_t lowfat_fork_wrapper(
+    void *stack_tmp, size_t stack_tmp_size, struct lowfat_fork_info *info) {
+  // Init the PROCESS_SHARED cond var + mutex INSIDE the parent (the temp
+  // stack is MAP_SHARED|MAP_ANONYMOUS, so both processes see the same
+  // physical bytes for `info`).
+  pthread_mutexattr_t mattr;
+  pthread_mutexattr_init(&mattr);
+  pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
+  pthread_mutex_init(&info->mutex, &mattr);
+  pthread_condattr_t cattr;
+  pthread_condattr_init(&cattr);
+  pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);
+  pthread_cond_init(&info->condvar, &cattr);
+  info->done = false;
+  info->stack = __builtin_frame_address(0);
+
+  // Child's %rsp at clone() — top of stack_tmp minus a little headroom
+  // for the i128 / fork_info live at the high end.
+  void *stack_tmp_ptr = (uint8_t *)stack_tmp + stack_tmp_size -
+                        sizeof(__int128) - sizeof(struct lowfat_fork_info);
+
+  pid_t pid =
+      clone(lowfat_fork_child_wrapper, stack_tmp_ptr, SIGCHLD, info);
+  pthread_mutex_lock(&info->mutex);
+  while (!info->done) {
+    // The reference does a single pthread_cond_wait. We loop so a
+    // spurious wakeup (POSIX-permitted) doesn't drop us out early.
+    if (pthread_cond_wait(&info->condvar, &info->mutex) != 0)
+      break;
+  }
+  bool done = info->done;
+  pthread_mutex_unlock(&info->mutex);
+
+  pthread_mutex_destroy(&info->mutex);
+  pthread_mutexattr_destroy(&mattr);
+  pthread_cond_destroy(&info->condvar);
+  pthread_condattr_destroy(&cattr);
+  if (munmap(stack_tmp, stack_tmp_size) != 0)
+    lowfat_error("fork: failed to munmap tmp stack: %s", strerror(errno));
+
+  if (!done) {
+    waitpid(pid, NULL, 0);
+    errno = ECHILD;
+    return -1;
+  }
+  return pid;
+}
+
+extern pid_t fork(void) LOWFAT_ALIAS("lowfat_fork");
+pid_t lowfat_fork(void) {
+  // 4-page MAP_SHARED|MAP_ANONYMOUS temp stack — shared so the child
+  // can write the cond-var state visible to the parent (process-private
+  // anon mappings would diverge after clone).
+  size_t stack_tmp_size = 4 * LOWFAT_PAGE_SIZE;
+  void *stack_tmp = mmap(NULL, stack_tmp_size, PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_NORESERVE | MAP_ANONYMOUS, -1, 0);
+  if (stack_tmp == MAP_FAILED)
+    lowfat_error("fork: failed to allocate temp stack: %s", strerror(errno));
+
+  struct lowfat_fork_info *info =
+      (struct lowfat_fork_info *)((uint8_t *)stack_tmp + stack_tmp_size -
+                                  sizeof(struct lowfat_fork_info));
+  if (setjmp(info->env)) {
+    // CHILD: woken up by longjmp from lowfat_fork_child_wrapper.
+    if (munmap(stack_tmp, stack_tmp_size) != 0)
+      lowfat_error("fork(child): failed to munmap tmp stack: %s",
+                   strerror(errno));
+    return 0;
+  }
+
+  // PARENT path.
+  return lowfat_fork_wrapper(stack_tmp, stack_tmp_size, info);
+}
+
+#endif // LOWFAT_NO_REPLACE_FORK
 
 //===----------------------------------------------------------------------===//
 // Init: build the tables, reserve the regions, initialise the allocator.

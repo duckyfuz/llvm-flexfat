@@ -10,12 +10,12 @@
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
-  // Unit 12a: the stack regions are now MAP_SHARED, so a bare fork() shares
-  // physical stack bytes between parent and child (the child segfaults the
-  // moment either side touches its stack). The reference fixes this with a
-  // fork interposer (lowfat_fork.c, Part III scope). Until then, run death
-  // tests under "threadsafe" mode — fork+exec — which gives the child a fresh
-  // process so the shared-stack alias doesn't bite.
-  testing::FLAGS_gtest_death_test_style = "threadsafe";
+  // Unit 12a installed a "threadsafe" death-test mitigation here because
+  // the MAP_SHARED stack regions caused bare fork() in gtest's fast-mode
+  // death tests to segfault. Unit 14b lands the fork interposer (clone()
+  // onto a temp stack, fresh SHM stacks for the child, copy parent's
+  // stack, longjmp back), which closes that hazard — fork() in the
+  // child now sees private stack bytes. The default fast-mode death
+  // tests are safe again; the explicit threadsafe override is removed.
   return RUN_ALL_TESTS();
 }

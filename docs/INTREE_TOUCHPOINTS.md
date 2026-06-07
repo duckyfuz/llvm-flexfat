@@ -476,3 +476,36 @@ Runtime, build-system, and tests; no LLVM/clang side.
   `size = 32`.
 - **+** `compiler-rt/test/flexfat/TestCases/threads_alloc_stress.c` —
   e2e: 4 threads × 2000 malloc/free iterations × 6 classes, -O0 and -O2.
+
+## Unit 14b — fork interposer
+
+Runtime + test surface; no LLVM/clang changes.
+
+### Runtime
+- **~** `compiler-rt/lib/flexfat/lowfat.c`:
+  - **+** `<sched.h>`, `<setjmp.h>`, `<signal.h>`, `<sys/wait.h>` includes.
+  - **+** `struct lowfat_fork_info` (PROCESS_SHARED mutex/cond, done
+    flag, parent frame address, jmp_buf).
+  - **+** `lowfat_fork_child_wrapper` — runs on temp stack: fresh
+    `lowfat_create_shm`, `mmap MAP_SHARED|MAP_FIXED` over size-class 1's
+    stack range, mprotect+memcpy parent's live stack pages, cond_signal,
+    loop remap of remaining stack regions, close fd, longjmp.
+  - **+** `lowfat_fork_wrapper` (LOWFAT_NOINLINE) — init PROCESS_SHARED
+    cond/mutex on temp stack, clone(SIGCHLD), wait on cond, cleanup.
+  - **+** `lowfat_fork()` with `LOWFAT_ALIAS("fork")` — allocate temp
+    stack, setjmp env at top, dispatch to wrapper (parent path) /
+    munmap+return 0 (child path arriving via longjmp).
+  - Gated by `LOWFAT_NO_REPLACE_FORK` (NOT set on `RTFlexfat_noreplace`
+    so the gtest binary uses the interposer).
+
+### Tests
+- **+** `compiler-rt/test/flexfat/TestCases/fork_isolation.c` — bare
+  `fork()` parent/child stack-write isolation. Red against 14a runtime
+  (SIGSEGV at exit 139), green under 14b (exit 0, "isolated"). Uses
+  `static unsigned int *volatile sentinel_escape_holder = &sentinel;`
+  to keep the volatile alloca alive under -O2 (see STATUS finding).
+- **+** `compiler-rt/test/flexfat/TestCases/fork_oob.c` — fork-then-
+  stack-OOB-in-child traps with `pointer = … (stack)`, `size = 32`.
+- **~** `compiler-rt/lib/flexfat/tests/flexfat_test_main.cpp` — REVERT
+  the 12a `gtest_death_test_style = "threadsafe"` override; fast-mode
+  death tests are safe under the 14b interposer.

@@ -21,6 +21,7 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 12b | Alloca lowfatification (pass half): `doesAllocaEscape` + `doesIntEscape` + `isInterestingAlloca` (escape predicate — escaping ⇒ low-fat, per the code, not SPEC's English wording), `makeAllocaLowFatPtr` (fixed + VLA paths; mirror gep tagged `!flexfat.stack.mirror`); `calcBasePtr`/`getPtrBounds` recognise the tag and emit inline `lowfat_base` for stack-mirror access; `-flexfat-no-replace-alloca` wired (Unit-10 forward-decl finally gets its behavioral test); idempotence guard skips already-mirrored allocas surfaced via inlining. Codegen parity: fast-path mirror is a single `leaq cst(%rsp)`, no div, no call, no runtime table load; check is `shr/table-load/single cmpq/jae` to out-of-line `lowfat_oob_error`. Gate is **57/57**. MSET flip pending differential re-run | ✅ |
 | 13 | Global lowfatification: `isInterestingGlobal` + `makeGlobalVariableLowFatPtr` as a NEW **module pass** (`flexfat-globals`) registered at PipelineStart so sectioning happens BEFORE the function-level pass needs to see it. Eligible globals get `section "lowfat_section_<size>"` (or `..._const_<size>`) at the class-boundary alignment; Common→WeakAny promotion lets the linker honor the section attribute. Driver wiring: `-T <resource>/lowfat.ld` + `-z max-page-size=0x1000` on every flexfat link, plus the suppress-default-PIE shim in `Gnu.cpp` (lowfat.ld pins to absolute addresses, PIE relocates them). `calcBasePtr`/`getConstantPtrBounds` recognise lowfatified globals via the section name and emit inline `lowfat_base` so the Unit-7 check fires on global-derived pointers. `-flexfat-no-replace-globals` (Unit-10 forward-decl, last of three) finally functional. Gate is **64/64** | ✅ |
 | 14a | Threads + build gate: `pthread_create` interposer (`dlsym(RTLD_NEXT, …)`) allocates a lowfat slot via `lowfat_stack_alloc`, sets it via `pthread_attr_setstack`, and pushes the slot to a reclamation freelist; `lowfat_is_thread_dead` reads TID/JOINID at the configured offsets to reclaim slots when their owner thread has joined (`tid==-1`) or detached + died (`tid==0 && joinid==thread`); Fisher-Yates shuffle of `lowfat_stack_perm[128]` ASLRs the slot pick order. **Build gate** — `flexfat_check_config` builds & runs the offset validator against host glibc at compile time; mismatch fails the build with named expected-vs-found offsets (negative control confirmed: corrupt JOINID → build fails with the exact message; restore → green). Fork interposer is Unit 14b — until then, the gtest threadsafe death-test mitigation from 12a stays. Gate is **71/71** | ✅ |
+| 14b | Fork interposer: `clone(SIGCHLD)` onto a 4-page anonymous-shared temp stack with `setjmp`'d env at the top → child does (1) `lowfat_create_shm` fresh stack-memory object, (2) `mmap MAP_SHARED\|MAP_FIXED` over size-class 1's stack range to the fresh fd + `mprotect`+`memcpy` parent's live stack pages, (3) `pthread_cond_signal` parent on PROCESS_SHARED cond var, (4) loop remap of every remaining stack mirror to the same fresh fd, (5) `longjmp` back into `lowfat_fork()`'s setjmp frame on the now-private master stack. **12a MAP_SHARED fork hazard closed** (red→green: `fork_isolation.c` SEGSEGV'd at exit 139 against 14a runtime, exits 0 isolated under 14b); the 12a `gtest_death_test_style = "threadsafe"` mitigation is REVERTED (fast-mode death tests safe again, verified). Direct `clone()` callers remain unsupported (matches reference). Gate is **73/73** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -1249,4 +1250,108 @@ checklist alongside the bare-fork e2e (red against 14a, green after 14b).
 3. Death-test threadsafe revert (or document why it stays).
 4. Known gap: direct `clone()` calls remain unsupported (matching the
    reference's choice).
+
+
+## Unit 14b — fork interposer
+
+Closes the MAP_SHARED stack-aliasing hazard 12a documented. Bare `fork()`
+inherits parent's MAP_SHARED stack mappings; without interposing, parent
+and child read/write the SAME physical stack bytes — verified
+empirically: `compiler-rt/test/flexfat/TestCases/fork_isolation.c`
+SIGSEGVs at exit 139 against 14a's runtime, exits 0 isolated under 14b.
+
+### Sequence (port of LowFat.cpp's lowfat_fork.c)
+1. Parent `mmap`s a 4-page `MAP_SHARED|MAP_ANONYMOUS` temp stack and
+   places `lowfat_fork_info` (with `pthread_mutex_t`,
+   `pthread_cond_t` both `PTHREAD_PROCESS_SHARED`, `jmp_buf`, and
+   `__builtin_frame_address(0)`) at its high end.
+2. Parent `setjmp(info->env)` then `clone(SIGCHLD,
+   lowfat_fork_child_wrapper, stack_tmp_top, info)`.
+3. Child on the temp stack:
+   - `lowfat_create_shm(LOWFAT_STACK_MEMORY_SIZE)` — fresh fd, not seen
+     by parent (different VM).
+   - `mmap MAP_SHARED|MAP_FIXED|MAP_NORESERVE` over size-class 1's
+     stack range to the fresh fd (replaces the parent-inherited mapping
+     in CHILD'S address space only).
+   - `mprotect` the slot's writable range RW, `memcpy` parent's live
+     stack pages (from page-base-of-`info->stack` to slot top) into the
+     fresh shm via size-class 1's mirror. Because all stack regions
+     will MAP_SHARED to the same fd by the end, this one copy populates
+     every mirror.
+   - `pthread_cond_signal` parent; parent's `cond_wait` returns.
+   - Loop over `lowfat_stacks[]` (every other size-class region incl.
+     master 62), remap each to the fresh fd + mprotect.
+   - `close(fd)`.
+   - `longjmp(info->env, 1)` — `%rsp` and `%rip` restored to parent's
+     setjmp call site; execution resumes on the now-private master
+     stack region (which contains parent's content from step (3)'s
+     memcpy via the shm aliasing).
+4. Child returns 0 from `lowfat_fork()`; parent returns pid.
+
+### What specifically breaks without each step
+- Without (1) fresh shm fd: child's stack writes alias parent's (the
+  exact 12a hazard — gtest fast-mode death tests SIGSEGV'd immediately).
+- Without (2) mprotect+memcpy: child's pre-fork stack frame is
+  unreadable (PROT_NONE inherited from parent's fresh-mmap setup) or
+  zero-initialized; longjmp lands on garbage; child crashes.
+- Without (3) cond_signal: parent hangs in `pthread_cond_wait` forever.
+- Without (4) the per-class remap loop: any alloca-mirror access in the
+  child after longjmp goes to parent-shared memory in the size-class
+  mirrors that weren't remapped (Unit 12b lowfatification spreads
+  writes across all mirrors).
+- Without (5) longjmp: child has no clean return path — the temp stack
+  would unwind through libc cleanup paths that touch parent state.
+
+### Modern glibc deviations (post-2.34 unified libc) — every one flagged
+- **`clone()`**: still in `<sched.h>` with the same signature; no change.
+- **PROCESS_SHARED mutex/cond**: still functional via futex syscalls;
+  the cond var lives in the temp stack (`MAP_SHARED|MAP_ANONYMOUS`) so
+  parent and child see the same physical bytes.
+- **fork() internal locks**: glibc's `fork()` takes malloc-arena +
+  atfork locks. We interpose at the `fork` symbol with a `clone()`-based
+  body, **bypassing those entirely**. Atfork handlers DO NOT run —
+  matches the reference's deliberate choice. POSIX `fork()` callers that
+  rely on atfork semantics (e.g. async-signal-safety for malloc state)
+  must be careful; the deviation is documented here, not silently
+  papered over.
+- **Direct `clone()` calls**: NOT interposed. Programs that call
+  `clone()` directly (without going through `fork()`/`pthread_create()`)
+  inherit MAP_SHARED stacks and hit the original 12a hazard. Matches
+  the reference's by-design gap.
+- **`pthread_cond_wait` spurious wakeup**: the reference does a single
+  `pthread_cond_wait`; we loop on `!info->done` because POSIX permits
+  spurious wakeups (always has, though they're rare on Linux). Tiny
+  hardening over the reference.
+- **`__builtin_frame_address(0)`**: still works on GCC/Clang for the
+  current frame; `LOWFAT_NOINLINE` keeps `lowfat_fork_wrapper` from
+  inlining so the frame address is stable.
+- **`returns_twice` on `fork`**: glibc's `<unistd.h>` declares it; the
+  caller's IR carries the attribute even though our `lowfat_fork` impl
+  doesn't list it (the attribute affects the CALLER's optimization
+  scope, not the callee).
+
+### Fast-mode death test mitigation REVERTED
+12a's `flexfat_test_main.cpp` set
+`testing::FLAGS_gtest_death_test_style = "threadsafe"` because bare
+`fork()` SIGSEGV'd the gtest death-test child. 14b's interposer makes
+fast-mode safe; the override is removed (verified:
+`FlexFatMallocDeathTest.*` passes under fast mode). Bare-fork test
+authoring is no longer constrained — gtests and e2e can call `fork()`
+freely.
+
+### Pre-existing finding (out of 14b scope)
+While writing the fork e2e, surfaced that under
+`-fsanitize=flexfat -O2` a non-address-escaping `volatile` local
+alloca's stores get eliminated by a downstream pass (likely
+mem2reg+DCE interacting with how the function-pass pipeline runs after
+FlexFatPass). The non-flexfat -O2 build preserves the same stores;
+running `opt -passes=flexfat-globals,flexfat` on already-O2 IR also
+preserves them. So it's a pipeline-interaction issue, not a flexfat
+pass bug. Workaround: take the address of the volatile (e.g.,
+`static unsigned int *volatile holder = &sentinel;` — used in
+`fork_isolation.c`). Recorded as a finding; not a 14b regression.
+
+### Remaining known by-design gap
+Direct `clone()` callers (programs not going through `fork()` or
+`pthread_create()`) remain unsupported, matching the reference.
 
