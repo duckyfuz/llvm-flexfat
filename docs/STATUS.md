@@ -22,23 +22,28 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 13 | Global lowfatification: `isInterestingGlobal` + `makeGlobalVariableLowFatPtr` as a NEW **module pass** (`flexfat-globals`) registered at PipelineStart so sectioning happens BEFORE the function-level pass needs to see it. Eligible globals get `section "lowfat_section_<size>"` (or `..._const_<size>`) at the class-boundary alignment; Common→WeakAny promotion lets the linker honor the section attribute. Driver wiring: `-T <resource>/lowfat.ld` + `-z max-page-size=0x1000` on every flexfat link, plus the suppress-default-PIE shim in `Gnu.cpp` (lowfat.ld pins to absolute addresses, PIE relocates them). `calcBasePtr`/`getConstantPtrBounds` recognise lowfatified globals via the section name and emit inline `lowfat_base` so the Unit-7 check fires on global-derived pointers. `-flexfat-no-replace-globals` (Unit-10 forward-decl, last of three) finally functional. Gate is **64/64** | ✅ |
 | 14a | Threads + build gate: `pthread_create` interposer (`dlsym(RTLD_NEXT, …)`) allocates a lowfat slot via `lowfat_stack_alloc`, sets it via `pthread_attr_setstack`, and pushes the slot to a reclamation freelist; `lowfat_is_thread_dead` reads TID/JOINID at the configured offsets to reclaim slots when their owner thread has joined (`tid==-1`) or detached + died (`tid==0 && joinid==thread`); Fisher-Yates shuffle of `lowfat_stack_perm[128]` ASLRs the slot pick order. **Build gate** — `flexfat_check_config` builds & runs the offset validator against host glibc at compile time; mismatch fails the build with named expected-vs-found offsets (negative control confirmed: corrupt JOINID → build fails with the exact message; restore → green). Fork interposer is Unit 14b — until then, the gtest threadsafe death-test mitigation from 12a stays. Gate is **71/71** | ✅ |
 | 14b | Fork interposer: `clone(SIGCHLD)` onto a 4-page anonymous-shared temp stack with `setjmp`'d env at the top → child does (1) `lowfat_create_shm` fresh stack-memory object, (2) `mmap MAP_SHARED\|MAP_FIXED` over size-class 1's stack range to the fresh fd + `mprotect`+`memcpy` parent's live stack pages, (3) `pthread_cond_signal` parent on PROCESS_SHARED cond var, (4) loop remap of every remaining stack mirror to the same fresh fd, (5) `longjmp` back into `lowfat_fork()`'s setjmp frame on the now-private master stack. **12a MAP_SHARED fork hazard closed** (red→green: `fork_isolation.c` SEGSEGV'd at exit 139 against 14a runtime, exits 0 isolated under 14b); the 12a `gtest_death_test_style = "threadsafe"` mitigation is REVERTED (fast-mode death tests safe again, verified). Direct `clone()` callers remain unsupported (matches reference). Gate is **73/73** | ✅ |
-| 15 | Escape checks at the 5 sites (lowfat.h:45-49): ESCAPE_CALL/RETURN/STORE/PTR2INT/INSERT. Each pointer-typed argument to a memory-impure call/invoke, each pointer-typed return value, each pointer-typed `store` VALUE, each non-trivially-escaping `ptrtoint` (whose source isn't an "ugly GEP", verbatim carve-out from LowFat.cpp:854-863), and each pointer-typed `insertvalue`/`insertelement` inserted operand gets a Unit-7-strategy bounds check before the site with the correct info code. Umbrella `-flexfat-no-check-escapes` (Unit-10 forward-decl) finally functional and joined by the five granular `-flexfat-no-check-escape-{call,return,store,ptr2int,insert}` flags Unit 10 skipped. e2e reports match the reference wording exactly (`operation = escape (call)` / `(return)` / `(store)`). No false positives on the prior 75-test suite. **MSET differential 96/96 — 100% parity with the reference oracle** (Unit 13's 78 → 96, +18 net, 0 lost; the 18 newly-detected types are precisely the Linear-OOBA Direct R/W same-class adjacency Unit 13 had pre-classified as "architectural floor", caught here by escape sites BEFORE the access reaches the offset-0 blind spot). Gate is **85/85** | ✅ |
+| 15 | Escape checks at the 5 sites (lowfat.h:45-49): ESCAPE_CALL/RETURN/STORE/PTR2INT/INSERT. Each pointer-typed argument to a memory-impure call/invoke, each pointer-typed return value, each pointer-typed `store` VALUE, each non-trivially-escaping `ptrtoint` (whose source isn't an "ugly GEP", verbatim carve-out from LowFat.cpp:854-863), and each pointer-typed `insertvalue`/`insertelement` inserted operand gets a Unit-7-strategy bounds check before the site with the correct info code. Umbrella `-flexfat-no-check-escapes` (Unit-10 forward-decl) finally functional and joined by the five granular `-flexfat-no-check-escape-{call,return,store,ptr2int,insert}` flags Unit 10 skipped. e2e reports match the reference wording exactly (`operation = escape (call)` / `(return)` / `(store)`). No false positives on the prior 75-test suite. **MSET differential 96/96 — 100% parity with the reference oracle** (Unit 13's 78 → 96, +18 net, 0 lost). Trap-line audit: the 18 newly-detected types trap on a MIX of `operation = read` (Unit-7 access check, via `calcBasePtr` tracing the GEP to the origin alloca/malloc/global) and `operation = escape (call|store)` (Unit-15 escape sites). Unit 13's "architectural floor of 18" framing was wrong: the floor is a property of access-site checking WHEN `calcBasePtr` cannot trace to the origin, and the MSET corpus's GEPs are all compile-visible from the origin; Unit-13's TYPE-level UNDETECTED was caused by escape-only sub-cases that Unit 15 now closes. Gate is **85/85** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
 ## Operational notes (2026-06-06)
 
-- **Part II acceptance extension.** Per `00a8ae8` ("docs: reclassify 6 MSET
-  preconditions-failed as Part-II-scope deferrals, not permanent"), the 6
-  `Heap↔{Global,Stack}` MSET types currently scored `PRECONDITIONS FAILED` are
-  classified as deferred-until-Part-II, not permanent design wins. **Part II's
-  acceptance criteria therefore include flipping all 6 to `DETECTED`** on a
-  re-run of the MSET differential. The Unit 11 "Heap-origin → reference's
-  existing check fires" path covers `Heap Global` / `Heap Stack` overflow; the
-  `Global/Stack`-origin underflows depend on Part II actually inserting the
-  check on the now-lowfat origin. If any of the 6 stays UNDETECTED post-Part-II,
-  re-open the (a)/(b) question: that would be a permanent-property hit, not a
-  Part-II miss.
+- **Part II acceptance extension (CLOSED by Unit 13 + Unit 15).** Per
+  `00a8ae8` ("docs: reclassify 6 MSET preconditions-failed as Part-II-scope
+  deferrals, not permanent"), the 6 `Heap↔{Global,Stack}` MSET types
+  originally scored `PRECONDITIONS FAILED` in Unit 11 were classified as
+  deferred-until-Part-II, not permanent design wins. **Unit 13 closed
+  this**: all 8 H↔{G,S} mixed-pair types flipped from PF → DETECTED via
+  global lowfatification (criterion 3 in Unit 13's scorecard, 8/8 ✓).
+  Separately, **the 18 same-class adjacency types Unit 11/12b/13 labelled
+  "architectural floor / inherent encoding limitation" flipped to DETECTED
+  in Unit 15** via escape-site instrumentation + already-firing
+  `calcBasePtr` access checks — see the Unit-15 forward-pointers in §Unit
+  11 / §Unit 12b / §Unit 13 and the corrected mechanism in §Unit 15 MSET.
+  Net: every "deferred / permanent / architectural" framing in earlier
+  STATUS sub-sections is now resolved (6 by Unit 13, 18 by Unit 15) and
+  the honest residual is the narrower three-condition blind spot in §Unit
+  15.
 - **REFERENCE loss + re-pin to upstream commit.** The original LowFat tree at
   `/home/kenf/Developer/CP4106/llvm-lowfat/` was permanently lost. It has been
   re-cloned from `https://github.com/GJDuck/LowFat` and **pinned to commit
@@ -603,6 +608,19 @@ Unit 8 "input pointers trusted at offset 0" caveat family; closing it requires
 inter-object redzones or guard slots, which LowFat deliberately omits for
 performance.)
 
+**Unit-15 forward-pointer (don't re-read this section in isolation).**
+The "lowfat_base resolves to neighbour's base" mechanism above is real
+ONLY when the IR check uses runtime `lowfat_base(displaced_ptr)`. The
+pass's `calcBasePtr` traces compile-visible GEPs to the origin
+allocation, so when the displacement is GEP-derived in the same
+function (which is the case for the MSET tests targeting these 6
+types), the check uses `lowfat_base(origin)` instead, and traps. The
+blind spot is real but narrower than this section implies: it requires
+the displaced pointer to reach the check through a path `calcBasePtr`
+cannot trace to the origin (typically an opaque function arg with
+`getInputPtrBounds` defaulting to `[0,0]`). See the Unit 15 MSET
+section for the trap-line audit and the three-condition residual.
+
 ### glibc TID/JOINID landmine — validated before Part II
 `flexfat/config/lowfat-check-config.c` (port of the reference validator) checks the
 hard-coded `LOWFAT_TID_OFFSET = 0x2d0` / `LOWFAT_JOINID_OFFSET = 0x620` (from the
@@ -904,6 +922,16 @@ catch the literally-adjacent-and-offset-0 case in any LowFat variant.
 These join the 6 Heap→Heap as the architectural floor. Closing would
 require redzones, which LowFat deliberately omits for performance.
 
+**Unit-15 forward-pointer.** This "permanent baseline" framing is
+superseded for the MSET corpus — all 6 flipped to DETECTED in
+Unit 15, not via redzones but because the floor was being computed
+on the wrong axis. See the Unit-15 MSET section: the encoding
+blind spot applies only when `calcBasePtr` can't trace to the
+origin; MSET's tests use compile-visible GEPs so the access-side
+check uses the origin's bounds, and Unit-15 escape sites close
+the residual escape-only sub-cases. The honest architectural
+residual is narrower (three-condition residual in Unit 15).
+
 **Updated evidence:** `flexfat/mset/flexfat_original_detected.txt` rewritten
 with the 54-type set; previous 30-type set superseded.
 
@@ -946,6 +974,16 @@ The expected post-Unit-13 floor:
 
 Anything outside that floor that doesn't flip is a Unit 13 bug, not an
 architectural limit.
+
+**Unit-15 forward-pointer.** The "expected post-Unit-13 floor of
+18" framing was based on a wrong axis: it assumed the runtime
+encoding blind spot would necessarily fire for MSET's tests of
+these 18 types. Trap-line audit in Unit 15 shows the access-side
+check (`calcBasePtr` → origin) was already catching half the
+sub-cases; the TYPE-level UNDETECTED in Unit 13 came from
+escape-only sub-cases. Unit 15 flipped all 18 to DETECTED without
+redzones. See Unit 15 MSET section for the corrected floor
+analysis.
 
 
 ## Unit 13 — global lowfatification
@@ -1048,6 +1086,20 @@ same-class adjacency cases. The non-linear / stdlib / type-confusion
 variants ARE caught for all three kinds. The floor is the architectural
 limit of LowFat-without-redzones, shared verbatim with the reference.
 
+**Unit-15 forward-pointer — this whole sub-section is wrong on the
+mechanism axis.** The 18 types were UNDETECTED in Unit 13 not
+because the encoding's offset-0 adjacency blind spot fires on
+them, but because each has escape-only sub-cases that need
+escape-site instrumentation to trap. Unit 15 added the 5 escape
+sites, flipped all 18 to DETECTED, and post-mortem trap-line
+audit revealed the access-side check (`calcBasePtr` → origin) was
+already catching half the sub-cases in Unit 13 — they just
+weren't enough for MSET's per-type classifier. See the Unit 15
+MSET section for the corrected mechanism (mixed `operation = read`
++ `escape (call|store)`, three-condition honest residual). The
+"architectural limit of LowFat-without-redzones" claim above
+applies only to the narrower residual; the 18 types do not.
+
 ### Five-criteria scorecard
 
 | # | Criterion | Target | Result |
@@ -1056,7 +1108,7 @@ limit of LowFat-without-redzones, shared verbatim with the reference.
 | 2 | Restore measurability for the 6 newly-unconstructable Global↔Stack from 12b, then score them | constructable + scored | **6/6 DETECTED ✓** — every one of the 6 specific 12b-PF Global↔Stack overflows is now constructable AND scored DETECTED. The within-region `heap < global < stack` sub-layout (SPEC §2) collapses the prior gulf, the walker satisfies its distance precondition, and the bounds check fires. |
 | 3 | Re-evaluate the 6 Unit-11 Heap↔{Global,Stack} PF mixed pairs (`00a8ae8`) | constructable + scored | **8/8 DETECTED ✓** (the Heap↔{Global,Stack} mixed-pair family — 8 types in this oracle). All flipped from PF (Unit 11) → DETECTED (Unit 13). The Part-II acceptance from `00a8ae8` is fulfilled; the (a)/(b) question stays settled at (b) — these were Part-II-scope deferrals, not permanent properties. |
 | 4 | No regression on Unit 12b's 54-type detected set | 54 still detected | **47/54 strict-survivor; 0 PARITY regression ✓** — 47 of the 54 12b detections survived. The 7 that didn't are EXACTLY the 7 12b FF-only catches (Stack↔Global linear) that the 12b STATUS flagged as "may or may not survive" — they flipped to PF as globals-now-lowfat layout converged with the reference's. That's "test variant became unconstructable," not "bug missed." None of the 47 parity-with-reference catches from 12b was lost. |
-| 5 | Architectural floor | within floor | **18/18 = floor exactly ✓** — REF-only deltas are exactly 6 H→H + 6 S→S + 6 G→G Linear offset-0 adjacency types. Predicted shape (Unit 12b STATUS forecast) matches actual to the type. Nothing outside the floor remains undetected. |
+| 5 | Architectural floor | within floor | **18/18 = predicted shape ✓ (but mechanism mis-classified)** — REF-only deltas are exactly 6 H→H + 6 S→S + 6 G→G Linear offset-0 adjacency types as forecast. The "architectural floor" framing is wrong though: see Unit-15 forward-pointer above and the Unit 15 MSET section. These 18 are not encoding-blind-spot types; they are types whose per-type classification needed escape-site instrumentation to clear, and Unit 15 cleared all 18. The honest architectural residual (encoding blind spot + opaque-input + slot-multiple displacement) is narrower and not present in the MSET corpus. |
 
 ### Misuse-of-free temporal-phase carve-out — final reconciliation
 Unit 11 listed 12 `Misuse-of-free` types as "spatial-only by design."
@@ -1493,39 +1545,101 @@ in Unit 7, not escape) match the reference verbatim.
    - **Detected**: 96 (Unit 13: 78; **+18 net, 0 lost**).
    - **FlexFat-only**: 0. **Reference-only**: 0.
    - **PF**: 48 (unchanged; escape sites don't shift preconditions).
-   - **Undetected**: 88 (each remains one of the documented permanent
-     wins for `lowfat_*`-class checks: object-fit overflows, atomic
-     RW, etc.).
 
-   The 18 newly-detected types are exactly the architectural-floor
-   set Unit 13 STATUS pre-classified as "inherent encoding
-   limitation": 6 Heap→Heap + 6 Stack→Stack + 6 Global→Global
-   Linear-OOBA Direct R/W Underflow/Overflow at the same-class
-   adjacency-with-offset-0 corner.
+   The 18 newly-detected types are exactly the Linear-OOBA
+   same-class adjacency set Unit 13 STATUS labelled "architectural
+   floor": 6 Heap→Heap + 6 Stack→Stack + 6 Global→Global, split
+   {Inter-Object Overflow/Underflow × Direct R/W} ∪ {Non-Object
+   Underflow × Direct R/W}.
 
-   **Unit 13's framing was wrong.** The Unit-7 *access* check
-   really can't catch same-class offset-0 adjacency (the OOB
-   pointer's `lowfat_base` resolves to the neighbour's base — no
-   redzone, no trap on access). But every MSET test for those
-   types builds its OOB pointer with pointer arithmetic and then
-   *uses* it through a call/store/return — and Unit 15's escape
-   check fires before the access ever reaches the offset-0 blind
-   spot. So:
-   - For pure-access code that constructs an OOB pointer and never
-     escapes it: still the documented architectural floor —
-     redzones would be the only fix.
-   - For the MSET corpus (and, in practice, any code that prints,
-     stores, returns, or passes the pointer): Unit 15 closes the
-     floor.
+   ### Trap-line audit — what is actually firing
 
-   The "expected post-Unit-13 floor of 18 PF/UNDETECTED holdouts"
-   line in the Unit-13 sub-section is **superseded by this 96/96
-   result** — keep the prior text as the access-only analysis it
-   really is, but the corpus floor is no longer 18.
+   Parsed `operation = …` from every TC binary's trap in the
+   re-run log. The breakdown is **mixed across two mechanisms**,
+   not pure-escape:
 
-   Evidence: `flexfat/mset/flexfat_original_detected.txt`
-   rewritten from 78→96 in this commit; the Unit-13 78-entry set is
-   superseded.
+   | Type bucket (6 each) | Sub-case mix per type |
+   |---|---|
+   | Inter-Object Overflow Direct **Read** (H/S/G) | 4× `read` + 4× `escape (store)` |
+   | Inter-Object Overflow Direct **Write** (H/S/G) | 4× `escape (call)` + 4× `escape (store)` |
+   | Inter-Object Underflow Direct **Read** (H/S/G) | 4× `read` + 4× `escape (store)` |
+   | Inter-Object Underflow Direct **Write** (H/S/G) | 4× `escape (call)` + 4× `escape (store)` |
+   | Non-Object Underflow Direct R/W (mixed) | ~100% `escape (call)` (Heap/Stack); mix for Global |
+
+   So of the 18 types, the read variants (6) trap half on
+   `operation = read` (Unit-7 access check firing) and half on
+   `operation = escape (store)` (Unit-15 escape check firing); the
+   write variants (12) trap entirely on escape codes 5/7.
+
+   ### Mechanism — three corrections to the earlier "floor" story
+
+   1. **The IR check uses the origin's bounds, not a recomputed
+      base.** The runtime reporter's `base` field is whatever the
+      pass passed as the third argument to `lowfat_oob_check`. For
+      a Stack→Stack underflow Direct Read trap, the log shows
+      `pointer = 0x…46f, base = 0x…470, size = 16, underflow = -1`
+      — `base` is the origin alloca's mirror address (one byte
+      ABOVE pointer), not `lowfat_base(0x…46f)` (which would
+      resolve to `0x…460`, the previous slot). The pass's
+      `calcBasePtr` traces the GEP chain `(origin + reach_index)[i]`
+      → `origin` and emits the check against `lowfat_base(origin)`,
+      not `lowfat_base(displaced_ptr)`. IR for the analogous
+      stack-overflow ESCAPE_CALL site confirms: the size+base
+      load-and-multiply chain feeds off `ptrtoint(origin_mirror)`,
+      not off `ptrtoint(displaced_ptr)`.
+
+   2. **The Unit-7 access check WAS catching some of these
+      sub-cases all along.** Unit 13 didn't fail to detect the read
+      sub-cases because of a runtime encoding blind spot — it
+      detected them. It failed at the *MSET TYPE classification*
+      because each of the 18 types has additional sub-cases that
+      ONLY escape the OOB pointer (e.g., printf("%p", q), pass to
+      noinline `_use`, store into a sink slot) without dereferencing
+      it. With no escape instrumentation, those escape-only
+      sub-cases didn't trap, and the per-type classifier wouldn't
+      flip the type to DETECTED.
+
+   3. **Unit 15 closes the escape-only sub-cases.** Adding the
+      five escape-site checks makes the previously-silent
+      sub-cases trap with `operation = escape (call|store)`, and
+      MSET's classifier now sees uniform trapping across all
+      sub-cases. The type flips from UNDETECTED → DETECTED. The
+      access-side check's contribution doesn't disappear — it just
+      finally gets credited at the type level.
+
+   ### Honest residual blind spot
+
+   The Unit 11 "lowfat_base on a same-class displaced pointer
+   resolves to the neighbour's base, the unsigned `diff >=u size`
+   check sees an in-bounds pointer" blind spot is real. It requires
+   ALL THREE:
+   (i) the displaced pointer reaches the access through a path
+       calcBasePtr CANNOT trace to the origin (typically: opaque
+       function arg with no GEP from a visible alloca/malloc in the
+       same function, where `getInputPtrBounds` defaults to `[0,0]`
+       and the check uses runtime `lowfat_base(arg)`);
+   (ii) the displacement is exactly a multiple of the size class
+        (so the runtime-resolved base is the neighbour's slot base,
+        diff = 0);
+   (iii) the access within the neighbour's slot stays under
+         `lowfat_size(neighbour_slot)`.
+
+   That intersection is NOT a property of the MSET corpus. MSET's
+   18 tests construct displacement inside the same function as the
+   origin allocation, with compile-visible GEP chains — so
+   condition (i) fails and the access-side check uses the origin's
+   bounds. For the escape-only sub-cases, condition (i) still
+   fails (the GEP is visible at the escape site), and the escape
+   check ALSO uses the origin's bounds.
+
+   **A bug that displaces and dereferences in one expression
+   without escaping, where calcBasePtr cannot trace the
+   displacement to the origin, would still be missed.** That is
+   the honest residual: the encoding blind spot didn't close; the
+   MSET corpus's path to it doesn't exist.
+
+   Evidence: `flexfat/mset/flexfat_original_detected.txt` rewritten
+   from 78→96 in this commit.
 3. **Report wording exact match** — `operation = escape (call)`,
    `escape (return)`, `escape (store)` byte-for-byte the reference's
    format strings, as pinned by the e2e CHECK lines.
