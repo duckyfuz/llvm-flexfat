@@ -1339,17 +1339,55 @@ fast-mode safe; the override is removed (verified:
 authoring is no longer constrained — gtests and e2e can call `fork()`
 freely.
 
-### Pre-existing finding (out of 14b scope)
-While writing the fork e2e, surfaced that under
-`-fsanitize=flexfat -O2` a non-address-escaping `volatile` local
-alloca's stores get eliminated by a downstream pass (likely
-mem2reg+DCE interacting with how the function-pass pipeline runs after
-FlexFatPass). The non-flexfat -O2 build preserves the same stores;
-running `opt -passes=flexfat-globals,flexfat` on already-O2 IR also
-preserves them. So it's a pipeline-interaction issue, not a flexfat
-pass bug. Workaround: take the address of the volatile (e.g.,
-`static unsigned int *volatile holder = &sentinel;` — used in
-`fork_isolation.c`). Recorded as a finding; not a 14b regression.
+### Finding from 14b: volatile-alloca elision — investigated & fixed
+**Status: root-caused, fixed, regression-test pinned.** Surfaced while
+writing the fork e2e: under `-fsanitize=flexfat -O2`, a non-address-
+escaping `volatile` local alloca's stores got eliminated. After the
+user promoted this from "recorded" to "investigated before Unit 15",
+the verdict:
+
+1. **Reproducer pinned**:
+   `llvm/test/Instrumentation/FlexFat/X86/volatile_alloca_escape_bug.ll`
+   — pre-FlexFat-pass IR (as captured from `-print-after-all` on the
+   minimal C program), now a CHECK'd regression test. Was XFAIL when
+   first committed; fix landed in the same commit so the XFAIL was
+   removed and the CHECKs are load-bearing.
+2. **Bisect** (`clang -fsanitize=flexfat -O2 -mllvm -print-after-all`):
+   - `FlexFatPass on main`: alloca is REPLACED by `alloca i8, i64 16`
+     + mirror gep at offset `-2095944040448` tagged
+     `!flexfat.stack.mirror`. Volatile load/store re-pointed at the
+     mirror — they are still `store volatile` and `load volatile`.
+   - `SROAPass on main` (4th run, late in the pipeline): the volatile
+     stores and load are eliminated; main's body folds to
+     `ret i32 poison`. Cause: SROA sees a stack alloca with accesses
+     at a ~2 TB negative offset and treats the accesses as UB-on-
+     dead-memory; `volatile` does not save them in that path.
+3. **Classification: straight 12b pass bug, NOT upstream.** FlexFat's
+   `doesAllocaEscape` (port of LowFat.cpp:1343-1414) treated
+   `llvm.lifetime.start/end` intrinsics as escapes — they're
+   `CallInst`s with argmem effects, so the `Call ⇒ doesNotAccessMemory
+   else escape` branch returned true. clang `-O>=1` emits lifetime
+   intrinsics on every alloca that survives mem2reg (and `volatile`
+   forces survival), so the spurious-escape false positive turned
+   into spurious lowfatification, which then turned into the SROA
+   poison-fold downstream.
+4. **Fix**: in `doesAllocaEscape`, add an `IntrinsicInst` carve-out
+   that `continue`s on `Intrinsic::lifetime_start` / `lifetime_end`.
+   Three-line change, ahead of the existing `CallInst` clause.
+5. **Why the reference (LowFat 4.0) didn't trip it**: in clang/LLVM
+   4.0 lifetime intrinsics were `doesNotAccessMemory()`, so the
+   existing `Call` clause swallowed them. Modern LLVM marks them
+   `memory(argmem: readwrite)`. Recorded so the next reader doesn't
+   redo this bisect.
+6. **Workaround removed**: `fork_isolation.c` no longer needs the
+   `static unsigned int *volatile holder = &sentinel;` address-
+   escape pin; the test was simplified back to the natural form, and
+   passes (verified at -O0 and -O2).
+
+**Senior-to-feature-work principle observed**: an instrumentation
+tool that perturbs the semantics of the code it instruments has a
+correctness hole senior to any feature work. The verdict landed
+BEFORE Unit 15.
 
 ### Remaining known by-design gap
 Direct `clone()` callers (programs not going through `fork()` or

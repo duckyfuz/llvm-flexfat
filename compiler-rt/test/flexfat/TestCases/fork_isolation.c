@@ -26,16 +26,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Force `sentinel`'s address to escape so the FlexFat -O2 pipeline keeps
-// the volatile stores backed by an actual stack alloca. A volatile local
-// whose address is NEVER taken can be eliminated by a downstream pass on
-// the FlexFat -O2 pipeline (pre-existing Unit 7/12b interaction outside
-// this unit's scope; recorded as a finding).
-static unsigned int *volatile sentinel_escape_holder;
-
 int main(void) {
   volatile unsigned int sentinel = 0xAAAAAAAAu;
-  sentinel_escape_holder = (unsigned int *)&sentinel;
   int p2c[2], c2p[2];
   if (pipe(p2c) || pipe(c2p)) {
     perror("pipe");

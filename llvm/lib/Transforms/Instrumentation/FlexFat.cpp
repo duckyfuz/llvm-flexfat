@@ -258,6 +258,23 @@ static bool doesAllocaEscape(llvm::Value *Val,
         return true;
       continue;
     }
+    if (auto *Intr = dyn_cast<IntrinsicInst>(U)) {
+      // Lifetime markers reference the alloca's address but never observe
+      // it outside the optimizer's bookkeeping, so they must NOT count as
+      // escapes. The reference (LowFat.cpp:1343-1414, clang/LLVM 4.0) got
+      // away without this case because at -O its CallInst clause caught
+      // them under `doesNotAccessMemory()` — back then lifetime intrinsics
+      // had no argmem effects. Modern LLVM marks them `memory(argmem:
+      // readwrite)`, so without this carve-out every clang-4+ emitted
+      // alloca that survives mem2reg (e.g. anything `volatile`) gets
+      // spuriously lowfatified — the byte-array swap produces a mirror
+      // gep with a ~2 TB negative offset off the alloca that downstream
+      // SROA can't reconcile, folding the function to `ret … poison`.
+      // Pinned by volatile_alloca_escape_bug.ll.
+      Intrinsic::ID ID = Intr->getIntrinsicID();
+      if (ID == Intrinsic::lifetime_start || ID == Intrinsic::lifetime_end)
+        continue;
+    }
     if (auto *Call = dyn_cast<CallInst>(U)) {
       Function *F = Call->getCalledFunction();
       if (F && F->doesNotAccessMemory())
