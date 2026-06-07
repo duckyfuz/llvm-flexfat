@@ -462,13 +462,15 @@ reference-only deltas (every one maps to an intentional difference):
 |---|---|---|---|
 | 42 | Stack/Global-**origin** Inter-Object spatial | UNDETECTED | **Part-II-scope (deferred)** — the origin object is never lowfatified, so no check is inserted; the neighbor is valid memory ⇒ no trap. |
 | 6 | Heap↔{Global,Stack} mixed pairs | **PRECONDITIONS FAILED** | **Part-II-scope (deferred)** — *not* a permanent layout property. The mix of a high-lowfat heap object and a low-normal (not-yet-lowfat) global/stack object breaks the test's address-ordering precondition, so MSET can't construct the bug *today*. Once Part II lowfatifies globals/stack the precondition is satisfiable again (provably — see below) and the bug must be **re-evaluated**, exactly as the reference detects it. |
-| 12 | `Misuse-of-free` (temporal) | UNDETECTED | **Spatial-only by design** — FlexFat has no temporal/use-after-free detection. |
+| 12 | `Misuse-of-free` (temporal) | UNDETECTED | **Spatial-only by design** — FlexFat has no temporal/use-after-free detection. **(SUPERSEDED by Unit 12b.** The 8 `Misuse-of-free Stack` types now DETECT via the Unit-4 `lowfat_free` classification path — calling `free` on a stack pointer reaches `LOWFAT ERROR: attempt to free a stack pointer detected!` once the stack pointer is in a lowfat region (12a SHM + 12b lowfatification). This is designed allocator-side coverage, not temporal detection; the spatial-only invariant still holds. Breakdown post-12b: **4 remaining `Misuse-of-free Global`** by-design-temporal-miss (no allocator classification for non-lowfat globals until Unit 13), **8 `Misuse-of-free Stack`** detected-by-classification. See "MSET differential after Unit 12b" below.) |
 | 6 | **Heap→Heap** Linear (Inter-Object ×4 + Non-Object ×2) | UNDETECTED | **Offset-0 same-size-class adjacency blind spot** (inherent LowFat encoding limitation, shared with the reference — see below). |
 
 `42 + 6 + 12 + 6 = 66.` ✔ — **48 are Part-II-scope deferrals** (42 UNDETECTED +
-6 PRECONDITIONS-FAILED; same root cause, different MSET symptom), 12 spatial-only,
-6 the shared encoding blind spot. **The only miss that is *not* closed by finishing
-the planned scope is the 6-type Heap→Heap blind spot.**
+6 PRECONDITIONS-FAILED; same root cause, different MSET symptom), 12 spatial-only
+(of which Unit 12b later converts 8 to detected-by-allocator-classification, 4
+remain — see the Unit-12b MSET section below), 6 the shared encoding blind spot.
+**The only miss that is *not* closed by finishing the planned scope is the
+6-type Heap→Heap blind spot.**
 
 #### Hardened config (`-flexfat-check-whole-access`) — FlexFat detects 30 / reference 36
 FlexFat's detected set is **identical to the base config (the same 30 types)** —
@@ -614,6 +616,18 @@ temporal phase may not self-terminate; the **spatial** differential (the meaning
 comparison) completes fully first. The hardened run finished cleanly; the base run
 was stopped after its spatial verdicts were emitted. This does not affect any
 number above — temporal types are all `UNDETECTED` by design.
+
+**Carve-out (Unit 12b, retrospective).** The "every temporal type is an expected
+miss" framing is **too coarse for `Misuse-of-free` specifically.** Calling
+`free` on a non-heap **lowfat** pointer is caught by the Unit-4 allocator's
+classification check (`lowfat_free` ⇒ `LOWFAT ERROR: attempt to free a stack
+pointer detected!` for stack, "global" once globals lowfat in Unit 13). That
+is **allocator-side input validation, not temporal detection** — the spatial-
+only invariant is intact — but it is **designed coverage** for the
+non-heap-pointer-to-`free` case, and it shows up in MSET's temporal phase as
+`DETECTED`. With Unit 12a SHM + Unit 12b alloca lowfatification, this fires
+on the 8 `Misuse-of-free Stack` types. Use-after-free / double-free remain
+genuine spatial-only misses.
 
 ## Unit 12a — stack runtime: SHM + pivot
 
@@ -787,7 +801,17 @@ pinned by `stack_oob.c`.
 Re-ran `mset --evaluate flexfat_original.xml` against the vendored reference
 oracle (`/home/kenf/CP4106/MSET/build/lowfat_original_detected.txt`, 96 types).
 
-**Headline: FlexFat's detected set grows from 30 → 54 types** (+24 net).
+**Headline (full 3-axis metric, not just detected-delta):**
+
+  - **54 detected** (was 30 in Unit 11; +24 net spatial coverage)
+  - **6 newly-unconstructable** (Global↔Stack linear overflows regressed from
+    DETECTED in Unit 11 to PRECONDITIONS_FAILED in 12b; see "Measurability
+    regression" below — they are not "missed bugs," they are bugs MSET can
+    no longer **construct** against our 12b layout)
+  - **54 untestable-total** (full PF count in this run — includes the 6
+    newly-unconstructable, the 6 Unit-11 PF mixed pairs that stayed PF, and
+    additional Heap↔{Global,Stack} variants that became PF under 12b's
+    expanded address gulf)
 
 | Bucket | Count |
 |---|---|
@@ -795,14 +819,29 @@ oracle (`/home/kenf/CP4106/MSET/build/lowfat_original_detected.txt`, 96 types).
 | Parity (both detect) | 47 |
 | FlexFat-only | 7 |
 | Reference-only | 49 |
+| **PRECONDITIONS_FAILED total** | **54** |
+| ↳ of which **newly-unconstructable in 12b** | **6** |
 
 The 30 → 54 change decomposes into **30 new detections + 6 lost detections**:
 
-**+30 new detections** — all Stack-related (Stack as origin and/or target).
-22 spatial Stack-origin / Stack-target inter-object OOBA types now fire,
-plus 8 `Misuse-of-free Stack` (freeing a stack pointer now traps because the
-runtime classifies the mirror as `stack`, reaches the existing
-"attempt to free a stack pointer" path in `lowfat_free` — see Unit 4).
+**+30 new detections** — all Stack-related (Stack as origin and/or target):
+
+  - **22 spatial Stack-origin / Stack-target Inter-Object OOBA types** —
+    real bounds-check fires through the mirror.
+  - **8 `Misuse-of-free Stack`** detected via the **Unit-4 allocator's
+    classification path**: calling `free` on a stack pointer reaches
+    `lowfat_free`, fails `lowfat_is_heap_ptr`, classifies via
+    `lowfat_is_stack_ptr`, and reports `LOWFAT ERROR: attempt to free a stack
+    pointer detected!` (verbatim from the MSET run log; the actual error line
+    is "`attempt to free a stack pointer detected!`" with `pointer = … (stack)`,
+    `size = 256`, etc.). **This is allocator-side input validation, not
+    temporal detection** — the spatial-only invariant is intact; it's a
+    designed-but-previously-unreachable coverage class that lights up the
+    moment stack pointers exist in a lowfat region. See the carve-out under
+    "Caveat on the temporal phase" above. The remaining 4 `Misuse-of-free
+    Global` stay UNDETECTED because non-lowfat globals fall through
+    `lowfat_is_ptr` ⇒ `lowfat_fallback_free` ⇒ libc free; Unit 13 flips
+    those 4 too via the same path once globals enter lowfat regions.
 
 **−6 lost detections** — `Global↔Stack` linear overflows where MSET's
 address-ordering precondition no longer holds at the *distance* level. In
@@ -810,12 +849,23 @@ Unit 11, Global (in `.data` at low addresses) was BELOW Stack (loader stack
 at low addresses), so a Global→Stack overflow walked a short distance and
 fired. In Unit 12b, Stack lives in master region 62 at ~`0x1F6_xx`, ~125 GiB
 above Global, so the test's finite-step walker hits the MAX_REACH limit and
-self-exits PRECONDITIONS_FAILED before reaching the target. These move to
-PF, not to a "real miss" bucket. The reference, where Globals are ALSO
-lowfat (region-sub-range layout), keeps Globals and Stacks within the same
-2³⁵ region — distance is ≤8 GiB — so its walker succeeds. **Unit 13
-restores these 6 to DETECTED** by lowfatifying globals into the same
-regions as stack/heap.
+self-exits PRECONDITIONS_FAILED before reaching the target. **These are the
+6 "newly-unconstructable" types** — they are not "missed bugs", they are
+bugs MSET can no longer construct against our 12b layout. The reference,
+where Globals are ALSO lowfat (region-sub-range layout), keeps Globals and
+Stacks within the same 2³⁵ region — distance is ≤8 GiB — so its walker
+succeeds. Unit 13 restores them to constructable; whether they then score
+DETECTED, UNDETECTED, or stay PF must be re-evaluated, not assumed.
+
+### Measurability regression (the 6 newly-unconstructable)
+Unit 11 reported a "detected" delta; Unit 12b additionally introduces a
+**measurability regression** that the detected-delta alone hides. The 6
+Global↔Stack linear overflows that flipped from DETECTED (Unit 11) to
+PRECONDITIONS_FAILED (Unit 12b) are NOT a coverage loss in the encoding —
+the bounds-check logic still catches such accesses when they execute — they
+are a coverage loss **in our ability to measure** it via MSET against our
+current layout. Recorded here so the metric isn't single-axis. Unit 13 must
+restore measurability AND then score them, whichever way they land.
 
 **49 REF-only deltas, all classified to a documented intentional difference:**
 
@@ -852,4 +902,44 @@ require redzones, which LowFat deliberately omits for performance.
 
 **Updated evidence:** `flexfat/mset/flexfat_original_detected.txt` rewritten
 with the 54-type set; previous 30-type set superseded.
+
+### Unit 13 (globals) — acceptance criteria (recorded here, forward-looking)
+
+The MSET differential gates Unit 13 needs to clear:
+
+1. **Flip the 37 Global-related REF-only types** (origin or target = Global,
+   spatial + the 4 `Misuse-of-free Global`): all 37 must move from
+   UNDETECTED/PF to DETECTED. The 4 `Misuse-of-free Global` ride the same
+   allocator-classification path that already lights up the 8 `Misuse-of-free
+   Stack` in 12b (lowfat-classified non-heap pointer ⇒ `lowfat_free`
+   classifies ⇒ "global pointer detected" error), and should flip
+   automatically once globals enter lowfat regions.
+2. **Restore measurability for the 6 newly-unconstructable Global↔Stack
+   types from 12b.** Once globals lowfat-share regions with stack, the
+   layout gulf collapses and MSET's distance precondition holds again.
+   Acceptance = the 6 types are constructable AND then scored, whichever
+   way they score (DETECTED is the expected outcome; if any stay UNDETECTED
+   or remain PF, re-open the analysis — that would be a permanent property
+   we hadn't surfaced).
+3. **Re-evaluate the 6 Unit-11 `Heap↔{Global,Stack}` PF mixed pairs.** Per
+   commit `00a8ae8`, they're classified as Part-II-scope deferrals. With
+   globals in the proper sub-range, the within-region ordering
+   `heap < global < stack` is structurally guaranteed, satisfying the test's
+   address-ordering precondition. Same acceptance shape as item 2: must be
+   constructable AND scored, not assumed DETECTED.
+4. **No regression** on Unit 12b's 54-type detected set. The 22 Stack-origin
+   /-target spatial detections and 8 `Misuse-of-free Stack` classifications
+   must still fire. The 7 FlexFat-only catches may or may not survive
+   (some depend on the stack-vs-global layout that Unit 13 changes —
+   acceptable, expected).
+
+The expected post-Unit-13 floor:
+  - **6 Heap→Heap** + **6 Stack→Stack** Linear OOBA offset-0 adjacency
+    blind spots (architectural; require redzones to close).
+  - Plus whatever **6 Global→Global** analogous adjacency types surface as
+    the same blind-spot class — flag during the Unit 13 differential, group
+    with the others.
+
+Anything outside that floor that doesn't flip is a Unit 13 bug, not an
+architectural limit.
 
