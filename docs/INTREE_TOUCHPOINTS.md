@@ -235,3 +235,51 @@ Full differential + per-delta classification in [STATUS.md](STATUS.md) "Unit 11"
 Headline: FlexFat's detected set is a strict subset of the reference's (0 false
 detections); the only genuine heap-origin misses are the 6 Heap→Heap offset-0
 adjacency-blind-spot types, identical across base and hardened.
+
+## Unit 12a — stack runtime: SHM, MAP_SHARED stack regions, pivot
+
+Runtime-only changes; the pass is unchanged (alloca lowfatification is Unit
+12b). All within `compiler-rt/lib/flexfat/` plus two new e2e + one new gtest.
+
+### Runtime
+- **~** `compiler-rt/lib/flexfat/lowfat.c`:
+  - **+** `<fcntl.h>` include for `O_EXCL` / `F_SETLEASE`.
+  - **~** `lowfat_map(addr, len, r, w, fd)` — extended with the `fd` parameter
+    (`fd >= 0` ⇒ `MAP_SHARED`, else `MAP_PRIVATE|MAP_ANONYMOUS`). Two existing
+    callers updated.
+  - **+** `lowfat_create_shm(size)` — port of reference `lowfat_linux.c:80-107`
+    (`/dev/shm/flexfat.XXXXXX...tmp` random-suffix, `O_CREAT|O_EXCL`, unlink,
+    `F_SETLEASE`, ftruncate; returns the fd).
+  - **+** `lowfat_envp` static — populated in `lowfat_preinit`; consumed once
+    by the pivot and cleared.
+  - **+** `lowfat_stack_alloc()` — single-thread bump allocator over
+    `LOWFAT_STACKS_START`; per-slot mprotect RW in every mirror via
+    `lowfat_stacks[]`. No Fisher-Yates ASLR / thread freelist yet (Part III).
+  - **+** `lowfat_stack_pivot_2(stack_top)` — port of reference
+    `lowfat.c:524-575`: envp-walk → `lowfat_stack_alloc` → `memcpy` →
+    scan-and-patch self-referential pointers.
+  - **+** `lowfat_stack_pivot` asm trampoline — verbatim port of reference
+    `lowfat.c:577-586` (5-instruction `%rsp` swap).
+  - **~** `lowfat_init` — after `lowfat_malloc_init`, init the stack mutex,
+    create the shm fd, map each `lowfat_stacks[]` entry's stack sub-range
+    `MAP_SHARED` to it, close the fd, then call `lowfat_stack_pivot()` as
+    the LAST init step.
+  - **~** `lowfat_preinit` — captures `envp` before calling `lowfat_init`.
+
+### Tests
+- **+** `compiler-rt/lib/flexfat/tests/flexfat_stack_test.cpp` — three gtests:
+  `ShmAliasing` (fresh shm fd + two distinct VAs see the same bytes),
+  `StackTableIndexing` (clzll-based class index returns expected
+  size/mask/offset from the Unit-2-generated tables), `StackRegionAliasing`
+  (a write through the master region's address is visible via the size-class
+  mirror — implicitly confirms the constructor's MAP_SHARED setup).
+- **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — add the new source.
+- **~** `compiler-rt/lib/flexfat/tests/flexfat_test_main.cpp` — globally set
+  `gtest_death_test_style = "threadsafe"` to work around the MAP_SHARED+fork
+  alias (see STATUS.md "Unit 12a").
+- **+** `compiler-rt/test/flexfat/TestCases/pivot_classifies_stack.c` — e2e:
+  a `main` that takes `&local` and asserts `lowfat_is_ptr` + `lowfat_is_stack_ptr`
+  return true. Pins "pivot runs before main."
+- **+** `compiler-rt/test/flexfat/TestCases/stack_heavy_clean.c` — e2e: a
+  stack-heavy program (1000-deep recursion, 8 KiB local, args/env access) at
+  -O0 and -O2 must exit 0 — pivot regression-catch.

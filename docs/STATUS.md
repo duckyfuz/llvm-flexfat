@@ -17,8 +17,70 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 9 | mem-intrinsic end-pointer checks (memcpy/memset/memmove, info MEMCPY/MEMSET), `replaceUnsafeLibFuncs` (mem-intrinsics always; allocator family + new/delete unless `-flexfat-no-replace-malloc`), `optimizeMalloc` (constant `malloc(K)` → `lowfat_malloc_index(idx,K)`, `heap_select` folded). **Pass↔runtime ABI closes**: e2e link+run through `-fsanitize=flexfat`; memcpy/memset overruns trap, constant-malloc asm calls `lowfat_malloc_index` with an immediate index (no `clzll`/`lzcnt`) | ✅ |
 | 10 | option surface + SpecialCaseList blacklist: per-kind suppression (`-flexfat-no-check-reads/-writes/-memcpy/-memset`), `-flexfat-check-whole-access` (access_size = sizeof(*ptr)-1), error-block modes (`-flexfat-no-abort` warns+continues, `-flexfat-signal` inline `ud2`/SIGILL), and a `[flexfat]` `fun:`/`src:` blacklist; one behavioral test per flag, all defaults checks-on | ✅ |
 | 11 | verification harness + MSET differential vs the reference oracle: consolidated `check-flexfat` (4 surfaces, 46/46), FlexFat MSET configs (`flexfat/mset/`), base+hardened differential — **FlexFat's detected set is a strict subset of the reference's, zero false detections, every miss classified** to a documented intentional difference; glibc TID/JOINID landmine validated (`lowfat-check-config`, OK on 2.39) | ✅ |
+| 12a | Stack runtime: SHM helper (`lowfat_create_shm`), per-class stack regions mapped `MAP_SHARED` to one fd at init, `lowfat_envp` capture in `.preinit_array`, master-stack bump allocator (`lowfat_stack_alloc`), and the pivot trampoline (`lowfat_stack_pivot` asm + `lowfat_stack_pivot_2` payload) that copies the live native stack and switches `%rsp` before `main` runs — `&local` in `main` now classifies as `stack`, not `nonfat`. NO pass change yet; alloca lowfatification is Unit 12b. Gate is **51/51** | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
+
+## Operational notes (2026-06-06)
+
+- **Part II acceptance extension.** Per `00a8ae8` ("docs: reclassify 6 MSET
+  preconditions-failed as Part-II-scope deferrals, not permanent"), the 6
+  `Heap↔{Global,Stack}` MSET types currently scored `PRECONDITIONS FAILED` are
+  classified as deferred-until-Part-II, not permanent design wins. **Part II's
+  acceptance criteria therefore include flipping all 6 to `DETECTED`** on a
+  re-run of the MSET differential. The Unit 11 "Heap-origin → reference's
+  existing check fires" path covers `Heap Global` / `Heap Stack` overflow; the
+  `Global/Stack`-origin underflows depend on Part II actually inserting the
+  check on the now-lowfat origin. If any of the 6 stays UNDETECTED post-Part-II,
+  re-open the (a)/(b) question: that would be a permanent-property hit, not a
+  Part-II miss.
+- **REFERENCE loss + re-pin to upstream commit.** The original LowFat tree at
+  `/home/kenf/Developer/CP4106/llvm-lowfat/` was permanently lost. It has been
+  re-cloned from `https://github.com/GJDuck/LowFat` and **pinned to commit
+  `20f8075dd1fd6588700262353c7ba619d82cea8f`** (2022-03-27, "Fix #23"). From
+  now on, "REFERENCE" means this specific commit hash, not a mutable directory
+  (see [LLVM_NOTES.md](LLVM_NOTES.md) "REFERENCE pinning").
+
+  **Fingerprint verdict — effectively clean.** The clone's
+  `config/lowfat-config.c` regenerates both variants byte-for-byte against our
+  committed `flexfat/config/golden/`, *except* one line — `LOWFAT_JOINID_OFFSET`
+  (upstream `0x628`, ours `0x620`). That is a glibc-version-tracking constant,
+  not an algorithm diff: our value is the one the host validator confirms on
+  glibc 2.39 (the validator just ran `OK` again this session). Every byte that
+  participates in encoding/magics/region layout matches exactly. SPEC's
+  file:line citations spot-verified against the pinned commit (4/4: `lowfat.h`
+  71–137 accessors, `LowFat.cpp` 1168–1243 `lowfat_oob_check` IR body,
+  `lowfat-config.c` 415–422 non-POW2 magic formula, `lowfat_malloc.c` 42–50
+  `lowfat_regioninfo_s`). **The SPEC remains a reliable line-level index into
+  the clone.**
+
+  **Oracle / MSET-config inventory.** Inside this repo, `flexfat/mset/`
+  contains **only FlexFat-side evidence** — `flexfat_original.xml`,
+  `flexfat.xml`, `flexfat_original_detected.txt`, `flexfat_detected.txt`, and
+  the README. The **reference oracles** (`lowfat_original_detected.txt`,
+  `lowfat_detected.txt`) and the **reference MSET configs**
+  (`lowfat_original.xml`, `lowfat.xml`) are NOT committed here. They survive
+  on disk in the sibling `MSET/` tree at `/home/kenf/CP4106/MSET/`
+  (`MSET/build/lowfat_*_detected.txt`, `MSET/sanitizer_configs/lowfat*.xml`),
+  which was separate from the lost REFERENCE and is intact. **Future
+  differentials remain re-scorable** against those oracle files. The only thing
+  truly lost was the previously-built reference clang-4.0 toolchain that
+  produced the runtime evidence — that can be rebuilt from the re-pinned
+  REFERENCE if needed (clang-4.0 era on a modern host, feasible but not
+  free; defer until a re-run is actually required).
+
+  **Suspension lifted:** codegen-parity asm diffs and MSET oracle re-runs are
+  no longer blocked on REFERENCE existence — they are now blocked only on
+  rebuilding the reference clang toolchain from the pinned commit, which is
+  Part-II-scope work, not blocking the current branch's gate.
+
+  **The consolidated `check-flexfat` gate is unaffected** — all four surfaces
+  (IR, runtime gtests, e2e lit, config goldens + size-sync) are self-contained
+  in this repo; no test consumes REFERENCE at runtime. Strategy-level asm
+  contracts are pinned by our own committed tests
+  (`flexfat-error-block-placement.c`, `load.ll`/`store.ll` branch-weight
+  asserts, `malloc_class.c`), so an asm-level reference re-diff is corroboration,
+  not a load-bearing check.
 
 ## Known divergences from the reference / caveats
 - **Encoding-table init uses anonymous `mmap` + fill + `mprotect`, NOT the
@@ -343,8 +405,11 @@ allocated in the master region can be "mirrored" into its class region for
 `lowfat_base`/`size` to work). Unit 3 does **not** provide `lowfat_create_shm`,
 does not map stack regions, and uses only anonymous/private maps.
 
-**→ The stack unit depends on landing SHM support (`lowfat_create_shm`,
-`MAP_SHARED` same-fd regions) first.** See [STACK_UNIT.md](STACK_UNIT.md).
+**→ Resolved in Unit 12a** ([below](#unit-12a--stack-runtime-shm--pivot)):
+`lowfat_create_shm` ported, every entry in `lowfat_stacks[]` mapped `MAP_SHARED`
+to one fd at init time, and the master stack region (`LOWFAT_STACK_REGION`)
+included in the loop. See [STACK_UNIT.md](STACK_UNIT.md) for the original
+hand-off notes (now historical).
 
 ## Unit 11 — verification harness + MSET differential
 
@@ -548,3 +613,83 @@ temporal phase may not self-terminate; the **spatial** differential (the meaning
 comparison) completes fully first. The hardened run finished cleanly; the base run
 was stopped after its spatial verdicts were emitted. This does not affect any
 number above — temporal types are all `UNDETECTED` by design.
+
+## Unit 12a — stack runtime: SHM + pivot
+
+Lands the runtime half of stack protection. The pass is **unchanged** in this
+unit — alloca lowfatification and the inlined stack helpers come in Unit 12b,
+which keys its MSET flip off the foundations 12a establishes. Gate: 51/51.
+
+### What landed
+- **`lowfat_create_shm`** (port of `lowfat_linux.c:80-107`) — `O_EXCL` temp in
+  `/dev/shm` with random hex suffix, immediately `unlink()`ed, `F_SETLEASE`
+  guarding against shared paths, `ftruncate` to size. Returns an fd whose
+  pages will be `MAP_SHARED`-aliased across the stack regions.
+- **`lowfat_map(addr, len, r, w, fd)`** — extended with the fd parameter
+  (`fd >= 0` ⇒ `MAP_SHARED`, else `MAP_PRIVATE|MAP_ANONYMOUS`). All existing
+  callers updated (`-1`).
+- **Per-class stack-region init.** In `lowfat_init`, after the malloc init,
+  iterate `lowfat_stacks[]` (which already lists every size-class region that
+  owns a stack sub-range plus the master `LOWFAT_STACK_REGION = 62`) and
+  `lowfat_map(..., fd)` each `STACK_MEMORY_OFFSET..+STACK_MEMORY_SIZE` slice
+  to the **same** shm fd — same physical bytes at every mirror.
+- **`lowfat_envp` capture** — `lowfat_preinit` now saves `envp` so the pivot
+  can walk it to find the high end of the initial native stack.
+- **`lowfat_stack_alloc`** — single-thread bump allocator: takes
+  `LOWFAT_STACKS_START + idx * LOWFAT_STACK_SIZE` slots from the master
+  region, mprotects RW on every mirror via the same `lowfat_stacks[]` loop.
+  No Fisher-Yates ASLR shuffle or thread freelist — those are Part III scope
+  (`lowfat_threads.c`).
+- **Pivot trampoline** — verbatim port of the reference's `lowfat_stack_pivot`
+  asm (`movq %rsp, %rdi; movabsq $lowfat_stack_pivot_2, %rax; callq *%rax;
+  movq %rax, %rsp; retq`) plus `lowfat_stack_pivot_2`: walk `envp` for
+  `stack_bottom`, allocate a low-fat stack, `memcpy` the live range, then
+  scan-and-patch every word that points back into the old range
+  (saved `%rbp`, captured `&local` temporaries, etc.).
+- **Wired into the constructor** — `lowfat_stack_pivot()` is the last call in
+  `lowfat_init`, so `main` runs on the low-fat stack.
+
+### MAP_SHARED + bare `fork()` ⇒ shared physical stack (gtest death-test caveat)
+SPEC's Part III flags this and we hit it the moment we tried to run the gtest
+death tests under the new runtime. `MAP_SHARED` pages do **not** trigger COW
+on fork, so a vanilla `fork()` leaves parent and child reading/writing the
+**same** physical stack bytes — the child segfaults the instant either side
+touches its own stack. Verified via `strace`: the death-test child
+(`gtest_death_test_style=fast`, the default) dies with `SIGSEGV` on its very
+first instructions after `clone()`, before reaching the body. The reference
+solves this with `lowfat_fork.c` (interpose `fork`, create fresh shared-mem
+stacks for the child, `longjmp`); that's Part III work.
+
+Mitigation, in-tree until the fork interposer lands: the gtest test main
+sets `testing::FLAGS_gtest_death_test_style = "threadsafe"` so death tests
+use `fork()+exec()`, giving the child a fresh process whose stack is set up
+from scratch — the shared-physical-bytes alias never bites. All existing
+death tests (`FreeNonHeapPointerErrors`, `BigObjectIsDePaged`, the page-macro
+death tests in `tests/logic/`) verified green under threadsafe mode.
+
+This is a **gtest-internal limitation only.** Real applications under
+`-fsanitize=flexfat` that fork can break in the same way once globals/stack
+lowfatification is fully on — Part III's fork interposer is required for that.
+The e2e tests don't fork; the consolidated gate is unaffected.
+
+### Reference asm trampoline + text relocations under PIE
+The trampoline emits `movabsq $lowfat_stack_pivot_2, %rax`, which under PIE
+produces a text relocation:
+```
+ld: warning: relocation against `lowfat_stack_pivot_2' in read-only section `.text'
+ld: warning: creating DT_TEXTREL in a PIE
+```
+This matches the reference's emission verbatim and is required by
+`-mcmodel=large`. A GOT-relative load would avoid the warning but would
+diverge from the reference asm and pull in a runtime indirection. Kept as-is.
+
+### SPEC §II.1 escape-rule sentence is INVERTED relative to the code
+SPEC line 336 reads "Escape analysis (`doesAllocaEscape`, ≈1343-1414) leaves
+escaping allocas native (non-fat)." **The code does the opposite.**
+`isInterestingAlloca` (LowFat.cpp:1419-1430) returns true exactly when
+`doesAllocaEscape` returns true; only "interesting" allocas reach
+`makeAllocaLowFatPtr`. So **escaping ⇒ low-fat**, **non-escaping ⇒ native**.
+This is the more sensible direction (the static-bounds analysis already
+covers any non-escaping alloca's accesses) and is what Unit 12b will port.
+Recorded here so the next reader doesn't flip it; see also
+[STACK_UNIT.md](STACK_UNIT.md).

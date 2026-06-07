@@ -1,9 +1,20 @@
-# Stack-protection unit — notes (not yet started)
+# Stack-protection unit — notes
 
-Forward notes for the FlexFat stack-protection unit (SPEC §II.1). Records the
-hard prerequisite discovered during Unit 3.
+Forward notes for the FlexFat stack-protection unit (SPEC §II.1). Originally
+recorded as a blocked pre-unit during Unit 3; Unit 12a has landed the
+runtime half and 12b will land the pass half + the MSET flip.
 
-## ⚠ BLOCKED ON: SHM support must land first
+## Status
+
+- **Unit 12a — runtime: SHM + per-class MAP_SHARED stack regions + pivot.**
+  ✅ landed. Gate 51/51. See [STATUS.md](STATUS.md) "Unit 12a — stack runtime"
+  for the full diff and the MAP_SHARED-fork caveat.
+- **Unit 12b — pass: `doesAllocaEscape` + `makeAllocaLowFatPtr` + inlined
+  stack helpers + `-flexfat-no-replace-alloca` + MSET flip.** Pending.
+- **Unit 13 (globals) + Part III (fork interposer, threads, dynamic loader)**
+  are downstream and separate.
+
+## ⚠ HISTORICAL: SHM support must land first (resolved by Unit 12a)
 Stack mirroring cannot be built until the runtime has the shared-memory
 machinery. Concretely it needs:
 - **`lowfat_create_shm`** — create an anonymous, unlinked `/dev/shm` object
@@ -20,6 +31,28 @@ the SIZES/MAGICS tables and does **not** map stack regions or provide
 tables but is exactly the mechanism stack mirroring requires, so **SHM support is
 a hard prerequisite for this unit** — land it (as its own unit or the first step
 here) before any stack work.
+
+## ⚠ SPEC line 336 is INVERTED relative to the reference code
+SPEC §II.1 line 336 reads:
+
+> "Escape analysis (`doesAllocaEscape`, ≈1343-1414) leaves escaping allocas
+> native (non-fat)."
+
+**The reference code does the opposite.** `isInterestingAlloca`
+(LowFat.cpp:1419-1430) returns true exactly when `doesAllocaEscape` returns
+true, and only "interesting" allocas reach `makeAllocaLowFatPtr`. So:
+
+> **An alloca is lowfatified iff `doesAllocaEscape(Alloca) == true` — i.e., its
+> address can be observed outside direct-use channels (stored as a value,
+> passed to a memory-touching call/invoke, ptrtoint that escapes, or
+> recursively through gep/bitcast/select/phi). Allocas only used by load /
+> cmp / self-store / return-of-local / lifetime intrinsics / pure-function
+> calls stay native.**
+
+This is the more sensible direction (the static-bounds analysis from Unit 8
+already covers non-escaping allocas' direct accesses for free; lowfatifying
+them too would only pay the mirror cost without gaining detection).
+**Unit 12b follows the code.**
 
 ## What the unit then needs (SPEC §II.1, for later)
 - Map the stack regions `MAP_SHARED` to the shm fd at init (the loop the Unit-3

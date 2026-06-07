@@ -29,9 +29,11 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <execinfo.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,12 +95,54 @@ static void lowfat_dont_need(void *ptr, size_t size) {
   madvise(ptr, size, MADV_DONTNEED);
 }
 
-static void *lowfat_map(void *addr, size_t len, bool read, bool write) {
+// `fd >= 0` swaps MAP_PRIVATE|MAP_ANONYMOUS for MAP_SHARED — the SHM-aliasing
+// trick the stack regions depend on (same physical bytes at every size-class
+// region's stack sub-range). MAP_FIXED_NOREPLACE keeps the "detect a stray
+// mapping" behavior at our fixed addresses.
+static void *lowfat_map(void *addr, size_t len, bool read, bool write, int fd) {
   int prot = (read ? PROT_READ : 0) | (write ? PROT_WRITE : 0);
-  int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+  int flags = MAP_NORESERVE;
+  if (fd >= 0)
+    flags |= MAP_SHARED;
+  else
+    flags |= MAP_PRIVATE | MAP_ANONYMOUS;
   if (addr != NULL)
     flags |= MAP_FIXED_NOREPLACE;
-  return mmap(addr, len, prot, flags, -1, 0);
+  return mmap(addr, len, prot, flags, fd, 0);
+}
+
+// Anonymous, unlinked /dev/shm object — the fd MAP_SHARED-aliases identical
+// physical bytes at every VA it is mmap'd to. Port of the reference's
+// lowfat_create_shm (lowfat_linux.c:80-107): O_EXCL temp, unlink, F_SETLEASE
+// to fail loud if the path is somehow shared, ftruncate to the requested size.
+// Path bytes come from lowfat_rand for collision avoidance.
+int lowfat_create_shm(size_t size) {
+  char path[] = "/dev/shm/flexfat.XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX.tmp";
+  for (size_t i = 0; i < sizeof(path) - 2; i++) {
+    if (path[i] != 'X' || path[i + 1] != 'X')
+      continue;
+    const char *xdigs = "0123456789ABCDEF";
+    uint8_t rbyte;
+    lowfat_rand(&rbyte, sizeof(rbyte));
+    path[i++] = xdigs[rbyte & 0x0F];
+    path[i] = xdigs[(rbyte >> 4) & 0x0F];
+  }
+  int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0);
+  if (fd < 0)
+    return -1;
+  if (unlink(path) < 0) {
+    close(fd);
+    return -1;
+  }
+  if (fcntl(fd, F_SETLEASE, F_WRLCK) < 0) {
+    close(fd);
+    return -1;
+  }
+  if (ftruncate(fd, (off_t)size) < 0) {
+    close(fd);
+    return -1;
+  }
+  return fd;
 }
 
 static bool lowfat_protect(void *addr, size_t len, bool read, bool write) {
@@ -307,6 +351,118 @@ void lowfat_oob_check(unsigned info, const void *ptr, size_t size0,
 #include "lowfat_memops.c"
 
 //===----------------------------------------------------------------------===//
+// Stack region machinery (Unit 12a): SHM-aliased stack regions, bump
+// allocator for thread stacks, and the pivot trampoline + helper.
+//===----------------------------------------------------------------------===//
+
+#define LOWFAT_STACK_GUARD        (32 * LOWFAT_PAGE_SIZE)
+#define LOWFAT_NUM_THREAD_STACKS  (LOWFAT_STACK_MEMORY_SIZE / LOWFAT_STACK_SIZE)
+#define LOWFAT_STACKS_START                                                    \
+  ((void *)((LOWFAT_STACK_REGION * LOWFAT_REGION_SIZE) +                       \
+            LOWFAT_STACK_MEMORY_OFFSET))
+
+// Saved by lowfat_preinit; lowfat_stack_pivot_2 walks back from this to find
+// the high end of the initial native stack (envp lives at the base).
+static LOWFAT_DATA char **lowfat_envp = NULL;
+
+static LOWFAT_DATA size_t lowfat_stack_freeidx = 0;
+static LOWFAT_DATA lowfat_mutex_t lowfat_stack_mutex;
+
+// Allocate a master-stack slot, then mprotect read+write the slot's mirror in
+// every size-class region listed in lowfat_stacks[]. Single-thread Part-I
+// scope: no freelist reuse, no Fisher-Yates ASLR (added with thread support
+// in Part III). The first call (from the pivot) gets slot 0.
+void *lowfat_stack_alloc(void) {
+  lowfat_mutex_lock(&lowfat_stack_mutex);
+  if (lowfat_stack_freeidx >= LOWFAT_NUM_THREAD_STACKS) {
+    lowfat_mutex_unlock(&lowfat_stack_mutex);
+    errno = ENOMEM;
+    return NULL;
+  }
+  size_t stack_idx = lowfat_stack_freeidx++;
+  lowfat_mutex_unlock(&lowfat_stack_mutex);
+
+  uint8_t *stack = (uint8_t *)LOWFAT_STACKS_START + stack_idx * LOWFAT_STACK_SIZE;
+  uint8_t *stack_lo = stack + LOWFAT_STACK_GUARD;
+  uint8_t *stack_hi = stack + LOWFAT_STACK_SIZE;
+  size_t idx;
+  for (size_t i = 0; (idx = lowfat_stacks[i]) != 0; i++) {
+    ptrdiff_t diff = (uint8_t *)lowfat_region(LOWFAT_STACK_REGION) -
+                     (uint8_t *)lowfat_region(idx);
+    if (mprotect(stack_lo - diff, stack_hi - stack_lo,
+                 PROT_READ | PROT_WRITE) != 0)
+      return NULL;
+  }
+  return stack;
+}
+
+// The pivot's payload (port of lowfat.c:524-575): walk envp to find the high
+// end of the initial native stack, allocate a low-fat stack via
+// lowfat_stack_alloc, memcpy the live range onto it, then rewrite any
+// self-referential pointers that point back into the old range. Returns the
+// new top-of-stack (low address) to the asm trampoline below, which switches
+// %rsp to it.
+extern LOWFAT_NOINLINE void *lowfat_stack_pivot_2(void *stack_top) {
+  if (lowfat_envp == NULL) {
+    fprintf(stderr, "FlexFat: pivot called without envp\n");
+    abort();
+  }
+  char **envp = lowfat_envp;
+  lowfat_envp = NULL;
+  uint8_t *stack_bottom = (void *)envp;
+  while (*envp != NULL) {
+    char *var = *envp;
+    uint8_t *end = (uint8_t *)(var + strlen(var) + 1);
+    stack_bottom = (stack_bottom < end ? end : stack_bottom);
+    envp++;
+  }
+  stack_bottom = (stack_bottom < (uint8_t *)envp ? (uint8_t *)envp : stack_bottom);
+  if (((uintptr_t)stack_bottom % LOWFAT_PAGE_SIZE) != 0)
+    stack_bottom = stack_bottom +
+                   (LOWFAT_PAGE_SIZE - (uintptr_t)stack_bottom % LOWFAT_PAGE_SIZE);
+
+  size_t size = stack_bottom - (uint8_t *)stack_top;
+  uint8_t *stack_base = (uint8_t *)lowfat_stack_alloc();
+  if (stack_base == NULL)
+    lowfat_error("failed to allocate stack: %s", strerror(errno));
+  stack_base += LOWFAT_STACK_SIZE;
+  memcpy(stack_base - size, stack_top, size);
+
+  // Patch any words on the new stack that look like pointers into the OLD
+  // stack range (saved %rbp, captured &local in temporaries, etc.) so they
+  // refer to the new range instead.
+  void *old_stack_lo = stack_top, *old_stack_hi = stack_bottom;
+  void **new_stack_lo = (void **)(stack_base - size),
+       **new_stack_hi = (void **)stack_base;
+  for (void **pptr = new_stack_lo; pptr < new_stack_hi; pptr++) {
+    void *ptr = *pptr;
+    if (ptr >= old_stack_lo && ptr <= old_stack_hi) {
+      ssize_t diff = ((uint8_t *)ptr - (uint8_t *)old_stack_lo);
+      void *new_ptr = (uint8_t *)new_stack_lo + diff;
+      *pptr = new_ptr;
+    }
+  }
+
+  return stack_base - size;
+}
+
+// Tiny asm trampoline (verbatim port of lowfat.c:577-586): stash %rsp into
+// %rdi (lowfat_stack_pivot_2's first arg), call the helper through %rax to
+// stay legal under -mcmodel=large, move the returned new-stack-top into %rsp,
+// then `ret` jumps to the copied-over return address now sitting on the new
+// stack — first instruction after the pivot call executes on the low-fat stack.
+extern LOWFAT_NOINLINE void lowfat_stack_pivot(void);
+__asm__(
+    "\t.align 16, 0x90\n"
+    "\t.type lowfat_stack_pivot,@function\n"
+    "lowfat_stack_pivot:\n"
+    "\tmovq %rsp, %rdi\n"
+    "\tmovabsq $lowfat_stack_pivot_2, %rax\n"
+    "\tcallq *%rax\n"
+    "\tmovq %rax, %rsp\n"
+    "\tretq\n");
+
+//===----------------------------------------------------------------------===//
 // Init: build the tables, reserve the regions, initialise the allocator.
 //===----------------------------------------------------------------------===//
 
@@ -343,11 +499,12 @@ void LOWFAT_CONSTRUCTOR lowfat_init(void) {
   size_t len = total_pages * LOWFAT_PAGE_SIZE;
   size_t entries = len / sizeof(size_t);
 
-  size_t *sizes = (size_t *)lowfat_map((void *)LOWFAT_SIZES, len, true, true);
+  size_t *sizes =
+      (size_t *)lowfat_map((void *)LOWFAT_SIZES, len, true, true, -1);
   if (sizes != (size_t *)LOWFAT_SIZES)
     lowfat_init_error("failed to mmap SIZES table");
   uint64_t *magics =
-      (uint64_t *)lowfat_map((void *)LOWFAT_MAGICS, len, true, true);
+      (uint64_t *)lowfat_map((void *)LOWFAT_MAGICS, len, true, true, -1);
   if (magics != (uint64_t *)LOWFAT_MAGICS)
     lowfat_init_error("failed to mmap MAGICS table");
 
@@ -368,7 +525,8 @@ void LOWFAT_CONSTRUCTOR lowfat_init(void) {
   // Reserve each size-class region (PROT_NONE, MAP_NORESERVE).
   for (size_t i = 1; i <= LOWFAT_NUM_REGIONS; i++) {
     void *heap_start = (uint8_t *)lowfat_region(i) + LOWFAT_HEAP_MEMORY_OFFSET;
-    void *ptr = lowfat_map(heap_start, LOWFAT_HEAP_MEMORY_SIZE, false, false);
+    void *ptr =
+        lowfat_map(heap_start, LOWFAT_HEAP_MEMORY_SIZE, false, false, -1);
     if (ptr != heap_start)
       lowfat_init_error("failed to reserve region");
   }
@@ -377,13 +535,41 @@ void LOWFAT_CONSTRUCTOR lowfat_init(void) {
   if (!lowfat_malloc_init())
     lowfat_init_error("failed to initialise allocator");
   lowfat_malloc_inited = true;
+
+  // Stack regions: every entry in lowfat_stacks[] (each size-class region that
+  // owns a stack sub-range, plus LOWFAT_STACK_REGION = the master region) is
+  // mapped MAP_SHARED to one shm fd, so the same physical bytes are visible
+  // at every mirror — the foundation for lowfat_stack_mirror's constant add.
+  if (!lowfat_mutex_init(&lowfat_stack_mutex))
+    lowfat_init_error("failed to init stack mutex");
+  {
+    int fd = lowfat_create_shm(LOWFAT_STACK_MEMORY_SIZE);
+    if (fd < 0)
+      lowfat_init_error("failed to create stack shm");
+    size_t idx;
+    for (size_t i = 0; (idx = lowfat_stacks[i]) != 0; i++) {
+      void *stack_start =
+          (uint8_t *)lowfat_region(idx) + LOWFAT_STACK_MEMORY_OFFSET;
+      void *ptr =
+          lowfat_map(stack_start, LOWFAT_STACK_MEMORY_SIZE, false, false, fd);
+      if (ptr != stack_start)
+        lowfat_init_error("failed to map stack region");
+    }
+    if (close(fd) < 0)
+      lowfat_init_error("failed to close stack shm fd");
+  }
+
+  // Pivot the live native stack onto a low-fat stack. After this returns we
+  // are executing on the new stack — &local in main(...) classifies as stack,
+  // not nonfat.
+  lowfat_stack_pivot();
 }
 
 // Run before ordinary constructors (matches the reference .preinit_array entry).
 static void lowfat_preinit(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
-  (void)envp;
+  lowfat_envp = envp;
   lowfat_init();
 }
 __attribute__((used, section(".preinit_array"))) static void (
