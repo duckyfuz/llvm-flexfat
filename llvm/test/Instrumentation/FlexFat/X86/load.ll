@@ -4,6 +4,11 @@
 ; (A *direct* deref of an input pointer is now elided by Unit 8's bounds
 ; analysis, so this uses a dynamic GEP, which stays checked.)
 ;
+; Unit 17: CHECK lines verify the non-POW2 reciprocal-multiply lowering
+; (`mul i128`, `_LOWFAT_MAGICS` load at 0x300000). The POW2 variant emits
+; `and i64 %iptr, %magic` instead and has no SIZES-table multiply.
+; REQUIRES: flexfat-nonpow2
+;
 ; RUN: opt < %s -passes=flexfat -S | FileCheck %s
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"

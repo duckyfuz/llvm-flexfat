@@ -3,6 +3,8 @@
 // the runtime's stack allocator (b) called pthread_attr_setstack with that
 // stack so the new thread executes on a lowfat slot.
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat_runtime -O2 %s -o %t -lpthread
 // RUN: %run %t
 

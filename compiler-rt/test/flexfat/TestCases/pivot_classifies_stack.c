@@ -3,6 +3,8 @@
 // pointer — NOT nonfat. The pass itself is unchanged in 12a (no alloca
 // transform yet); this test exercises only the runtime's pivot machinery.
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat_runtime -O0 %s -o %t
 // RUN: %run %t
 //

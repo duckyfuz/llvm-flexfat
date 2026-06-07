@@ -602,3 +602,80 @@ target — performance is measured, not asserted.
   audit confirming the over-instrumentation hypothesis is not in
   play (max NumChecks = 2, NumUnknownProducers = 0 across the
   corpus).
+
+
+## Unit 17 — POW2 end-to-end port (closes Unit 16's audit finding)
+
+### Build-system variant selector
+- **~** `llvm/lib/Transforms/Instrumentation/CMakeLists.txt` — adds
+  `LLVM_FLEXFAT_POW2` option (default OFF); passes
+  `-DFLEXFAT_IS_POW2=1` to `FlexFat.cpp` when ON.
+- **~** `compiler-rt/lib/flexfat/CMakeLists.txt` — reads same option;
+  `configure_file`s the variant's `lowfat_config.{c,h}` into the build
+  dir; selects the variant's `lowfat.ld` for install; selects the
+  variant's `lowfat_config.c` for the TID/JOINID validator. Build-dir
+  include path prepended so the runtime picks the variant copy.
+- **~** `compiler-rt/lib/flexfat/tests/CMakeLists.txt` — passes
+  `-DFLEXFAT_IS_POW2=…` to the gtest build; prepends build-dir to
+  include path so the variant's `lowfat_config.h` wins.
+
+### Pass-side variant dispatch
+- **~** `llvm/lib/Transforms/Instrumentation/FlexFat.cpp` —
+  `#if FLEXFAT_IS_POW2` dispatch over which size table to `#include`;
+  `emitInlineBase` gains a POW2 branch (single `and` instead of the
+  128-bit reciprocal multiply).
+- **+** `llvm/lib/Transforms/Instrumentation/FlexFatSizes_nonpow2.inc` —
+  non-POW2 size table (formerly `FlexFatSizes.inc`).
+- **+** `llvm/lib/Transforms/Instrumentation/FlexFatSizes_pow2.inc` —
+  POW2 size table (committed from `flexfat/config/golden/pow2/`).
+- **−** `llvm/lib/Transforms/Instrumentation/FlexFatSizes.inc` (removed
+  in favor of the two per-variant copies above).
+
+### Runtime-side variant dispatch
+- **~** `compiler-rt/lib/flexfat/lowfat.c` — `#include` of
+  `lowfat_config.c` switched to angle-bracket (`<lowfat_config.c>`) so
+  it resolves to the build-dir (variant-selected) copy, not the
+  committed (still-non-POW2) source-dir copy.
+
+### Gtest variant gates
+- **~** `compiler-rt/lib/flexfat/tests/flexfat_encoding_test.cpp` —
+  `#if !FLEXFAT_IS_POW2` around `RuntimeTablesAndIndexZero` and
+  `PtrInfoWorkedExample` (both bake non-POW2 magic / SPEC §1.4 values).
+- **~** `compiler-rt/lib/flexfat/tests/flexfat_malloc_test.cpp` —
+  `#if !FLEXFAT_IS_POW2` around `EverySizeClassRoundTrips` and
+  `MallocIndex`.
+
+### Lit feature variant gates
+- **~** `llvm/test/lit.site.cfg.py.in` — exposes
+  `config.flexfat_is_pow2` from `LLVM_FLEXFAT_POW2`.
+- **~** `llvm/test/Instrumentation/FlexFat/X86/lit.local.cfg` — adds
+  `flexfat-pow2` / `flexfat-nonpow2` feature based on the root config.
+- **~** `compiler-rt/test/flexfat/lit.site.cfg.py.in` and
+  `compiler-rt/test/flexfat/lit.cfg.py` — same shape on the e2e side.
+- **~** 3 LLVM IR tests (`load.ll`, `store.ll`, `optimize_malloc.ll`)
+  gain `; REQUIRES: flexfat-nonpow2` — CHECK lines bake non-POW2
+  codegen / size-class assumptions.
+- **~** 10 e2e tests (`stack_oob.c`, `malloc_class.c`,
+  `global_classify.c`, `thread_stack_oob.c`, `stack_heavy_clean.c`,
+  `threads_alloc_stress.c`, `thread_classify.c`, `fork_isolation.c`,
+  `pivot_classifies_stack.c`, `fork_oob.c`) gain
+  `// REQUIRES: flexfat-nonpow2`.
+
+### Sizes-sync drift guard
+- **~** `flexfat/config/test/sizes-sync.test` — variant-agnostic; now
+  asserts BOTH committed pass tables match BOTH goldens and BOTH match
+  the corresponding `lowfat_sizes[]` in their golden `lowfat_config.c`.
+
+### POW2 end-to-end (new)
+- **+** `compiler-rt/test/flexfat/TestCases/pow2_heap_boundary.c` —
+  `REQUIRES: flexfat-pow2`. `malloc(63)` → POW2 class 64;
+  `scribble(p, 63)` succeeds; `scribble(p, 64)` traps with
+  `operation = write`, `size = 64`. First test ever to build and run
+  a POW2 binary.
+
+### POW2 perf evidence
+- **+** `flexfat/perf/results/run_pow2.tsv` — canonical POW2 matrix
+  (N=10 × 3 configs × 5 benchmarks).
+- **+** `flexfat/perf/results/stats_pow2.txt` — STATISTIC counters
+  under the POW2 build; identical to non-POW2 because the sizes table
+  shape doesn't change check density on this corpus.

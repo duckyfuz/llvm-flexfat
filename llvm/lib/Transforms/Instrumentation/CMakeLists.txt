@@ -1,3 +1,22 @@
+# FlexFat variant selector (Unit 17). LowFat has two encoding variants:
+# non-POW2 (default, sizes.cfg, 61 regions, reciprocal-magic) and POW2
+# (sizes2.cfg, 30 regions, bitmask-magic). The pass folds heap_select() at
+# compile time from a per-variant size table and emits an inline lowfat_base
+# whose codegen is variant-specific (POW2 = single `and`; non-POW2 = 128-bit
+# mulq). The pass and the runtime MUST build for the same variant -- a
+# mismatch sends constant mallocs to invalid regions (Unit 17 root-cause).
+# Both variants' size tables are committed alongside FlexFat.cpp; the
+# active one is picked by FLEXFAT_IS_POW2 at compile time.
+set(LLVM_FLEXFAT_POW2 OFF CACHE BOOL
+    "Build FlexFat for the POW2 (sizes2.cfg) encoding variant.")
+if(LLVM_FLEXFAT_POW2)
+  set_source_files_properties(FlexFat.cpp
+      PROPERTIES COMPILE_DEFINITIONS "FLEXFAT_IS_POW2=1")
+  message(STATUS "FlexFat: variant = POW2")
+else()
+  message(STATUS "FlexFat: variant = non-POW2 (default)")
+endif()
+
 add_llvm_component_library(LLVMInstrumentation
   AddressSanitizer.cpp
   AllocToken.cpp

@@ -6,6 +6,8 @@
 // lowfat_base(&g) recovers the object's class base, and lowfat_size(&g)
 // returns the class size (16, the smallest class).
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat_runtime -O2 %s -o %t
 // RUN: %run %t
 #include <stdio.h>

@@ -2,6 +2,10 @@
 ; an inlined bounds check. calcBasePtr recurses GEP -> argument; the access
 ; pointer is the GEP; info = WRITE (1).
 ;
+; Unit 17: CHECK lines verify the non-POW2 reciprocal-multiply lowering.
+; The POW2 variant emits `and` for the base computation.
+; REQUIRES: flexfat-nonpow2
+;
 ; RUN: opt < %s -passes=flexfat -S | FileCheck %s
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"

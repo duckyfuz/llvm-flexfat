@@ -4,6 +4,8 @@
 // keep the freelists consistent. Deadlock or corruption shows up as
 // hang/segv; success is `exit 0` at -O0 and -O2.
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat -O2 %s -o %t -lpthread
 // RUN: %run %t
 //

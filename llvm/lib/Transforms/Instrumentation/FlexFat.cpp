@@ -365,15 +365,29 @@ static bool isInterestingAlloca(llvm::Instruction *I) {
   return doesAllocaEscape(A, Seen);
 }
 
-// Heap size classes (non-POW2 default). SINGLE-SOURCED with the runtime: the
-// Unit 2 generator (flexfat/config/lowfat-config.c) emits this `.inc` and the
-// runtime's lowfat_sizes[] from the same sizes.cfg run, so the pass cannot
-// hand-drift from the runtime. A byte-for-byte drift guard
+// Heap size classes -- per encoding variant. SINGLE-SOURCED with the runtime:
+// the Unit 2 generator (flexfat/config/lowfat-config.c) emits this `.inc` and
+// the runtime's lowfat_sizes[] from the same sizes.cfg / sizes2.cfg run, so
+// the pass cannot hand-drift from the runtime. A byte-for-byte drift guard
 // (flexfat/config/test/sizes-sync.test) and a behavioral e2e
 // (compiler-rt/test/flexfat/TestCases/malloc_class.c) fail the build if they
 // ever diverge. Region index `i` (1-based) has class size kLowFatSizes[i-1].
+//
+// Unit 17: the variant is a build-time choice (LLVM_FLEXFAT_POW2). Both
+// variant tables are committed; FLEXFAT_IS_POW2 (CMake-driven, default 0)
+// picks the active one. The runtime is built for the SAME variant via
+// compiler-rt's matching option; mismatch is a runtime fault, not a silent
+// miscompile (heap_select returns a non-POW2 idx that the POW2 runtime
+// regioninfo can't service -- gdb-traced to lowfat_malloc_index pre-fix).
+#ifndef FLEXFAT_IS_POW2
+#define FLEXFAT_IS_POW2 0
+#endif
 static constexpr uint64_t kLowFatSizes[] = {
-#include "FlexFatSizes.inc"
+#if FLEXFAT_IS_POW2
+#include "FlexFatSizes_pow2.inc"
+#else
+#include "FlexFatSizes_nonpow2.inc"
+#endif
 };
 static constexpr unsigned kNumRegions =
     sizeof(kLowFatSizes) / sizeof(kLowFatSizes[0]);
@@ -637,9 +651,10 @@ FlexFat::nextInsertPoint(Value *Ptr) {
   return {&Entry, Entry.begin()};
 }
 
-// The inlined non-POW2 lowfat_base (LowFat.cpp:1128-1160): reconstruct the
-// object base from the pointer using the reciprocal-multiply magic. Emitted
-// right after the pointer's definition; no integer division.
+// The inlined lowfat_base, variant-specific (LowFat.cpp:1128-1160 non-POW2
+// path; lowfat.h's #ifdef LOWFAT_IS_POW2 bitmask path for POW2). POW2 emits a
+// single `and ptr, magic`; non-POW2 emits the 128-bit reciprocal multiply.
+// Emitted right after the pointer's definition; no integer division either way.
 Value *FlexFat::emitInlineBase(Value *Ptr) {
   auto IP = nextInsertPoint(Ptr);
   IRBuilder<> B(&*IP.first, IP.second);
@@ -648,7 +663,11 @@ Value *FlexFat::emitInlineBase(Value *Ptr) {
   Value *Idx = B.CreateLShr(IPtr, B.getInt64(kRegionSizeShift));
   Value *Magic = B.CreateAlignedLoad(I64Ty, tableSlot(B, kMagicsAddr, Idx),
                                      Align(sizeof(uint64_t)));
-  // objidx = ((u128)iptr * (u128)magic) >> 64
+#if FLEXFAT_IS_POW2
+  // POW2: base = ptr & magic. Single bitmask op; magic = ~(size-1).
+  Value *IBase = B.CreateAnd(IPtr, Magic);
+#else
+  // non-POW2: objidx = ((u128)iptr * (u128)magic) >> 64; base = objidx * size.
   Value *IPtr128 = B.CreateZExt(IPtr, I128Ty);
   Value *Magic128 = B.CreateZExt(Magic, I128Ty);
   Value *Prod = B.CreateMul(IPtr128, Magic128);
@@ -657,6 +676,7 @@ Value *FlexFat::emitInlineBase(Value *Ptr) {
   Value *Size = B.CreateAlignedLoad(I64Ty, tableSlot(B, kSizesAddr, Idx),
                                     Align(sizeof(uint64_t)));
   Value *IBase = B.CreateMul(ObjIdx, Size);
+#endif
   return B.CreateIntToPtr(IBase, PtrTy);
 }
 

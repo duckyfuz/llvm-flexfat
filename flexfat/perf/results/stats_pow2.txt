@@ -1,0 +1,36 @@
+=== heap_churn :: flexfat_full ===
+     2 flexfat                      - Number of FlexFat bounds checks inserted
+     6 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== heap_churn :: flexfat_hardened ===
+     1 flexfat                      - Number of FlexFat bounds checks inserted
+     1 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== array_sum :: flexfat_full ===
+     7 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== array_sum :: flexfat_hardened ===
+     1 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== linked_list :: flexfat_full ===
+     1 flexfat                      - Number of FlexFat bounds checks inserted
+     5 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== linked_list :: flexfat_hardened ===
+     2 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== memcpy_bulk :: flexfat_full ===
+     2 flexfat                      - Number of FlexFat bounds checks inserted
+     5 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== memcpy_bulk :: flexfat_hardened ===
+     1 flexfat                      - Number of FlexFat bounds checks inserted
+     2 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== opaque_access :: flexfat_full ===
+     2 flexfat                      - Number of FlexFat bounds checks inserted
+     4 flexfat                      - Number of FlexFat bounds checks elided (proven in-bounds)
+
+=== opaque_access :: flexfat_hardened ===
+     1 flexfat                      - Number of FlexFat bounds checks inserted
+

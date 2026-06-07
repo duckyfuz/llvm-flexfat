@@ -23,7 +23,8 @@ LLVM 23-dev (see [LLVM_NOTES.md](LLVM_NOTES.md)). Footprint: [INTREE_TOUCHPOINTS
 | 14a | Threads + build gate: `pthread_create` interposer (`dlsym(RTLD_NEXT, …)`) allocates a lowfat slot via `lowfat_stack_alloc`, sets it via `pthread_attr_setstack`, and pushes the slot to a reclamation freelist; `lowfat_is_thread_dead` reads TID/JOINID at the configured offsets to reclaim slots when their owner thread has joined (`tid==-1`) or detached + died (`tid==0 && joinid==thread`); Fisher-Yates shuffle of `lowfat_stack_perm[128]` ASLRs the slot pick order. **Build gate** — `flexfat_check_config` builds & runs the offset validator against host glibc at compile time; mismatch fails the build with named expected-vs-found offsets (negative control confirmed: corrupt JOINID → build fails with the exact message; restore → green). Fork interposer is Unit 14b — until then, the gtest threadsafe death-test mitigation from 12a stays. Gate is **71/71** | ✅ |
 | 14b | Fork interposer: `clone(SIGCHLD)` onto a 4-page anonymous-shared temp stack with `setjmp`'d env at the top → child does (1) `lowfat_create_shm` fresh stack-memory object, (2) `mmap MAP_SHARED\|MAP_FIXED` over size-class 1's stack range to the fresh fd + `mprotect`+`memcpy` parent's live stack pages, (3) `pthread_cond_signal` parent on PROCESS_SHARED cond var, (4) loop remap of every remaining stack mirror to the same fresh fd, (5) `longjmp` back into `lowfat_fork()`'s setjmp frame on the now-private master stack. **12a MAP_SHARED fork hazard closed** (red→green: `fork_isolation.c` SEGSEGV'd at exit 139 against 14a runtime, exits 0 isolated under 14b); the 12a `gtest_death_test_style = "threadsafe"` mitigation is REVERTED (fast-mode death tests safe again, verified). Direct `clone()` callers remain unsupported (matches reference). Gate is **73/73** | ✅ |
 | 15 | Escape checks at the 5 sites (lowfat.h:45-49): ESCAPE_CALL/RETURN/STORE/PTR2INT/INSERT. Each pointer-typed argument to a memory-impure call/invoke, each pointer-typed return value, each pointer-typed `store` VALUE, each non-trivially-escaping `ptrtoint` (whose source isn't an "ugly GEP", verbatim carve-out from LowFat.cpp:854-863), and each pointer-typed `insertvalue`/`insertelement` inserted operand gets a Unit-7-strategy bounds check before the site with the correct info code. Umbrella `-flexfat-no-check-escapes` (Unit-10 forward-decl) finally functional and joined by the five granular `-flexfat-no-check-escape-{call,return,store,ptr2int,insert}` flags Unit 10 skipped. e2e reports match the reference wording exactly (`operation = escape (call)` / `(return)` / `(store)`). No false positives on the prior 75-test suite. **MSET differential 96/96 — 100% parity with the reference oracle** (Unit 13's 78 → 96, +18 net, 0 lost). Trap-line audit: the 18 newly-detected types trap on a MIX of `operation = read` (Unit-7 access check, via `calcBasePtr` tracing the GEP to the origin alloca/malloc/global) and `operation = escape (call|store)` (Unit-15 escape sites). Unit 13's "architectural floor of 18" framing was wrong: the floor is a property of access-site checking WHEN `calcBasePtr` cannot trace to the origin, and the MSET corpus's GEPs are all compile-visible from the origin; Unit-13's TYPE-level UNDETECTED was caused by escape-only sub-cases that Unit 15 now closes. Gate is **85/85** | ✅ |
-| 16 | Performance parity measurement (project closing). 5-benchmark synthetic micro-corpus at -O2 under `flexfat/perf/benchmarks/`; matrix = {uninstrumented, flexfat-full, flexfat-hardened} × {non-POW2} × N=10 runs, median + IQR. SPEC2006 not available; corpus is INDICATIVE not directly comparable. **Mean overhead non-POW2: full +5.6%, hardened +2.6%** (vs reference SPEC2006 ~64% / ~9.8%). Under the targets, not over — over-instrumentation hypothesis ruled out by STATISTIC counter audit (`NumChecks` ≤ 2 per benchmark, `NumUnknownProducers = 0`; Unit-8 elides aggressively on constant-bounded patterns). Notable: `heap_churn` runs **−19.5% FASTER** under FlexFat (lowfat_malloc beats glibc malloc on this churn pattern, matches reference README's same finding); `opaque_access` is the only benchmark that defeats Unit-8 elision and shows the cleanest hardened-vs-full delta (−10.5 pp). **POW2 variant NOT measured — runtime port incomplete**: `compiler-rt/lib/flexfat/lowfat_malloc.c` has no `#ifdef LOWFAT_IS_POW2` branches; allocator path assumes the 61-region/reciprocal-magic layout. Swap attempt segfaulted in `lowfat_malloc_index` on heap_churn and memcpy_bulk; restored cleanly, gate still 85/85. Documented gap. Gate is **85/85** | ✅ |
+| 16 | Performance parity measurement. 5-benchmark synthetic micro-corpus at -O2 under `flexfat/perf/benchmarks/`; matrix = {uninstrumented, flexfat-full, flexfat-hardened} × {non-POW2} × N=10 runs, median + IQR. SPEC2006 not available; corpus is INDICATIVE not directly comparable. **Mean overhead non-POW2: full +5.6%, hardened +2.6%** (vs reference SPEC2006 ~64% / ~9.8%). Under the targets, not over — over-instrumentation hypothesis ruled out by STATISTIC counter audit (`NumChecks` ≤ 2 per benchmark, `NumUnknownProducers = 0`; Unit-8 elides aggressively on constant-bounded patterns). Notable: `heap_churn` runs **−19.5% FASTER** under FlexFat (lowfat_malloc beats glibc malloc on this churn pattern, matches reference README's same finding); `opaque_access` is the only benchmark that defeats Unit-8 elision and shows the cleanest hardened-vs-full delta (−10.5 pp). **POW2 attempted, surfaced a SIGSEGV correctness finding — root-caused and reclassified as Unit 17** (the project's true closing unit, which ports POW2 end-to-end and measures the POW2 matrix). Gate is **85/85** | ✅ |
+| 17 | POW2 end-to-end port — closes Unit 16's audit finding. **Audit recorded**: every prior POW2 "parity" claim was (a) config/golden byte-diff or (b) encoding-arithmetic gtest; no test ever built+ran a POW2 binary. **Root-cause** (one sentence, gdb-traced): `optimizeMalloc` folds the constant-malloc `idx` host-side using a non-POW2-only `FlexFatSizes.inc`, producing `idx=45` for `malloc(65536)`; the POW2 runtime's 30-entry `LOWFAT_REGION_INFO` array doesn't service idx>30, so the next field load past the array end (`info->freelist` at +0x28) segfaults. **What landed**: single `LLVM_FLEXFAT_POW2` CMake option (default OFF) threaded through pass + runtime + lit; two committed per-variant pass tables (`FlexFatSizes_{nonpow2,pow2}.inc`) selected by `#if FLEXFAT_IS_POW2`; POW2 branch in `emitInlineBase` (single `and`); runtime variant select via `configure_file` of `lowfat_config.{c,h}` + `lowfat.ld`; gtest `#if !FLEXFAT_IS_POW2` gates for 4 non-POW2-only cases; lit feature `flexfat-{pow2,nonpow2}` with 13 `REQUIRES: flexfat-nonpow2` retrofits; one new POW2 e2e (`pow2_heap_boundary.c`: `malloc(63)` → class 64, `p[63]` OK, `p[64]` traps with `size=64`) — **first test ever to build and run a POW2 binary**. **POW2 perf matrix landed** (Unit 16's deferred row closed): full +4.6% mean, hardened +2.2% mean — ~1 pp under non-POW2, matching the reference's ~2 pp delta direction. Variant-aware gate: **86/85+1us non-POW2 default**, **82/69+13us POW2**, 0 failed either variant. The CLAUDE.md "support both variants" mandate is now end-to-end true | ✅ |
 
 Default shipped runtime config: **non-POW2** (matches `build.sh` default + SPEC §1.4).
 
@@ -1752,7 +1753,7 @@ signal.
 |---|---:|---:|---:|
 | full non-POW2 | +5.6% | ~64% | −58 pp |
 | hardened non-POW2 | +2.6% | ~9.8% | −7 pp |
-| hardened POW2 | (deferred) | ~7.8% | — |
+| hardened POW2 | **+2.2%** (Unit 17) | ~7.8% | −5.6 pp |
 
 The full-config gap is large. Two compatible explanations, in
 priority order:
@@ -1800,7 +1801,7 @@ e2e/MSET corpora (it doesn't — Unit 15 closed at 96/96 parity).
 The instrumentation density is correct; the corpus just happens
 to be Unit-8-friendly.
 
-### POW2 variant — **NOT MEASURED, runtime port incomplete**
+### POW2 variant — **attempted, SIGSEGV surfaced, reclassified as Unit 17**
 
 POW2 measurement was attempted by swapping
 `compiler-rt/lib/flexfat/lowfat_config.c` for the POW2 generated
@@ -1809,37 +1810,182 @@ for POW2's, and re-running the matrix. Three benchmarks
 (`array_sum`, `linked_list`, `opaque_access`) ran; **two
 benchmarks (`heap_churn`, `memcpy_bulk`) segfaulted in
 `lowfat_malloc_index`** (`gdb` confirms PC at offset `0x6c8`
-inside the runtime). The header-side POW2 paths are present
-(`lowfat.h` `lowfat_base` has the `#ifdef LOWFAT_IS_POW2`
-bitmask path; `lowfat_objidx` is non-POW2-only by design), but
-`compiler-rt/lib/flexfat/lowfat_malloc.c` has **no
-`#ifdef LOWFAT_IS_POW2` branches** — the heap allocator was
-ported assuming the non-POW2 layout (61 regions, reciprocal
-magic). The POW2 config's 30-region layout with bitmask magic
-breaks `lowfat_malloc_index`'s region/size computations for
-allocations whose POW2 size class differs from the non-POW2
-size class.
+inside the runtime).
 
-This is a **real porting gap**, not a measurement bug. The
-reference's runtime supports POW2 in the heap allocator; we
-didn't port that path. State and runtime were restored to
-non-POW2 immediately; `check-flexfat` re-verified at **85/85**
-post-restore.
+**Initial framing (wrong)**: deferred runtime porting; "real porting
+gap." **Correct framing (Unit 17)**: a CORRECTNESS finding, not a
+perf deferral. The audit in Unit 17 establishes that every prior
+POW2 "parity" claim was config-byte-diff or encoding-arithmetic only
+— no test ever built+ran a POW2 binary. The root cause is more
+structural than `lowfat_malloc.c` missing `#ifdef`s: the PASS's
+`FlexFatSizes.inc` was single-sourced from `sizes.cfg` (non-POW2)
+and committed alongside the pass; `optimizeMalloc` folded the wrong
+`idx` host-side; `emitInlineBase` had no POW2 branch either. Unit 17
+ports the end-to-end variant correctly with a single
+`LLVM_FLEXFAT_POW2` CMake option, lands one POW2 e2e, and measures
+the POW2 perf matrix (+2.2% hardened mean). See the Unit 17 section
+for the audit table, root-cause sentence, and the as-landed code
+changes.
 
-**Deferred to follow-up:** porting `lowfat_malloc.c` (and
-likely the stack/global classifiers that key off region count)
-to a `#ifdef LOWFAT_IS_POW2` branch, then re-running the POW2
-half of this matrix. Based on the reference's 9.8% → 7.8% gap
-(~2 pp), POW2 hardened on this corpus would be expected around
-+0.5% mean — likely below the noise floor of these short
-benchmarks.
-
-### Final-unit gate
-- `check-flexfat` 85/85 (no new test surfaces added; the perf
-  harness is a build-and-run system under `flexfat/perf/`, not
-  a lit suite).
+### Final-unit gate (Unit 17 supersedes)
+- Non-POW2 default: 86 tests, 85 passed, 1 unsupported (the POW2
+  e2e). POW2 build: 82, 69 passed, 13 unsupported. 0 failed in
+  either variant.
 - Performance corpus committed under `flexfat/perf/`:
   benchmarks, scripts (`run_matrix.sh`, `stats_matrix.sh`,
-  `analyze.py`), and the canonical non-POW2 result/stats files.
-- POW2 port gap documented (above) as the one known
-  reference-parity deferral remaining at branch close.
+  `analyze.py`), and **both** variant result/stats files
+  (`run_nonpow2.tsv`, `run_pow2.tsv`, `stats_nonpow2.txt`,
+  `stats_pow2.txt`).
+- No known reference-parity deferral remains at branch close
+  (Unit 17 closed the POW2 deferral that Unit 16's first draft
+  documented).
+
+
+## Unit 17 — POW2 end-to-end port (closes Unit 16's audit finding)
+
+Unit 16 attempted to measure the POW2 perf matrix and instead surfaced a
+SIGSEGV in `lowfat_malloc_index`. Initial framing was "deferred runtime
+porting." The user pushed back: the segfault is a CORRECTNESS finding, and
+the right close is either (a) finish the POW2 path, or (b) explicit scope
+descope with all prior parity claims struck. **(a) was chosen.**
+
+### Audit — what prior POW2 "parity" actually tested
+
+| Unit | Claim in table row | What ran for POW2 | Category |
+|---|---|---|---|
+| 2 | "Config/table generator (byte-identical to reference, **POW2** + non-POW2)" | `flexfat/config/test/pow2-parity.test`: regenerates `lowfat_config.{c,h}` + `lowfat.ld` + `flexfat_sizes.inc` from `sizes2.cfg` via the generator, `diff -u` vs `golden/pow2/`. | **(a) static config/golden** — pure byte-diff of generator output. No runtime, no pass, no codegen. |
+| 3 | "Runtime pointer-encoding core … codegen parity (**POW2 `and`**, non-POW2 `mulq`, no `div`)" | `flexfat_encoding_test.cpp::FlexFatEncoding.Pow2BaseFormula`: a gtest that uses LOCALLY-DEFINED `Pow2Magic`/`Pow2Base` math helpers and asserts `Pow2Base(p, magic) == TruthBase(p, size)`. NEVER calls `lowfat_base()` from the runtime in POW2 mode — runtime is built non-POW2-only. | **(b) encoding arithmetic only** — pure math sanity. |
+| 3 | "codegen parity (POW2 `and`)" sub-claim (STATUS §"Known divergences" lines 202-208) | Side-by-side asm diff against the REFERENCE's pre-built POW2 clang binary, documenting that the reference emits `andq` for POW2. Compared the reference's output to ours; never built ours in POW2 to see what we emit. | **(b)/observational** — observed reference's binary, not FlexFat's. The pass's `emitInlineBase` had no POW2 branch (verified in source). |
+| 7 | "load/store bounds-check instrumentation … inlined non-POW2 `lowfat_base`" | `load.ll` / `store.ll`: assert non-POW2 reciprocal-multiply CHECK lines. The unit row itself says "non-POW2 `lowfat_base`" — the POW2 code-emission path didn't exist. | **none for POW2.** |
+| 16 | "hardened POW2 ~7.8%" listed as deferred in the gap table | Never measured. Attempt segfaulted, restored. | **none.** |
+
+**Recorded finding:** every prior POW2 "parity" claim is (a) or (b). The
+end-to-end loop — build a binary with `-fsanitize=flexfat`, link the POW2
+runtime, run it — was never closed. The gap was invisible because **no test
+built+ran a POW2 binary**.
+
+### Root-cause sentence (one)
+
+When `optimizeMalloc` (FlexFat.cpp ~996) folds a constant-size `malloc` to
+`lowfat_malloc_index(idx, K)`, it computes `idx` at compile time using the
+host-side `flexfatHeapSelect` (FlexFat.cpp ~384) which `#include`s the
+committed (non-POW2-only) `FlexFatSizes.inc`; under a POW2 runtime the
+`LOWFAT_REGION_INFO` array is sized for 30 regions, so the non-POW2
+`idx`-for-large-size (e.g. 45 for `malloc(65536)`) indexes past the array
+end and the next field load (`info->freelist`, offset 0x28 from the
+out-of-bounds entry) dereferences uninitialized memory. **GDB-confirmed:**
+`r13 = 0x40bfe8` (LOWFAT_REGION_INFO base + 3240 bytes = entry 45);
+`LOWFAT_REGION_INFO` ends at `base + 0x8b8 = base + 2232` (entry 30); the
+load `mov 0x28(%r13), %rbx` faults reading past the end.
+
+This was **structural**, not a one-line `#ifdef` in `lowfat_malloc.c`: the
+single-sourced sizes table baked the non-POW2 schedule into the pass at
+LLVM build time, and the runtime's `lowfat_config.c` was a committed
+nonpow2 copy. Both sides had to gain a build-time variant selector.
+
+### Decision (recorded)
+
+**Option (a): port POW2 end-to-end.** Chosen by the user when presented
+with the binary choice of (a) fix the port or (b) descope POW2 and strike
+the parity claims everywhere. (b) would have contradicted CLAUDE.md's
+"support both variants" mandate and was not the right close.
+
+### What landed (this unit)
+
+**Build-time variant selector** — single `LLVM_FLEXFAT_POW2` CMake option
+(default OFF), threaded through both the LLVM pass and the compiler-rt
+runtime, sized-table-and-runtime-config kept in lockstep:
+
+- `llvm/lib/Transforms/Instrumentation/CMakeLists.txt` — passes
+  `-DFLEXFAT_IS_POW2=1` to `FlexFat.cpp` when the option is ON.
+- Pass-side sizes table — `FlexFatSizes.inc` removed in favor of
+  `FlexFatSizes_{nonpow2,pow2}.inc` (both committed alongside the pass);
+  `FlexFat.cpp` `#if FLEXFAT_IS_POW2 / #include` dispatches.
+- Pass-side `emitInlineBase` — single `and` for POW2, reciprocal multiply
+  for non-POW2 (`#if FLEXFAT_IS_POW2` branch around the half that emits
+  the magic/size table load and 128-bit `mul`).
+- `compiler-rt/lib/flexfat/CMakeLists.txt` — `configure_file`s the
+  variant's `lowfat_config.{c,h}` into the build dir at config time;
+  prepends the build dir to the runtime's include path. `lowfat.c` switched
+  to `#include <lowfat_config.c>` (angle-bracket) so the build-dir copy
+  wins over the (still-committed-nonpow2) source-dir copy. `lowfat.ld`
+  installation now points at the variant directory.
+- Gtest CMake — passes `-DFLEXFAT_IS_POW2=…` to the gtest build; encoding
+  tests gate non-POW2-only cases (`RuntimeTablesAndIndexZero`,
+  `PtrInfoWorkedExample`) and malloc tests gate `EverySizeClassRoundTrips`
+  / `MallocIndex` with `#if !FLEXFAT_IS_POW2`.
+
+**Lit feature** — `flexfat-pow2` / `flexfat-nonpow2`, threaded through
+both the LLVM IR test surface (`llvm/test/lit.site.cfg.py.in` +
+`Instrumentation/FlexFat/X86/lit.local.cfg`) and the compiler-rt e2e
+surface (`compiler-rt/test/flexfat/lit.site.cfg.py.in` +
+`lit.cfg.py`). Non-POW2-only tests carry `REQUIRES: flexfat-nonpow2`
+(3 IR tests baking non-POW2 CHECK lines, 10 e2e tests baking non-POW2
+class sizes / region counts / thread-stack assumptions).
+
+**Sizes-sync drift guard** — `flexfat/config/test/sizes-sync.test`
+extended to check BOTH committed pass tables (`FlexFatSizes_nonpow2.inc`
+and `FlexFatSizes_pow2.inc`) against BOTH goldens, and BOTH against the
+corresponding `lowfat_sizes[]` array in their golden `lowfat_config.c`.
+Variant-agnostic — runs in any build configuration.
+
+**One end-to-end POW2 e2e** —
+`compiler-rt/test/flexfat/TestCases/pow2_heap_boundary.c` (`REQUIRES:
+flexfat-pow2`). `malloc(63)` lands in POW2 class 64 (idx 3, no class
+bump-up); `p[63]` succeeds; `p[64]` traps with `operation = write`,
+`size = 64`. End-to-end: pass POW2 codegen → POW2 runtime allocator →
+POW2 region layout → reference-byte-identical OOB report. **First test
+ever to build and run a POW2 binary.**
+
+### Gate (variant-aware)
+
+- **Non-POW2 (`LLVM_FLEXFAT_POW2=OFF`, default)**: 86 tests, 85 passed,
+  1 unsupported (the POW2 e2e). The 85 prior tests all still pass.
+- **POW2 (`LLVM_FLEXFAT_POW2=ON`)**: 82 tests visible to lit (4 gtest
+  cases are `#if !FLEXFAT_IS_POW2`-compiled out, not lit-skipped),
+  69 passed (the POW2 e2e + 68 variant-agnostic), 13 unsupported (the
+  `REQUIRES: flexfat-nonpow2` set). **0 failed.**
+
+### POW2 perf matrix (closes Unit 16's deferred row)
+
+Same harness, N=10, same hardware as Unit 16's non-POW2 run. Canonical
+file: `flexfat/perf/results/run_pow2.tsv`.
+
+| Benchmark | uninstr (s) | full % | hardened % | hardened − full |
+|---|---:|---:|---:|---:|
+| heap_churn | 1.645 | **−20.4%** | −19.8% | ~0pp |
+| array_sum | 2.270 | +20.3% | +20.7% | ~0pp |
+| linked_list | 0.610 | +2.5% | +0.0% | −2.5pp |
+| memcpy_bulk | 1.165 | −0.4% | −0.9% | ~0pp |
+| opaque_access | 3.515 | +21.2% | +10.8% | **−10.4pp** |
+| **arithmetic mean** | — | **+4.6%** | **+2.2%** | **−2.4pp** |
+
+Reference's SPEC2006 numbers: full ~64% (no per-variant split published);
+hardened non-POW2 ~9.8%; **hardened POW2 ~7.8%**. Our hardened POW2 +2.2%
+is below the target by ~5.6 pp — same gap shape as non-POW2 (+2.6% vs
+~9.8%, gap ~7 pp). Both gaps are dominated by corpus coverage rather than
+codegen variant. **POW2 saves ~0.4 pp hardened mean and ~1 pp full mean**
+vs non-POW2, consistent with the reference's ~2 pp delta. STATISTIC
+counters under POW2 are identical to non-POW2 by design (the sizes table
+shape doesn't change check density on this corpus).
+
+### Audit-table revisions to prior Unit rows (this commit)
+
+- Unit 2 row stays "byte-identical to reference, POW2 + non-POW2" — true
+  at the (a) config/golden layer, which is what the test surface actually
+  measures.
+- Unit 3 row: "codegen parity (POW2 `and`)" was misleading pre-Unit-17.
+  As of Unit 17, the pass emits POW2 `and` when built `LLVM_FLEXFAT_POW2=ON`,
+  so the row is now end-to-end-correct. The STATUS prose at lines ~202-208
+  was an OBSERVATION about the reference's binary; pinned forward to
+  Unit 17 below.
+- Unit 7 row: "inlined non-POW2 `lowfat_base`" stays accurate as the
+  default-build description; `emitInlineBase` now has a POW2 branch
+  selected at `LLVM_FLEXFAT_POW2=ON`.
+- Unit 16 row: the "POW2 NOT measured — runtime port incomplete" caveat
+  is **closed by this unit**. The hardened POW2 row in the perf gap table
+  is no longer "(deferred)"; it is +2.2% measured.
+
+The mandated "support both variants" of CLAUDE.md is now end-to-end true.
+The "config+encoding parity only" framing implicit in the prior table rows
+no longer applies.

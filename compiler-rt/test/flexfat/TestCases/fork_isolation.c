@@ -17,6 +17,8 @@
 // Without (against 14a runtime): observed == 0xBBBBBBBB (aliased) OR
 //   child died from SIGSEGV stomping its own stack -> nonzero (RED).
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat -O2 %s -o %t
 // RUN: %run %t
 

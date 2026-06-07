@@ -4,6 +4,12 @@
 ; saving the runtime clzll/lzcnt dispatch. A dynamic malloc(n) stays a plain
 ; lowfat_malloc call.
 ;
+; Unit 17: CHECK lines bake the non-POW2 heap_select index mapping
+; (e.g. malloc(16) -> lowfat_malloc_index(1, 16), malloc(48) -> idx 3).
+; The POW2 variant has a different size schedule (only powers of 2; sizes
+; 16/32/64/.../2^33), so the constant-folded indices differ.
+; REQUIRES: flexfat-nonpow2
+;
 ; RUN: opt < %s -passes=flexfat -S | FileCheck %s
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"

@@ -6,6 +6,8 @@
 // and the report text stays byte-identical to the heap/stack/global e2e
 // reports.
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat -O2 %s -o %t
 // RUN: %run %t 2>&1 | FileCheck %s
 

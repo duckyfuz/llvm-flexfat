@@ -63,7 +63,12 @@
 #define LOWFAT_SIZES  _LOWFAT_SIZES
 #define LOWFAT_MAGICS _LOWFAT_MAGICS
 
-#include "lowfat_config.c"
+// Unit 17: angle-bracket include so the build picks the variant-selected copy
+// from the build dir (configure_file'd from flexfat/config/golden/{pow2,
+// nonpow2}/lowfat_config.c by compiler-rt/lib/flexfat/CMakeLists.txt). The
+// quote-include "lowfat_config.c" form would unconditionally resolve to the
+// committed nonpow2 source-dir copy and defeat LLVM_FLEXFAT_POW2.
+#include <lowfat_config.c>
 #include "lowfat.h"
 
 static bool lowfat_malloc_inited = false;

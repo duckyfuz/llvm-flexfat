@@ -8,6 +8,8 @@
 // RUN: not --crash %run %t 2>&1 | FileCheck %s
 //
 // REQUIRES: x86_64-target-arch
+// Unit 17: variant-specific assertions (size class, region count, etc.); gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 #include <stdio.h>
 
 __attribute__((noinline)) static void scribble(char *p, int i) {

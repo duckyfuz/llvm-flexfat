@@ -15,6 +15,15 @@ config.suffixes = [".c", ".cpp"]
 if config.target_arch != "x86_64":
     config.unsupported = True
 
+# Unit 17: variant-aware features. Tests that bake non-POW2 codegen patterns
+# (reciprocal multiply, 0x300000 magic table load) or non-POW2 region counts
+# into their CHECK lines / runtime expectations REQUIRES: flexfat-nonpow2.
+# The single POW2 end-to-end smoke test REQUIRES: flexfat-pow2.
+if getattr(config, "flexfat_is_pow2", False):
+    config.available_features.add("flexfat-pow2")
+else:
+    config.available_features.add("flexfat-nonpow2")
+
 
 def build_invocation(compile_flags):
     return " " + " ".join([config.clang] + compile_flags) + " "

@@ -7,6 +7,10 @@ config.target_cflags = "@FLEXFAT_TEST_TARGET_CFLAGS@"
 config.target_arch = "@FLEXFAT_TEST_TARGET_ARCH@"
 config.clang = "@FLEXFAT_TEST_TARGET_CC@"
 config.flexfat_src_dir = "@COMPILER_RT_SOURCE_DIR@/lib/flexfat"
+# Unit 17: variant the build was configured for. lit.cfg.py turns this into
+# the `flexfat-pow2` / `flexfat-nonpow2` features so variant-specific tests
+# can REQUIRES the right one.
+config.flexfat_is_pow2 = ("@LLVM_FLEXFAT_POW2@" == "ON")
 config.built_with_llvm = ("@COMPILER_RT_STANDALONE_BUILD@" != "TRUE")
 
 if config.built_with_llvm:

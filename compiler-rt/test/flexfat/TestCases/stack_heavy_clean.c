@@ -4,6 +4,8 @@
 // self-referential-pointer patches, alignment slips. No alloca pass change in
 // 12a so behavior is identical to native modulo the pivot itself.
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat -O2 %s -o %t
 // RUN: %run %t
 //

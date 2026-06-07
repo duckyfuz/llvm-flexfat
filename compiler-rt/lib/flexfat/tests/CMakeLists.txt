@@ -5,6 +5,9 @@
 
 include(CompilerRTCompile)
 
+# Unit 17: BEFORE the source-dir include so the build-dir variant-selected
+# lowfat_config.h wins over the committed nonpow2 source-dir copy.
+include_directories(BEFORE ${CMAKE_CURRENT_BINARY_DIR}/..)
 include_directories(..)
 
 set(FLEXFAT_UNITTEST_CFLAGS
@@ -13,7 +16,15 @@ set(FLEXFAT_UNITTEST_CFLAGS
   ${SANITIZER_TEST_CXX_CFLAGS}
   -I${COMPILER_RT_SOURCE_DIR}/lib
   -I${COMPILER_RT_SOURCE_DIR}/lib/flexfat
+  # Unit 17: build-dir copy of lowfat_config.h (variant-selected) MUST precede
+  # the source-dir copy in include order. lowfat.h uses <lowfat_config.h>.
+  -I${CMAKE_CURRENT_BINARY_DIR}/..
   -O2)
+if(LLVM_FLEXFAT_POW2)
+  list(APPEND FLEXFAT_UNITTEST_CFLAGS -DFLEXFAT_IS_POW2=1)
+else()
+  list(APPEND FLEXFAT_UNITTEST_CFLAGS -DFLEXFAT_IS_POW2=0)
+endif()
 
 set(FLEXFAT_UNITTEST_SOURCES
   flexfat_test.cpp

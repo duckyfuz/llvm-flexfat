@@ -78,6 +78,11 @@ TEST(FlexFatEncoding, NonPow2ReciprocalNoDiv) {
 }
 
 // ---- the real runtime tables (non-POW2), incl. index-0 non-fat semantics ----
+// Unit 17: the concrete table values are non-POW2-specific (61 regions with
+// the reciprocal-magic schedule from sizes.cfg). POW2 has 30 regions with a
+// different magic schedule; the equivalent POW2 sweep is the
+// Pow2BaseFormula case above, which covers the encoding analytically.
+#if !FLEXFAT_IS_POW2
 TEST(FlexFatEncoding, RuntimeTablesAndIndexZero) {
   // Index 0 is the non-fat region.
   EXPECT_EQ(_LOWFAT_SIZES[0], SIZE_MAX);
@@ -103,7 +108,13 @@ TEST(FlexFatEncoding, RuntimeTablesAndIndexZero) {
   }
 }
 
+#endif  // !FLEXFAT_IS_POW2
+
 // ---- SPEC §1.4 worked example, reproduced via the ported lowfat-ptr-info ----
+// Unit 17: SPEC §1.4's worked example uses non-POW2 encoding (size=16,
+// reciprocal magic = 0x1000000000000001). POW2 has a different magic schedule;
+// this case is non-POW2-only.
+#if !FLEXFAT_IS_POW2
 TEST(FlexFatEncoding, PtrInfoWorkedExample) {
   void *q = (void *)0x8997f2825ull;
   EXPECT_TRUE(lowfat_is_heap_ptr(q));
@@ -138,6 +149,7 @@ TEST(FlexFatEncoding, PtrInfoWorkedExample) {
                "magic  = 1152921504606846977 (0x1000000000000001)\n"
                "offset = 5\n");
 }
+#endif  // !FLEXFAT_IS_POW2
 
 // ---- the SIZES/MAGICS tables are read-only after init ----
 TEST(FlexFatEncodingDeathTest, TablesReadOnly) {

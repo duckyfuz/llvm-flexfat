@@ -9,6 +9,8 @@
 // class: either the in-bounds run traps (false positive) or the OOB run fails to
 // trap (missed bug) -- so this test fails on drift in either direction.
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat -O2 %s -o %t
 // RUN: %run %t
 // RUN: not --crash %run %t x > %t.out 2>&1

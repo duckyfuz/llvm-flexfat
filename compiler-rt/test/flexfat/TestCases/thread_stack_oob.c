@@ -5,6 +5,8 @@
 // pthread_created thread (proving the thread's lowfat stack is set up
 // correctly — TID/JOINID offsets + per-class mprotect coverage).
 //
+// Unit 17: variant-specific assertions; gate to non-POW2.
+// REQUIRES: flexfat-nonpow2
 // RUN: %clang_flexfat -O2 %s -o %t -lpthread
 // RUN: not --crash %run %t 2>&1 | FileCheck %s
 

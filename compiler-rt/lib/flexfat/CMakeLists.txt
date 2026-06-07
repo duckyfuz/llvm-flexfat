@@ -2,6 +2,27 @@
 #
 # Unit 3: the pointer-encoding core + init. Built as an object library so the
 # unit tests can link the runtime objects. Modeled on lib/asan and lib/rtsan.
+#
+# Unit 17: FlexFat has two encoding variants (POW2, non-POW2). Both runtime
+# and pass must be built for the same variant. The pass reads LLVM_FLEXFAT_POW2
+# at llvm/lib/Transforms/Instrumentation/ build time; we read the same option
+# here. The committed lowfat_config.{c,h} in this directory are nonpow2 (the
+# default); when LLVM_FLEXFAT_POW2 is set we configure_file the pow2 goldens
+# over them at build-dir-copy time and install the matching lowfat.ld.
+if(LLVM_FLEXFAT_POW2)
+  set(FLEXFAT_VARIANT_DIR "pow2")
+else()
+  set(FLEXFAT_VARIANT_DIR "nonpow2")
+endif()
+set(FLEXFAT_GOLDEN_DIR
+    "${CMAKE_SOURCE_DIR}/../flexfat/config/golden/${FLEXFAT_VARIANT_DIR}")
+# Overlay the variant's generated runtime config over the (nonpow2) committed
+# files via configure_file -> build-dir copies. The compiler-rt build picks
+# the build-dir copies via include precedence below.
+configure_file(${FLEXFAT_GOLDEN_DIR}/lowfat_config.c
+               ${CMAKE_CURRENT_BINARY_DIR}/lowfat_config.c COPYONLY)
+configure_file(${FLEXFAT_GOLDEN_DIR}/lowfat_config.h
+               ${CMAKE_CURRENT_BINARY_DIR}/lowfat_config.h COPYONLY)
 
 add_compiler_rt_component(flexfat)
 
@@ -27,6 +48,9 @@ set(FLEXFAT_CFLAGS
   -mbmi
   -mbmi2
   -mlzcnt
+  # Build dir must precede source dir: lowfat.c does `#include <lowfat_config.c>`,
+  # and the variant-selected copy lives in the build dir (configure_file).
+  -I${CMAKE_CURRENT_BINARY_DIR}
   -I${CMAKE_CURRENT_SOURCE_DIR}
   -Wno-unused-function
   -Wno-unused-const-variable)
@@ -70,7 +94,7 @@ endforeach()
 # on every -fsanitize=flexfat link, pinning each lowfat_section_<size>
 # to its region's [16 GiB, 24 GiB) global sub-range.
 set(FLEXFAT_GOLDEN_LD
-  ${CMAKE_SOURCE_DIR}/../flexfat/config/golden/nonpow2/lowfat.ld)
+  ${FLEXFAT_GOLDEN_DIR}/lowfat.ld)
 # Match the per-target-runtime-dir layout that add_compiler_rt_runtime uses
 # for libclang_rt.flexfat.a — see compiler-rt's get_compiler_rt_output_dir
 # (COMPILER_RT_OUTPUT_LIBRARY_DIR/${triple}). The driver derives lowfat.ld's
@@ -106,7 +130,7 @@ install(FILES ${FLEXFAT_GOLDEN_LD}
 set(FLEXFAT_CHECK_CONFIG_SRC
   ${CMAKE_SOURCE_DIR}/../flexfat/config/lowfat-check-config.c)
 set(FLEXFAT_CHECK_CONFIG_INC
-  ${CMAKE_SOURCE_DIR}/../flexfat/config/golden/nonpow2/lowfat_config.c)
+  ${FLEXFAT_GOLDEN_DIR}/lowfat_config.c)
 set(FLEXFAT_CHECK_CONFIG_BIN
   ${CMAKE_CURRENT_BINARY_DIR}/lowfat-check-config-validator)
 set(FLEXFAT_CHECK_CONFIG_STAMP
@@ -114,7 +138,7 @@ set(FLEXFAT_CHECK_CONFIG_STAMP
 add_custom_command(
   OUTPUT ${FLEXFAT_CHECK_CONFIG_BIN}
   COMMAND ${CMAKE_C_COMPILER} -O2 -Wall
-          -I${CMAKE_SOURCE_DIR}/../flexfat/config/golden/nonpow2
+          -I${FLEXFAT_GOLDEN_DIR}
           -Wno-unused-function -Wno-unused-variable
           -o ${FLEXFAT_CHECK_CONFIG_BIN}
           ${FLEXFAT_CHECK_CONFIG_SRC}
