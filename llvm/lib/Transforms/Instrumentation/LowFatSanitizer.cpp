@@ -58,6 +58,7 @@ public:
         TablesBase(kTablesBase) {}
 
   bool run();
+  bool runFunction(Function &F);
 
 private:
   Module &M;
@@ -193,6 +194,9 @@ static GlobalVariable *makeConstantArray(Module &M, StringRef Name,
 
 GlobalVariable *LowFatSanitizer::getSizesTable() {
   if (!SizesTableGV) {
+    SizesTableGV = M.getGlobalVariable("__lf_gen_sizes");
+  }
+  if (!SizesTableGV) {
     SmallVector<uint64_t, 64> D(kLowFatGenSizes,
                                  kLowFatGenSizes + LOWFAT_NUM_SIZE_CLASSES);
     SizesTableGV = makeConstantArray(M, "__lf_gen_sizes", D,
@@ -202,6 +206,9 @@ GlobalVariable *LowFatSanitizer::getSizesTable() {
 }
 
 GlobalVariable *LowFatSanitizer::getMagicsTable() {
+  if (!MagicsTableGV) {
+    MagicsTableGV = M.getGlobalVariable("__lf_gen_magics");
+  }
   if (!MagicsTableGV) {
     SmallVector<uint64_t, 64> D(kLowFatGenMagics,
                                  kLowFatGenMagics + LOWFAT_NUM_SIZE_CLASSES);
@@ -477,6 +484,9 @@ bool LowFatSanitizer::instrumentGEP(GetElementPtrInst *GEP) {
 }
 
 bool LowFatSanitizer::instrumentFunction(Function &F) {
+  if (F.getName().starts_with("__lf_"))
+    return false;
+
   bool Modified = false;
   SmallVector<Instruction *, 16> ToInstrument;
 
@@ -493,6 +503,8 @@ bool LowFatSanitizer::instrumentFunction(Function &F) {
   }
 
   for (Instruction *I : ToInstrument) {
+    if (I->getMetadata("nosanitize") != nullptr)
+      continue;
     if (auto *LI = dyn_cast<LoadInst>(I))
       Modified |= instrumentMemoryAccess(I, LI->getPointerOperand(), LI->getType());
     else if (auto *SI = dyn_cast<StoreInst>(I))
@@ -510,6 +522,12 @@ bool LowFatSanitizer::instrumentFunction(Function &F) {
       Modified |= instrumentGEP(GEP);
   }
   return Modified;
+}
+
+bool LowFatSanitizer::runFunction(Function &F) {
+  if (F.isDeclaration() || F.empty())
+    return false;
+  return instrumentFunction(F);
 }
 
 bool LowFatSanitizer::run() {
@@ -561,11 +579,9 @@ bool LowFatSanitizer::run() {
   }
 
   bool Modified = false;
-  for (Function &F : M) {
-    if (F.isDeclaration() || F.empty())
-      continue;
-    Modified |= instrumentFunction(F);
-  }
+  if (!Options.InternalModuleSetupOnly_)
+    for (Function &F : M)
+      Modified |= runFunction(F);
 
   // Emit a module constructor that calls __lf_set_recover(Recover) so the
   // runtime interceptors (memset/memcpy/memmove) know whether to warn or abort.
@@ -625,5 +641,17 @@ PreservedAnalyses LowFatSanitizerPass::run(Module &M,
   if (!Sanitizer.run())
     return PreservedAnalyses::all();
 
+  return PreservedAnalyses::none();
+}
+
+LowFatSanitizerFunctionPass::LowFatSanitizerFunctionPass(
+    const LowFatSanitizerOptions &Options)
+    : Options(Options) {}
+
+PreservedAnalyses LowFatSanitizerFunctionPass::run(
+    Function &F, FunctionAnalysisManager &) {
+  LowFatSanitizer Sanitizer(*F.getParent(), Options);
+  if (!Sanitizer.runFunction(F))
+    return PreservedAnalyses::all();
   return PreservedAnalyses::none();
 }
