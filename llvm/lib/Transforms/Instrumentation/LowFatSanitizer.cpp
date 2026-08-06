@@ -194,7 +194,7 @@ static GlobalVariable *makeConstantArray(Module &M, StringRef Name,
 
 GlobalVariable *LowFatSanitizer::getSizesTable() {
   if (!SizesTableGV) {
-    SizesTableGV = M.getGlobalVariable("__lf_gen_sizes");
+    SizesTableGV = M.getGlobalVariable("__lf_gen_sizes", /*AllowLocal=*/true);
   }
   if (!SizesTableGV) {
     SmallVector<uint64_t, 64> D(kLowFatGenSizes,
@@ -207,7 +207,7 @@ GlobalVariable *LowFatSanitizer::getSizesTable() {
 
 GlobalVariable *LowFatSanitizer::getMagicsTable() {
   if (!MagicsTableGV) {
-    MagicsTableGV = M.getGlobalVariable("__lf_gen_magics");
+    MagicsTableGV = M.getGlobalVariable("__lf_gen_magics", /*AllowLocal=*/true);
   }
   if (!MagicsTableGV) {
     SmallVector<uint64_t, 64> D(kLowFatGenMagics,
