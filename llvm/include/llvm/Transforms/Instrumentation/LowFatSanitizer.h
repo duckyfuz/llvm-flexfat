@@ -50,8 +50,8 @@ private:
 class LowFatSanitizerFunctionPass
     : public PassInfoMixin<LowFatSanitizerFunctionPass> {
 public:
-  explicit LowFatSanitizerFunctionPass(const LowFatSanitizerOptions &Options);
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  LLVM_ABI explicit LowFatSanitizerFunctionPass(const LowFatSanitizerOptions &Options);
+  LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
   static bool isRequired() { return true; }
 
 private:

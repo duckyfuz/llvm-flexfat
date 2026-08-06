@@ -503,7 +503,7 @@ bool LowFatSanitizer::instrumentFunction(Function &F) {
   }
 
   for (Instruction *I : ToInstrument) {
-    if (I->getMetadata("nosanitize") != nullptr)
+    if (I->hasMetadata(LLVMContext::MD_nosanitize))
       continue;
     if (auto *LI = dyn_cast<LoadInst>(I))
       Modified |= instrumentMemoryAccess(I, LI->getPointerOperand(), LI->getType());

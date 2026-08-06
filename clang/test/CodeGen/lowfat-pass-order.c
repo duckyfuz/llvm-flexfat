@@ -1,7 +1,7 @@
 // REQUIRES: x86-registered-target
 
-// The default placement is after the main inliner and before the final
-// function simplification cleanup.
+// By default, LowFat does module setup at PipelineStartEP (LowFatSanitizerPass),
+// and performs function-level instrumentation at ScalarOptimizerLateEP (after the main inliner).
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -fsanitize=lowfat -O2 \
 // RUN:   -fdebug-pass-manager -emit-llvm -o /dev/null %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=DEFAULT
