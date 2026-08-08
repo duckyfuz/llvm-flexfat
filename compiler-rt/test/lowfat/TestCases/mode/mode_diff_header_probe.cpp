@@ -1,12 +1,12 @@
-// RUN: %clangxx_lowfat -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
+// RUN: %clangxx_lowfat -O3 -mllvm -lowfat-placement=optimizer-last %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
 // RUN: %clangxx_lowfat_safe -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
 
 // More realistic mode-difference test:
 // a helper "probes" a header field near the end of a heap buffer, but the
-// caller discards the returned value. In default-fast mode, the dead return
-// path can be optimized away before the late LowFat pass runs. In safe mode,
-// early instrumentation preserves the OOB check even when the helper is
-// inlined away later.
+// caller discards the returned value. With the legacy optimizer-last
+// placement, the dead return path can be optimized away before the LowFat pass
+// runs. In safe mode, early instrumentation preserves the OOB check even when
+// the helper is inlined away later.
 
 #include <cstdio>
 #include <cstdlib>

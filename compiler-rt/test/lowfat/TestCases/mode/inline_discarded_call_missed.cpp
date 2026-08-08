@@ -1,10 +1,10 @@
-// RUN: %clangxx_lowfat -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
+// RUN: %clangxx_lowfat -O3 -mllvm -lowfat-placement=optimizer-last %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
 // RUN: %clangxx_lowfat_safe -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
 
 // An out-of-bounds read inside peek(), with the return value discarded.
-// In default-fast mode the dead computation can still be optimized away before
-// the late LowFat pass runs. In safe mode, early instrumentation preserves the
-// OOB check even when the helper is inlined.
+// With the legacy optimizer-last placement, the dead computation can be
+// optimized away before the LowFat pass runs. In safe mode, early
+// instrumentation preserves the OOB check even when the helper is inlined.
 
 #include <cstdlib>
 #include <cstdio>

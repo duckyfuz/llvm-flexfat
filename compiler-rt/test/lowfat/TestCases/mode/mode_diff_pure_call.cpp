@@ -1,11 +1,11 @@
-// RUN: %clangxx_lowfat -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
+// RUN: %clangxx_lowfat -O3 -mllvm -lowfat-placement=optimizer-last %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
 // RUN: %clangxx_lowfat_safe -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
 
 // Mode-difference test for discarded return values at -O3.
-// In default-fast (%clangxx_lowfat), DAE can remove the load before
-// OptimizerLastEP instrumentation, so the OOB read is missed.
-// In safe mode (%clangxx_lowfat_safe), the PipelineStartEP barrier/fake-use
-// keeps the load alive and the OOB read is reported.
+// With the legacy optimizer-last placement, DAE can remove the load before
+// instrumentation, so the OOB read is missed. In safe mode
+// (%clangxx_lowfat_safe), PipelineStartEP instrumentation keeps the load alive
+// and the OOB read is reported.
 
 #include <cstdio>
 #include <cstdlib>
