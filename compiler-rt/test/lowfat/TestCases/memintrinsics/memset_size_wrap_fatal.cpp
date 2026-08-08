@@ -20,6 +20,7 @@ int main() {
 
   // CHECK: LOWFAT ERROR: out-of-bounds error detected!
   // CHECK: operation = write
+  // CHECK: overflow = +1
   memset(dst, 0, size);
 
   free(dst);

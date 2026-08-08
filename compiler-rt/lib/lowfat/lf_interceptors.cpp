@@ -170,8 +170,23 @@ static inline void check_bounds(const void *ptr, uptr access_size, int is_write)
     uptr start = (uptr)ptr;
     uptr size = __lowfat::GetSize(start);
     uptr base = __lowfat::GetBase(start);
-    uptr report_ptr = access_size > ~(uptr)0 - start ? ~(uptr)0
-                                                     : start + access_size;
+    uptr report_ptr;
+    if (access_size <= ~(uptr)0 - start) {
+      report_ptr = start + access_size;
+    } else {
+      // The end of the access cannot be represented.  Report just beyond the
+      // allocation instead of UINTPTR_MAX, which is printed as -1 by the
+      // signed overflow diagnostic.
+      if (size <= ~(uptr)0 - base) {
+        report_ptr = base + size;
+        if (report_ptr != ~(uptr)0)
+          ++report_ptr;
+      } else {
+        // This configuration cannot represent the allocation end either.
+        // The access start is still the most useful representable location.
+        report_ptr = start;
+      }
+    }
     if (__lowfat::lowfat_recover)
       __lf_warn_oob(report_ptr, base, size, is_write);
     else

@@ -9,9 +9,9 @@
 #include <stdlib.h>
 
 int main() {
-  const size_t count = 4096;
-  const size_t nmemb = (SIZE_MAX / count) + 10;
-  void *p = calloc(count, nmemb);
+  const size_t nmemb = 4096;
+  const size_t size = (SIZE_MAX / nmemb) + 10;
+  void *p = calloc(nmemb, size);
   fprintf(stderr, "errno: %d, ptr: %lx\n", errno, (unsigned long)p);
   return 0;
 }
