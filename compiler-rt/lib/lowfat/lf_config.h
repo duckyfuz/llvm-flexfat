@@ -11,8 +11,8 @@
 // LowFat pointers encode allocation bounds directly in the pointer value:
 // - Memory is divided into regions, each for a specific size class
 // - Within each region, allocations are aligned to their size class
-// - Given a pointer, the base can be computed by masking off low bits (POW2)
-//   or via fixed-point magic-number math (non-POW2)
+// - Given a pointer, the base can be computed either by masking off low bits
+//   (POW2-only mode) or via fixed-point magic-number math (custom mode)
 // - The size can be looked up from a table using the region index
 //
 // Default Memory Layout (POW2-only mode, kRegionSizeLog=32):
@@ -23,11 +23,11 @@
 //   Region N: [0xN0_0000_0000, ...)            - 2^(N+4)-byte allocations
 //
 // Custom Config Mode (LOWFAT_CUSTOM_CONFIG, kRegionSizeLog=35):
-//   Non-POW2 sizes (e.g. 48, 80, 96 bytes) are also supported.
+//   Arbitrary configured sizes (e.g. 48, 80, 96 bytes) are also supported.
 //   kRegionSizeLog increases to 35 (32 GB per region) to preserve precision
 //   of the magic-number arithmetic across the full region.
 //   The key helpers (SizeClassIndex, SizeClassToSize) switch to table lookups.
-//   All other logic (GetBase, GetSize, CheckBounds, etc.) is unchanged.
+//   Base recovery uses generated reciprocal tables for every size class.
 //
 //===----------------------------------------------------------------------===//
 
@@ -71,7 +71,7 @@ inline uptr SizeClassIndex(uptr size) {
   return (uptr)lowfat_size_to_class((uint64_t)size);
 }
 
-// SizeClassToSize: direct table lookup — works for both POW2 and non-POW2.
+// SizeClassToSize: direct table lookup — works for arbitrary configured sizes.
 inline uptr SizeClassToSize(uptr class_index) {
   if (class_index >= kNumSizeClasses)
     return 0;
@@ -157,25 +157,19 @@ inline uptr GetSize(uptr ptr) {
 
 #ifdef LOWFAT_CUSTOM_CONFIG
 
-// GetBase override for non-POW2: use magic-number multiplication instead
-// of the bitwise-AND fast path when the size class is not a power of two.
+// GetBase override for custom config: use reciprocal fixed-point
+// multiplication for every configured size class, including power-of-two
+// classes. This keeps base recovery uniform across custom layouts.
 //
-// For POW2 sizes:    base = ptr & ~(size - 1)           [fast path]
-// For non-POW2:      base = ((u128)ptr * magic >> 64) * size  [magic path]
+//   base = ((u128)ptr * magic >> 64) * size
 inline uptr GetBase(uptr ptr) {
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
     return 0;
-  if (kLowFatGenIsPow2[region]) {
-    // Fast path: bitwise AND
-    return ptr & (uptr)kLowFatGenMasks[region];
-  } else {
-    // Magic-number fixed-point path
-    typedef unsigned __int128 u128;
-    u128 mul  = (u128)ptr * (u128)kLowFatGenMagics[region];
-    uptr idx  = (uptr)(mul >> 64);
-    return idx * (uptr)kLowFatGenSizes[region];
-  }
+  typedef unsigned __int128 u128;
+  u128 mul  = (u128)ptr * (u128)kLowFatGenMagics[region];
+  uptr idx  = (uptr)(mul >> 64);
+  return idx * (uptr)kLowFatGenSizes[region];
 }
 
 // CheckBounds override: uses the custom GetBase above.
@@ -223,7 +217,6 @@ inline bool CheckBounds(uptr ptr, uptr access_size) {
 struct RegionInfo {
   uptr size;           // Allocation size for this region
   uptr alignment;      // Alignment (same as size for LowFat)
-  uptr mask;           // Mask to get base address: ptr & mask
 };
 
 // This table is indexed by region number

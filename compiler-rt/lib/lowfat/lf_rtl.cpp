@@ -78,14 +78,14 @@ static FreeBlock *free_lists[kMaxSizeClasses];
 // size classes, which is the common case in multi-threaded programs.
 static StaticSpinMutex region_locks[kMaxSizeClasses];
 
-// Fixed address where the metadata tables (sizes, magics, is_pow2, masks)
-// are mapped during initialization. This allows the LLVM pass to use
-// absolute addressing (imm[index*8]) instead of PC-relative loads.
+// Fixed address where the metadata tables are mapped during initialization.
+// Pow2 mode uses the size and mask tables. Custom mode uses the size and magic
+// tables. This allows the LLVM pass to use absolute addressing (imm[index*8])
+// instead of PC-relative loads.
 //
 //   0x118000000000: Sizes (8 bytes per class)
-//   0x118001000000: Magics (8 bytes per class)
-//   0x118002000000: IsPow2 (1 byte per class)
-//   0x118003000000: Masks (8 bytes per class)
+//   0x118001000000: Magics (8 bytes per class, custom mode)
+//   0x118003000000: Masks (8 bytes per class, pow2 mode)
 static constexpr uptr kTablesBase   = 0x118000000000ULL;
 static constexpr uptr kTablesOffset = 0x1000000ULL;  // 16 MB between tables
 
@@ -111,16 +111,16 @@ static void InitializeFlags() {
 }
 
 static void InitTables() {
-  // Map 64 MB of address space at kTablesBase for the metadata tables.
-  // This is enough for 2^21 (2 million) size classes, which covers the entire
-  // 64 TB address space given 32 GB regions.
+  // Reserve enough address space for the fixed table offsets used by the pass.
   if (!MmapFixedNoReserve(kTablesBase, 64 * 1024 * 1024, "lowfat_tables"))
     Die();
 
   u64 *sizes  = (u64 *)(kTablesBase + 0 * kTablesOffset);
+#ifdef LOWFAT_CUSTOM_CONFIG
   u64 *magics = (u64 *)(kTablesBase + 1 * kTablesOffset);
-  u8  *ispow2 = (u8  *)(kTablesBase + 2 * kTablesOffset);
+#else
   u64 *masks  = (u64 *)(kTablesBase + 3 * kTablesOffset);
+#endif
 
   // Initialize all possible region indices (up to 1024 for now, which covers 32TB)
   // with "poison" values: Size=0, Base=0. Any access to a non-LowFat pointer
@@ -131,20 +131,18 @@ static void InitTables() {
 #ifdef LOWFAT_CUSTOM_CONFIG
       sizes[i]  = (u64)kLowFatGenSizes[i];
       magics[i] = (u64)kLowFatGenMagics[i];
-      ispow2[i] = (u8) kLowFatGenIsPow2[i];
-      masks[i]  = (u64)kLowFatGenMasks[i];
 #else
       u64 size = (u64)SizeClassToSize(i);
       sizes[i]  = size;
-      magics[i] = 0;
-      ispow2[i] = 1;
       masks[i]  = ~(size - 1);
 #endif
     } else {
       sizes[i]  = 0;
+#ifdef LOWFAT_CUSTOM_CONFIG
       magics[i] = 0;
-      ispow2[i] = 0;
+#else
       masks[i]  = 0;
+#endif
     }
   }
 }
@@ -154,13 +152,6 @@ static void InitRegionTable() {
     uptr size = SizeClassToSize(i);
     kRegions[i].size      = size;
     kRegions[i].alignment = size;
-#ifdef LOWFAT_CUSTOM_CONFIG
-    // For non-POW2 sizes the mask is meaningless (base computed via magic
-    // multiply); store 0 to make this explicit and catch accidental usage.
-    kRegions[i].mask = kLowFatGenIsPow2[i] ? (uptr)kLowFatGenMasks[i] : 0;
-#else
-    kRegions[i].mask = ~(size - 1);
-#endif
     free_lists[i] = nullptr;
   }
 }
@@ -201,7 +192,8 @@ static bool InitMemoryRegions() {
 // In right-align mode, returns the highest malloc-aligned address within the
 // slot that still leaves room for the requested object. The bounds check
 // (ptr - GetBase(ptr)) < class_size is still correct: GetBase() recovers
-// slot_base via mask/magic since slot_base is always class-aligned, and any
+// slot_base via reciprocal multiplication since slot_base is always
+// class-aligned, and any
 // access past slot_base+class_size fails the check.
 //
 // The free list always stores slot bases (not right-aligned pointers) so that
