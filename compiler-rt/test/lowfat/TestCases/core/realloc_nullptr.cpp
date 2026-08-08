@@ -15,6 +15,7 @@ int main() {
 
   uptr size = __lf_get_size((uptr)p);
   if (size == (uptr)-1) return 2;
+  if (size < 17) return 3;
 
   p[16] = 'x';
 

@@ -1,6 +1,6 @@
 // RUN: %clangxx_lowfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_lowfat -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
-// UNSUPPORTED: linux
+// REQUIRES: darwin
 
 #include <cstdio>
 #include <cstdlib>
