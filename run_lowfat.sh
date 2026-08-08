@@ -21,4 +21,4 @@ echo "[+] Building..."
 ninja -C build
 
 echo "[+] Running LowFat tests..."
-ninja -C build/runtimes/runtimes-bins check-lowfat
+ninja -C build/runtimes/runtimes-bins compiler-rt/test/lowfat/check-lowfat

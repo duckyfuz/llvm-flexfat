@@ -130,8 +130,11 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     void *new_ptr = REAL(malloc)(size);
     if (!new_ptr)
       return nullptr;
-    uptr old_size = __lowfat::GetSize((uptr)ptr);
-    uptr copy_size = old_size < size ? old_size : size;
+    uptr old_class_size = __lowfat::GetSize((uptr)ptr);
+    uptr old_base = __lowfat::GetBase((uptr)ptr);
+    uptr old_offset = (uptr)ptr - old_base;
+    uptr old_usable = old_class_size - old_offset;
+    uptr copy_size = old_usable < size ? old_usable : size;
     internal_memcpy(new_ptr, ptr, copy_size);
     __lowfat::Deallocate(ptr);
     return new_ptr;

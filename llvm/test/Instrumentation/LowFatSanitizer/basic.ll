@@ -7,7 +7,8 @@ define i32 @test_load(ptr %p) {
 ; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %p to i64
 ; CHECK: sub i64 %[[PTR_INT]], 17592186044416
 ; CHECK: lshr i64 {{.*}}, 32
-; CHECK: icmp ult i64 {{.*}}, 27
+; CHECK: icmp ne i64 {{.*}}, 0
+; CHECK: icmp ugt i64 4, {{.*}}
 ; CHECK: call void @__lf_report_oob
 ; CHECK: %val = load i32, ptr %p
   %val = load i32, ptr %p, align 4
@@ -53,8 +54,8 @@ define void @__lf_internal_test(ptr %p) {
 define i8 @test_load_i8(ptr %p) {
 ; CHECK-LABEL: @test_load_i8
 ; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %p to i64
-; CHECK: add i64 %[[PTR_INT]], 1
-; CHECK-NEXT: icmp ugt
+; CHECK: sub i64 %[[PTR_INT]], {{.*}}
+; CHECK: icmp ugt i64 1, {{.*}}
 ; CHECK: call void @__lf_report_oob
   %val = load i8, ptr %p, align 1
   ret i8 %val
@@ -64,8 +65,8 @@ define i8 @test_load_i8(ptr %p) {
 define void @test_store_i64(ptr %p, i64 %v) {
 ; CHECK-LABEL: @test_store_i64
 ; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %p to i64
-; CHECK: add i64 %[[PTR_INT]], 8
-; CHECK-NEXT: icmp ugt
+; CHECK: sub i64 %[[PTR_INT]], {{.*}}
+; CHECK: icmp ugt i64 8, {{.*}}
 ; CHECK: call void @__lf_report_oob
   store i64 %v, ptr %p, align 8
   ret void
@@ -100,3 +101,14 @@ define void @test_multiple(ptr %p, ptr %q) {
   store i32 %val, ptr %q, align 4
   ret void
 }
+
+; Test 10: nosanitize suppresses instrumentation.
+define i32 @test_nosanitize(ptr %p) {
+; CHECK-LABEL: @test_nosanitize
+; CHECK-NOT: call void @__lf_report_oob
+; CHECK: %val = load i32, ptr %p
+  %val = load i32, ptr %p, align 4, !nosanitize !0
+  ret i32 %val
+}
+
+!0 = !{}
