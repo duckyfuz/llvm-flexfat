@@ -44,6 +44,14 @@ namespace __lowfat {
 
 using namespace __sanitizer;
 
+inline bool CheckBoundsImpl(uptr ptr, uptr access_size, uptr base,
+                            uptr alloc_size) {
+  uptr offset = ptr - base;
+  if (access_size > alloc_size)
+    return false;
+  return offset <= alloc_size - access_size;
+}
+
 //===----------------------------------------------------------------------===//
 // Size Class Configuration
 //===----------------------------------------------------------------------===//
@@ -171,8 +179,7 @@ inline bool CheckBounds(uptr ptr, uptr access_size) {
     return true;  // Not a LowFat pointer — assume valid
   uptr alloc_size = SizeClassToSize(region);
   uptr base       = GetBase(ptr);
-  uptr end        = base + alloc_size;
-  return (ptr + access_size) <= end;
+  return CheckBoundsImpl(ptr, access_size, base, alloc_size);
 }
 
 #else
@@ -197,9 +204,8 @@ inline bool CheckBounds(uptr ptr, uptr access_size) {
   
   uptr alloc_size = SizeClassToSize(region);
   uptr base = ptr & ~(alloc_size - 1);
-  uptr end = base + alloc_size;
-  
-  return (ptr + access_size) <= end;
+
+  return CheckBoundsImpl(ptr, access_size, base, alloc_size);
 }
 
 #endif // LOWFAT_CUSTOM_CONFIG
