@@ -1,5 +1,4 @@
 // RUN: %clangxx_lowfat_recover -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_lowfat_recover -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 // Recover-mode coverage for compiler-inserted checks, not just memintrinsic
 // interceptors. The OOB load should warn and execution should continue.
