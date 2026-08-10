@@ -25,7 +25,7 @@ struct LowFatSanitizerOptions {
 
   enum class LowFatMode {
     Fast,       /// Instrument at the selected placement (scalar-late by default)
-    Safe,       /// Barrier at PipelineStartEP + instrument at selected placement
+    Safe,       /// Instrument at PipelineStartEP and again at selected placement
     RightAlign, /// Selected placement + right-align allocations within class
                 /// slots to improve detection of right-side (overflow) OOB at
                 /// the cost of a blind spot on the left (underflow) side.
