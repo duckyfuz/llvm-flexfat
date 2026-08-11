@@ -547,11 +547,11 @@ if(build_runtimes)
   if(CMAKE_PROGRAM_PATH)
     list(APPEND extra_cmake_args "-DCMAKE_PROGRAM_PATH=${CMAKE_PROGRAM_PATH}")
   endif()
-  # Pass custom / reset LowFat Configuration file path to compiler-rt.
-  if(LOWFAT_SIZES_CFG)
-    list(APPEND extra_cmake_args "-DLOWFAT_SIZES_CFG=${LOWFAT_SIZES_CFG}")
+  # Pass custom / reset FlexFat Configuration file path to compiler-rt.
+  if(FLEXFAT_SIZES_CFG)
+    list(APPEND extra_cmake_args "-DFLEXFAT_SIZES_CFG=${FLEXFAT_SIZES_CFG}")
   else()
-    list(APPEND extra_cmake_args "-ULOWFAT_SIZES_CFG")
+    list(APPEND extra_cmake_args "-UFLEXFAT_SIZES_CFG")
   endif()
 
   # TODO: We need to consider passing it as '-DRUNTIMES_x86_64_LLVM_ENABLE_RUNTIMES'.

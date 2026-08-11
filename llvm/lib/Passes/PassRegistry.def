@@ -217,9 +217,9 @@ MODULE_PASS_WITH_PARAMS(
     [](HWAddressSanitizerOptions Opts) { return HWAddressSanitizerPass(Opts); },
     parseHWASanPassOptions, "kernel;recover")
 MODULE_PASS_WITH_PARAMS(
-    "lowfat", "LowFatSanitizerPass",
-    [](LowFatSanitizerOptions Opts) { return LowFatSanitizerPass(Opts); },
-    parseLowFatPassOptions, "")
+    "flexfat", "FlexFatSanitizerPass",
+    [](FlexFatSanitizerOptions Opts) { return FlexFatSanitizerPass(Opts); },
+    parseFlexFatPassOptions, "")
 MODULE_PASS_WITH_PARAMS(
     "internalize", "InternalizePass",
     [](SmallVector<std::string, 0> PreservedGVs) {

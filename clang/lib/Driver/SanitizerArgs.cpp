@@ -673,7 +673,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
                          SanitizerKind::KernelAddress |
                          SanitizerKind::KernelHWAddress |
                          SanitizerKind::Memory),
-      std::make_pair(SanitizerKind::LowFat,
+      std::make_pair(SanitizerKind::FlexFat,
                      SanitizerKind::Address | SanitizerKind::HWAddress |
                          SanitizerKind::Memory)};
 

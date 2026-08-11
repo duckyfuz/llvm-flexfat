@@ -122,7 +122,7 @@ public:
     return Sanitizers.has(SanitizerKind::NumericalStability);
   }
   bool needsRtsanRt() const { return Sanitizers.has(SanitizerKind::Realtime); }
-  bool needsLowFatRt() const { return Sanitizers.has(SanitizerKind::LowFat); }
+  bool needsFlexFatRt() const { return Sanitizers.has(SanitizerKind::FlexFat); }
 
   bool hasMemTag() const {
     return hasMemtagHeap() || hasMemtagStack() || hasMemtagGlobals();

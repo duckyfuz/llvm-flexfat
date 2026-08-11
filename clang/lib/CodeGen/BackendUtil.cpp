@@ -85,7 +85,7 @@
 #include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Instrumentation/TypeSanitizer.h"
-#include "llvm/Transforms/Instrumentation/LowFatSanitizer.h"
+#include "llvm/Transforms/Instrumentation/FlexFatSanitizer.h"
 #include "llvm/Transforms/ObjCARC.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
@@ -108,28 +108,28 @@ static cl::opt<bool> ClSanitizeOnOptimizerEarlyEP(
     "sanitizer-early-opt-ep", cl::Optional,
     cl::desc("Insert sanitizers on OptimizerEarlyEP."));
 
-static cl::opt<LowFatSanitizerOptions::Placement> LowFatPlacement(
-    "lowfat-placement",
-    cl::init(LowFatSanitizerOptions::Placement::ScalarOptimizerLate),
+static cl::opt<FlexFatSanitizerOptions::Placement> FlexFatPlacement(
+    "flexfat-placement",
+    cl::init(FlexFatSanitizerOptions::Placement::ScalarOptimizerLate),
     cl::Hidden,
-    cl::desc("Controls the LowFat instrumentation extension point"),
+    cl::desc("Controls the FlexFat instrumentation extension point"),
     cl::values(
-        clEnumValN(LowFatSanitizerOptions::Placement::ScalarOptimizerLate,
+        clEnumValN(FlexFatSanitizerOptions::Placement::ScalarOptimizerLate,
                    "scalar-late", "Instrument at ScalarOptimizerLateEP"),
-        clEnumValN(LowFatSanitizerOptions::Placement::OptimizerLast,
+        clEnumValN(FlexFatSanitizerOptions::Placement::OptimizerLast,
                    "optimizer-last", "Instrument at OptimizerLastEP"),
-        clEnumValN(LowFatSanitizerOptions::Placement::OptimizerEarly,
+        clEnumValN(FlexFatSanitizerOptions::Placement::OptimizerEarly,
                    "optimizer-early", "Instrument at OptimizerEarlyEP")));
 
-static cl::opt<LowFatSanitizerOptions::LowFatMode> LowFatMode(
-    "lowfat-mode", cl::init(LowFatSanitizerOptions::LowFatMode::Fast),
-    cl::desc("Controls the placement and strictness of the LowFat pass"),
+static cl::opt<FlexFatSanitizerOptions::FlexFatMode> FlexFatMode(
+    "flexfat-mode", cl::init(FlexFatSanitizerOptions::FlexFatMode::Fast),
+    cl::desc("Controls the placement and strictness of the FlexFat pass"),
     cl::values(
-        clEnumValN(LowFatSanitizerOptions::LowFatMode::Fast, "fast",
+        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Fast, "fast",
                    "Instrument at OptimizerLastEP (least overhead)"),
-        clEnumValN(LowFatSanitizerOptions::LowFatMode::Safe, "safe",
+        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Safe, "safe",
                    "Barrier at PipelineStartEP + instrument at OptimizerLastEP"),
-        clEnumValN(LowFatSanitizerOptions::LowFatMode::RightAlign, "right-align",
+        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::RightAlign, "right-align",
                    "Right-align allocations within class slots to catch right-side OOB")));
 
 // Experiment to mark cold functions as optsize/minsize/optnone.
@@ -810,51 +810,51 @@ static void addSanitizers(const Triple &TargetTriple,
     PB.registerOptimizerLastEPCallback(SanitizersCallback);
   }
 
-  if (LangOpts.Sanitize.has(SanitizerKind::LowFat)) {
-    LowFatSanitizerOptions LFOpts;
-    LFOpts.Recover = CodeGenOpts.SanitizeRecover.has(SanitizerKind::LowFat);
-    LFOpts.Mode = LowFatMode;
-    LFOpts.PassPlacement = LowFatPlacement;
+  if (LangOpts.Sanitize.has(SanitizerKind::FlexFat)) {
+    FlexFatSanitizerOptions FlexFatOpts;
+    FlexFatOpts.Recover = CodeGenOpts.SanitizeRecover.has(SanitizerKind::FlexFat);
+    FlexFatOpts.Mode = FlexFatMode;
+    FlexFatOpts.PassPlacement = FlexFatPlacement;
 
-    auto AddLowFatPass = [LFOpts](ModulePassManager &MPM) {
-      MPM.addPass(LowFatSanitizerPass(LFOpts));
+    auto AddFlexFatPass = [FlexFatOpts](ModulePassManager &MPM) {
+      MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
     };
 
-    switch (LFOpts.PassPlacement) {
-    case LowFatSanitizerOptions::Placement::ScalarOptimizerLate:
+    switch (FlexFatOpts.PassPlacement) {
+    case FlexFatSanitizerOptions::Placement::ScalarOptimizerLate:
       {
-        LowFatSanitizerOptions SetupOpts = LFOpts;
+        FlexFatSanitizerOptions SetupOpts = FlexFatOpts;
         SetupOpts.InternalModuleSetupOnly_ = true;
         PB.registerPipelineStartEPCallback(
             [SetupOpts](ModulePassManager &MPM, OptimizationLevel) {
-              MPM.addPass(LowFatSanitizerPass(SetupOpts));
+              MPM.addPass(FlexFatSanitizerPass(SetupOpts));
             });
         PB.registerScalarOptimizerLateEPCallback(
-            [LFOpts](FunctionPassManager &FPM, OptimizationLevel) {
-              FPM.addPass(LowFatSanitizerFunctionPass(LFOpts));
+            [FlexFatOpts](FunctionPassManager &FPM, OptimizationLevel) {
+              FPM.addPass(FlexFatSanitizerFunctionPass(FlexFatOpts));
             });
       }
       break;
-    case LowFatSanitizerOptions::Placement::OptimizerEarly:
+    case FlexFatSanitizerOptions::Placement::OptimizerEarly:
       PB.registerOptimizerEarlyEPCallback(
-          [AddLowFatPass](ModulePassManager &MPM, OptimizationLevel,
-                          ThinOrFullLTOPhase) { AddLowFatPass(MPM); });
+          [AddFlexFatPass](ModulePassManager &MPM, OptimizationLevel,
+                          ThinOrFullLTOPhase) { AddFlexFatPass(MPM); });
       break;
-    case LowFatSanitizerOptions::Placement::OptimizerLast:
+    case FlexFatSanitizerOptions::Placement::OptimizerLast:
       PB.registerOptimizerLastEPCallback(
-          [AddLowFatPass](ModulePassManager &MPM, OptimizationLevel,
-                          ThinOrFullLTOPhase) { AddLowFatPass(MPM); });
+          [AddFlexFatPass](ModulePassManager &MPM, OptimizationLevel,
+                          ThinOrFullLTOPhase) { AddFlexFatPass(MPM); });
       break;
     }
 
-    if (LFOpts.Mode == LowFatSanitizerOptions::LowFatMode::Safe) {
+    if (FlexFatOpts.Mode == FlexFatSanitizerOptions::FlexFatMode::Safe) {
       // Safe: instrument once at PipelineStartEP so early-inlined dead
       // computations are still checked, then run the selected pass again to
       // catch optimizer-introduced accesses. The pass tags its own IR so the
       // later run skips already-instrumented accesses.
       PB.registerPipelineStartEPCallback(
-          [LFOpts](ModulePassManager &MPM, OptimizationLevel) {
-            MPM.addPass(LowFatSanitizerPass(LFOpts));
+          [FlexFatOpts](ModulePassManager &MPM, OptimizationLevel) {
+            MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
           });
     }
   }
