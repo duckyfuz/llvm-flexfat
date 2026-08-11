@@ -1670,8 +1670,8 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
       AddLinkRuntimeLib(Args, CmdArgs, "stats_client", RLO_AlwaysLink);
       AddLinkSanitizerLibArgs(Args, CmdArgs, "stats");
     }
-    if (Sanitize.needsLowFatRt()) {
-      AddLinkSanitizerLibArgs(Args, CmdArgs, "lowfat");
+    if (Sanitize.needsFlexFatRt()) {
+      AddLinkSanitizerLibArgs(Args, CmdArgs, "flexfat");
     }
   }
 
@@ -3921,7 +3921,7 @@ SanitizerMask Darwin::getSupportedSanitizers() const {
     Res |= SanitizerKind::NumericalStability;
 
   if (IsX86_64 || IsAArch64)
-    Res |= SanitizerKind::LowFat;
+    Res |= SanitizerKind::FlexFat;
 
   return Res;
 }

@@ -142,8 +142,8 @@ SANITIZER("kcfi", KCFI)
 // Safe Stack
 SANITIZER("safe-stack", SafeStack)
 
-// LowFat Pointer Bounds Checking
-SANITIZER("lowfat", LowFat)
+// FlexFat Pointer Bounds Checking
+SANITIZER("flexfat", FlexFat)
 
 // Shadow Call Stack
 SANITIZER("shadow-call-stack", ShadowCallStack)

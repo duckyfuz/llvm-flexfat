@@ -8,7 +8,7 @@
 # to the helper scripts from this checkout.  They operate on the current
 # directory, so the runner executes them while positioned in the revision
 # worktree.  The requested revision must contain the custom-layout CMake hooks
-# and the check-lowfat target used by those helpers.  MSET runs only after
+# and the check-flexfat target used by those helpers.  MSET runs only after
 # those checks pass for both layouts.
 
 set -euo pipefail
@@ -18,14 +18,14 @@ usage() {
     "Usage: $0 MSET_PATH REVISION [MSET options]" \
     '' \
     'Builds and tests POW2 and custom-size FlexFat layouts, then runs MSET for each.' \
-    'The custom layout uses compiler-rt/lib/lowfat/tools/sizes.cfg by default;' \
+    'The custom layout uses compiler-rt/lib/flexfat/tools/sizes.cfg by default;' \
     'override it with FLEXFAT_MSET_SIZES_CFG=/path/to/sizes.cfg.' \
-    'The revision must support LOWFAT_SIZES_CFG and the check-lowfat target.' \
+    'The revision must support FLEXFAT_SIZES_CFG and the check-flexfat target.' \
     '' \
     'Optional MSET compile controls:' \
     '  FLEXFAT_MSET_OPT_LEVEL=2              (default: 2)' \
-    '  FLEXFAT_MSET_LOWFAT_MODE=fast         (fast, safe, or right-align)' \
-    '  FLEXFAT_MSET_LOWFAT_PLACEMENT=scalar-late' \
+    '  FLEXFAT_MSET_FLEXFAT_MODE=fast         (fast, safe, or right-align)' \
+    '  FLEXFAT_MSET_FLEXFAT_PLACEMENT=scalar-late' \
     '  FLEXFAT_MSET_EXTRA_SANITIZER_FLAGS="..."' \
     '' \
     'Results are written to mset-results/ (or $MSET_OUTPUT_DIR).' >&2
@@ -62,10 +62,10 @@ timestamp=$(date +%Y%m%d-%H%M%S)
 cache_root=${FLEXFAT_MSET_CACHE_DIR:-"${TMPDIR:-/tmp}/flexfat-mset-builds"}
 worktree="$cache_root/${revision_name}-${revision_tag}"
 output_dir=${MSET_OUTPUT_DIR:-"$repo_root/mset-results"}
-custom_sizes=${FLEXFAT_MSET_SIZES_CFG:-"$repo_root/compiler-rt/lib/lowfat/tools/sizes.cfg"}
+custom_sizes=${FLEXFAT_MSET_SIZES_CFG:-"$repo_root/compiler-rt/lib/flexfat/tools/sizes.cfg"}
 opt_level=${FLEXFAT_MSET_OPT_LEVEL:-2}
-lowfat_mode=${FLEXFAT_MSET_LOWFAT_MODE:-fast}
-lowfat_placement=${FLEXFAT_MSET_LOWFAT_PLACEMENT:-scalar-late}
+flexfat_mode=${FLEXFAT_MSET_FLEXFAT_MODE:-fast}
+flexfat_placement=${FLEXFAT_MSET_FLEXFAT_PLACEMENT:-scalar-late}
 extra_sanitizer_flags=${FLEXFAT_MSET_EXTRA_SANITIZER_FLAGS:-}
 
 [[ -f "$custom_sizes" ]] || {
@@ -76,8 +76,8 @@ extra_sanitizer_flags=${FLEXFAT_MSET_EXTRA_SANITIZER_FLAGS:-}
   echo "error: FLEXFAT_MSET_OPT_LEVEL must be one of 0, 1, 2, 3, s, or z" >&2
   exit 2
 }
-case "$lowfat_mode" in fast|safe|right-align) ;; *) echo "error: unsupported LowFat mode: $lowfat_mode" >&2; exit 2;; esac
-case "$lowfat_placement" in optimizer-early|scalar-late|optimizer-last) ;; *) echo "error: unsupported LowFat placement: $lowfat_placement" >&2; exit 2;; esac
+case "$flexfat_mode" in fast|safe|right-align) ;; *) echo "error: unsupported FlexFat mode: $flexfat_mode" >&2; exit 2;; esac
+case "$flexfat_placement" in optimizer-early|scalar-late|optimizer-last) ;; *) echo "error: unsupported FlexFat placement: $flexfat_placement" >&2; exit 2;; esac
 
 mkdir -p "$cache_root" "$output_dir"
 
@@ -97,14 +97,14 @@ fi
 # use isolated build directories.  Reject historical revisions that do not
 # have the source-side CMake hooks those helpers require, rather than risking
 # a build that silently falls back to an incompatible configuration.
-pass_config="$worktree/llvm/lib/Transforms/Instrumentation/LowFatPassConfig.cmake"
-runtime_config="$worktree/compiler-rt/lib/lowfat/CMakeLists.txt"
-test_config="$worktree/compiler-rt/test/lowfat/CMakeLists.txt"
+pass_config="$worktree/llvm/lib/Transforms/Instrumentation/FlexFatPassConfig.cmake"
+runtime_config="$worktree/compiler-rt/lib/flexfat/CMakeLists.txt"
+test_config="$worktree/compiler-rt/test/flexfat/CMakeLists.txt"
 if [[ ! -f "$pass_config" || ! -f "$runtime_config" || ! -f "$test_config" ]] || \
-   ! rg -q 'LOWFAT_SIZES_CFG' "$pass_config" "$runtime_config" || \
-   ! rg -q 'add_lit_testsuite\(check-lowfat' "$test_config"; then
+   ! rg -q 'FLEXFAT_SIZES_CFG' "$pass_config" "$runtime_config" || \
+   ! rg -q 'add_lit_testsuite\(check-flexfat' "$test_config"; then
   echo "error: revision '$resolved_revision' is incompatible with this runner" >&2
-  echo "       it must provide LOWFAT_SIZES_CFG support and the check-lowfat target" >&2
+  echo "       it must provide FLEXFAT_SIZES_CFG support and the check-flexfat target" >&2
   exit 2
 fi
 
@@ -125,19 +125,19 @@ make_mset_config() {
   local layout=$1
   local clang=$2
   local config_file=$3
-  local sanitizer_flags="-fsanitize=lowfat -mllvm -lowfat-placement=${lowfat_placement}"
-  if [[ "$lowfat_mode" != fast ]]; then
-    sanitizer_flags+=" -mllvm -lowfat-mode=${lowfat_mode}"
+  local sanitizer_flags="-fsanitize=flexfat -mllvm -flexfat-placement=${flexfat_placement}"
+  if [[ "$flexfat_mode" != fast ]]; then
+    sanitizer_flags+=" -mllvm -flexfat-mode=${flexfat_mode}"
   fi
   if [[ -n "$extra_sanitizer_flags" ]]; then
     sanitizer_flags+=" ${extra_sanitizer_flags}"
   fi
 
-  # LowFat defaults to fatal exit code 1.  MSET classifies exit code 6 as a
+  # FlexFat defaults to fatal exit code 1.  MSET classifies exit code 6 as a
   # detection, so set that runtime option explicitly and record it in XML.
   printf '%s\n' \
     '<sanitizer>' \
-    "  <name>FlexFat (${layout}; ${lowfat_mode}; ${lowfat_placement}; -O${opt_level})</name>" \
+    "  <name>FlexFat (${layout}; ${flexfat_mode}; ${flexfat_placement}; -O${opt_level})</name>" \
     '  <setup_baseline>' \
     "    <compile_cmd><![CDATA[${clang} -O${opt_level} -g -Wl,-T,${mset_path}/sanitizers/after_text.ld \$SOURCE_FILE -o \$GENERATED_BINARY]]></compile_cmd>" \
     '  </setup_baseline>' \
@@ -146,7 +146,7 @@ make_mset_config() {
     "    <compile_cmd><![CDATA[${clang} -O${opt_level} -g -Wl,-T,${mset_path}/sanitizers/after_text.ld ${sanitizer_flags} \$SOURCE_FILE -o \$GENERATED_BINARY]]></compile_cmd>" \
     '  </setup>' \
     '  <run_env_args>' \
-    '    <env_var name="LOWFAT_OPTIONS">exitcode=6</env_var>' \
+    '    <env_var name="FLEXFAT_OPTIONS">exitcode=6</env_var>' \
     '  </run_env_args>' \
     '  <run>$GENERATED_BINARY</run>' \
     '  <bug_detected_exit_values><value>6</value></bug_detected_exit_values>' \
@@ -159,7 +159,7 @@ run_layout() {
   local build_dir="$worktree/build-mset-${layout}"
   local clang="$build_dir/bin/clang"
   local config_file
-  local output_file="$output_dir/${revision_name}-${revision_tag}-${layout}-${lowfat_mode}-${lowfat_placement}-O${opt_level}-${timestamp}.log"
+  local output_file="$output_dir/${revision_name}-${revision_tag}-${layout}-${flexfat_mode}-${flexfat_placement}-O${opt_level}-${timestamp}.log"
   config_file=$(mktemp "${TMPDIR:-/tmp}/flexfat-mset-${layout}.XXXXXX.xml")
 
   echo "[+] Configuring ${layout} build through configure_llvm.sh"
@@ -171,12 +171,12 @@ run_layout() {
       "$repo_root/configure_llvm.sh"
   )
 
-  echo "[+] Building and testing ${layout} through run_lowfat.sh"
+  echo "[+] Building and testing ${layout} through run_flexfat.sh"
   (
     cd "$worktree"
     FLEXFAT_BUILD_DIR="$build_dir" \
       FLEXFAT_SIZES_CFG="$sizes_cfg" \
-      "$repo_root/run_lowfat.sh" "$layout"
+      "$repo_root/run_flexfat.sh" "$layout"
   )
 
   [[ -x "$clang" ]] || { echo "error: clang was not built at $clang" >&2; exit 1; }

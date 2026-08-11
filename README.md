@@ -40,5 +40,17 @@ chat](https://discord.gg/xS7Z362),
 [LLVM Office Hours](https://llvm.org/docs/GettingInvolved.html#office-hours) or
 [Regular sync-ups](https://llvm.org/docs/GettingInvolved.html#online-sync-ups).
 
+## FlexFat prototype
+
+This checkout contains the FlexFat pointer-bounds-checking sanitizer prototype.
+Build it with `./configure_llvm.sh`, then run either layout with
+`./run_flexfat.sh pow2` or `./run_flexfat.sh custom`.
+
+Use `-fsanitize=flexfat` to instrument an application. The optional hidden
+LLVM controls are `-mllvm -flexfat-mode=<fast|safe|right-align>` and
+`-mllvm -flexfat-placement=<optimizer-early|scalar-late|optimizer-last>`.
+Set `FLEXFAT_SIZES_CFG` to select a custom size-class configuration and
+`FLEXFAT_OPTIONS` to provide runtime options such as `exitcode=6`.
+
 The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
 participants to all modes of communication within the project.

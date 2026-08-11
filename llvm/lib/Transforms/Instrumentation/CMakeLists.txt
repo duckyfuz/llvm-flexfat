@@ -14,7 +14,7 @@ add_llvm_component_library(LLVMInstrumentation
   IndirectCallPromotion.cpp
   InstrProfiling.cpp
   KCFI.cpp
-  LowFatSanitizer.cpp
+  FlexFatSanitizer.cpp
   LowerAllowCheckPass.cpp
   PGOCtxProfFlattening.cpp
   PGOCtxProfLowering.cpp
@@ -46,4 +46,4 @@ add_llvm_component_library(LLVMInstrumentation
   ProfileData
   )
 
-include(${CMAKE_CURRENT_LIST_DIR}/LowFatPassConfig.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/FlexFatPassConfig.cmake)

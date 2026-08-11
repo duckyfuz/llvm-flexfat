@@ -248,7 +248,7 @@
 #include "llvm/Transforms/Instrumentation/DataFlowSanitizer.h"
 #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
 #include "llvm/Transforms/Instrumentation/HWAddressSanitizer.h"
-#include "llvm/Transforms/Instrumentation/LowFatSanitizer.h"
+#include "llvm/Transforms/Instrumentation/FlexFatSanitizer.h"
 #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
 #include "llvm/Transforms/Instrumentation/KCFI.h"
 #include "llvm/Transforms/Instrumentation/LowerAllowCheckPass.h"
@@ -980,15 +980,15 @@ Expected<HWAddressSanitizerOptions> parseHWASanPassOptions(StringRef Params) {
   return Result;
 }
 
-Expected<LowFatSanitizerOptions> parseLowFatPassOptions(StringRef Params) {
-  LowFatSanitizerOptions Result;
+Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
+  FlexFatSanitizerOptions Result;
   if (!Params.empty()) {
     for (StringRef Param : llvm::split(Params, ';')) {
       if (Param == "recover")
         Result.Recover = true;
       else
         return make_error<StringError>(
-            formatv("invalid LowFatSanitizer pass parameter '{}'", Param).str(),
+            formatv("invalid FlexFatSanitizer pass parameter '{}'", Param).str(),
             inconvertibleErrorCode());
     }
   }

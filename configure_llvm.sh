@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-build_jobs=${FLEXFAT_JOBS:-6}
+build_jobs=${FLEXFAT_JOBS:-4}
 compile_jobs=${FLEXFAT_COMPILE_JOBS:-$build_jobs}
 link_jobs=${FLEXFAT_LINK_JOBS:-1}
 tablegen_jobs=${FLEXFAT_TABLEGEN_JOBS:-1}
@@ -32,10 +32,10 @@ if [[ -n "$sizes_cfg" ]]; then
         echo "error: FLEXFAT_SIZES_CFG does not exist: $sizes_cfg" >&2
         exit 2
     }
-    CMAKE_ARGS+=("-DLOWFAT_SIZES_CFG=$sizes_cfg")
+    CMAKE_ARGS+=("-DFLEXFAT_SIZES_CFG=$sizes_cfg")
 else
     # A cached custom build must not silently become the POW2 result.
-    CMAKE_ARGS+=(-ULOWFAT_SIZES_CFG)
+    CMAKE_ARGS+=(-UFLEXFAT_SIZES_CFG)
 fi
 
 if [ "$(uname)" == "Darwin" ]; then # macOS-specific
