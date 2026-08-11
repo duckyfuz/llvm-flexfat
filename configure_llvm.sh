@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 
-build_jobs=${FLEXFAT_JOBS:-8}
+set -euo pipefail
+
+build_jobs=${FLEXFAT_JOBS:-6}
 compile_jobs=${FLEXFAT_COMPILE_JOBS:-$build_jobs}
 link_jobs=${FLEXFAT_LINK_JOBS:-1}
 tablegen_jobs=${FLEXFAT_TABLEGEN_JOBS:-1}
+build_dir=${FLEXFAT_BUILD_DIR:-build}
+sizes_cfg=${FLEXFAT_SIZES_CFG:-}
 
 # Common flags for all systems
 CMAKE_ARGS=(
-    -G Ninja -S llvm -B build
+    -G Ninja -S llvm -B "$build_dir"
     -DCMAKE_BUILD_TYPE=RelWithDebInfo
     -DLLVM_ENABLE_ASSERTIONS=ON
     -DLLVM_ENABLE_PROJECTS="clang;lld"
@@ -23,6 +27,17 @@ CMAKE_ARGS=(
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 )
 
+if [[ -n "$sizes_cfg" ]]; then
+    [[ -f "$sizes_cfg" ]] || {
+        echo "error: FLEXFAT_SIZES_CFG does not exist: $sizes_cfg" >&2
+        exit 2
+    }
+    CMAKE_ARGS+=("-DLOWFAT_SIZES_CFG=$sizes_cfg")
+else
+    # A cached custom build must not silently become the POW2 result.
+    CMAKE_ARGS+=(-ULOWFAT_SIZES_CFG)
+fi
+
 if [ "$(uname)" == "Darwin" ]; then # macOS-specific
     CMAKE_ARGS+=(
         -DDEFAULT_SYSROOT="$(xcrun --show-sdk-path)"
@@ -37,5 +52,5 @@ else # Linux & compute cluster (Linux)
     )
 fi
 
-echo "[+] Generating CMake configuration (compile jobs: $compile_jobs; link jobs: $link_jobs; tablegen jobs: $tablegen_jobs)..."
+echo "[+] Generating CMake configuration in $build_dir (compile jobs: $compile_jobs; link jobs: $link_jobs; tablegen jobs: $tablegen_jobs)..."
 cmake "${CMAKE_ARGS[@]}"
