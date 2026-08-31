@@ -15,6 +15,9 @@ class Module;
 
 struct FlexFatSanitizerOptions {
   bool Recover = false;
+  /// Check the complete width of scalar accesses.  The LowFat-compatible
+  /// default checks only the pointer position used by the access.
+  bool CheckWholeAccess = false;
 
   enum class Placement {
     ScalarOptimizerLate,
@@ -24,8 +27,8 @@ struct FlexFatSanitizerOptions {
   Placement PassPlacement = Placement::ScalarOptimizerLate;
 
   enum class FlexFatMode {
-    Fast,       /// Instrument at the selected placement (scalar-late by default)
-    Safe,       /// Instrument at PipelineStartEP and again at selected placement
+    Fast, /// Instrument at the selected placement (scalar-late by default)
+    Safe, /// Instrument at PipelineStartEP and again at selected placement
     RightAlign, /// Selected placement + right-align allocations within class
                 /// slots to improve detection of right-side (overflow) OOB at
                 /// the cost of a blind spot on the left (underflow) side.
@@ -50,7 +53,8 @@ private:
 class FlexFatSanitizerFunctionPass
     : public PassInfoMixin<FlexFatSanitizerFunctionPass> {
 public:
-  LLVM_ABI explicit FlexFatSanitizerFunctionPass(const FlexFatSanitizerOptions &Options);
+  LLVM_ABI explicit FlexFatSanitizerFunctionPass(
+      const FlexFatSanitizerOptions &Options);
   LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
   static bool isRequired() { return true; }
 
