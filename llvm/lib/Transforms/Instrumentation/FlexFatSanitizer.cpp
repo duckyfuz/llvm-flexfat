@@ -120,19 +120,20 @@ private:
 
   // Constants (kept in sync with flexfat_config.h / flexfat_config_generated.h)
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  static constexpr uint64_t RegionBase     = 0x100000000000ULL;
-  static constexpr uint64_t RegionSizeLog  = FLEXFAT_REGION_SIZE_LOG;   // 35
+  static constexpr uint64_t RegionBase = FLEXFAT_REGION_BASE;
+  static constexpr uint64_t RegionSizeLog = FLEXFAT_REGION_SIZE_LOG;
   static constexpr uint64_t NumSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
-  static constexpr uint64_t MinSizeLog     = 4;  // unused in custom mode
+  static constexpr uint64_t MinSizeLog = 4; // unused in custom mode
+  static constexpr uint64_t kTablesBase = FLEXFAT_TABLES_BASE;
 #else
-  static constexpr uint64_t RegionBase     = 0x100000000000ULL;
-  static constexpr uint64_t RegionSizeLog  = 32;
-  static constexpr uint64_t NumSizeClasses = 27; // kMaxSizeLog(30) - kMinSizeLog(4) + 1
-  static constexpr uint64_t MinSizeLog     = 4;
+  static constexpr uint64_t RegionBase = 0x100000000000ULL;
+  static constexpr uint64_t RegionSizeLog = 32;
+  static constexpr uint64_t NumSizeClasses =
+      27; // kMaxSizeLog(30) - kMinSizeLog(4) + 1
+  static constexpr uint64_t MinSizeLog = 4;
+  static constexpr uint64_t kTablesBase = 0x118000000000ULL;
 #endif
 
-  // Fixed absolute addresses for metadata tables (must match flexfat_rtl.cpp)
-  static constexpr uint64_t kTablesBase   = 0x118000000000ULL;
   static constexpr uint64_t kTablesOffset = 0x1000000ULL;
 
   MDNode *InstrumentedMD = nullptr;
@@ -261,16 +262,20 @@ FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
   // In custom-config mode we deliberately use the reciprocal-multiply path
   // for every class, including power-of-two sizes, so runtime and
   // instrumentation recover bases the same way.
-  Value *Magic64     = loadFromFixedTable(IRB, TablesBase + 1 * kTablesOffset,
-                                          I64Ty, RegionIndex);
+  Value *Magic64 = loadFromFixedTable(IRB, TablesBase + 1 * kTablesOffset,
+                                      I64Ty, RegionIndex);
 
-  Value *Ptr128   = IRB.CreateZExt(PtrInt, I128Ty);
-  Value *Magic128 = IRB.CreateZExt(IRB.CreateZExtOrTrunc(Magic64, IntptrTy),
-                                   I128Ty);
-  Value *Mul128   = IRB.CreateMul(Ptr128, Magic128);
-  Value *Idx128   = IRB.CreateLShr(Mul128, ConstantInt::get(I128Ty, 64));
-  Value *Idx      = IRB.CreateTrunc(Idx128, IntptrTy);
-  Value *BaseMul  = IRB.CreateMul(Idx, AllocSize);
+  Value *Ptr128 = IRB.CreateZExt(PtrInt, I128Ty);
+  Value *Magic128 =
+      IRB.CreateZExt(IRB.CreateZExtOrTrunc(Magic64, IntptrTy), I128Ty);
+  Value *Mul128 = IRB.CreateMul(Ptr128, Magic128);
+  Value *Idx128 = IRB.CreateLShr(Mul128, ConstantInt::get(I128Ty, 64));
+  Value *Idx = IRB.CreateTrunc(Idx128, IntptrTy);
+  Value *BaseMul = IRB.CreateMul(Idx, AllocSize);
+  Value *QuotientTooHigh = IRB.CreateICmpUGT(BaseMul, PtrInt);
+  Value *CorrectedIdx = IRB.CreateSelect(
+      QuotientTooHigh, IRB.CreateSub(Idx, ConstantInt::get(IntptrTy, 1)), Idx);
+  BaseMul = IRB.CreateMul(CorrectedIdx, AllocSize);
 
   return {AllocSize, BaseMul};
 }

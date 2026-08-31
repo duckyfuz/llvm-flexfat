@@ -1,4 +1,5 @@
-//===-- flexfat_rtl.cpp - FlexFat Sanitizer Runtime Library ---------------------===//
+//===-- flexfat_rtl.cpp - FlexFat Sanitizer Runtime Library
+//---------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -19,8 +20,8 @@
 #include "flexfat_interface.h"
 #include "flexfat_stack.h"
 #include "sanitizer_common/sanitizer_allocator.h"
-#include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_allocator_internal.h"
+#include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flag_parser.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_mutex.h"
@@ -30,7 +31,8 @@ using namespace __sanitizer;
 
 namespace __flexfat {
 
-// Flag to track initialization state (not static — accessed by flexfat_interceptors.cpp)
+// Flag to track initialization state (not static — accessed by
+// flexfat_interceptors.cpp)
 bool flexfat_inited = false;
 
 // Set to true when -fsanitize-recover=flexfat is active. Controls whether
@@ -52,9 +54,9 @@ static constexpr uptr kMallocAlignment = alignof(max_align_t);
 // FLEXFAT_MAX_ARRAY_SIZE. We size the static arrays at compile time using
 // whichever is larger so the same translation unit works in both modes.
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  static constexpr uptr kMaxSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
+static constexpr uptr kMaxSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
 #else
-  static constexpr uptr kMaxSizeClasses = kNumSizeClasses;
+static constexpr uptr kMaxSizeClasses = kNumSizeClasses;
 #endif
 
 // Region table - initialized in __flexfat_init
@@ -83,11 +85,11 @@ static StaticSpinMutex region_locks[kMaxSizeClasses];
 // tables. This allows the LLVM pass to use absolute addressing (imm[index*8])
 // instead of PC-relative loads.
 //
-//   0x118000000000: Sizes (8 bytes per class)
-//   0x118001000000: Magics (8 bytes per class, custom mode)
-//   0x118003000000: Masks (8 bytes per class, pow2 mode)
-static constexpr uptr kTablesBase   = 0x118000000000ULL;
-static constexpr uptr kTablesOffset = 0x1000000ULL;  // 16 MB between tables
+//   kTablesBase + 0 * kTablesOffset: Sizes (8 bytes per class)
+//   kTablesBase + 1 * kTablesOffset: Magics (custom mode)
+//   kTablesBase + 3 * kTablesOffset: Masks (POW2 mode)
+// Custom mode generates kTablesBase together with its region geometry.
+static constexpr uptr kTablesOffset = 0x1000000ULL; // 16 MB between tables
 
 static void InitializeFlags() {
   SetCommonFlagsDefaults();
@@ -95,13 +97,15 @@ static void InitializeFlags() {
   {
     CommonFlags cf;
     cf.CopyFrom(*common_flags());
-    cf.exitcode = 1; // Fatal OOB exits with code 1 by default
-    cf.abort_on_error = false; // Use the exitcode path, not SIGABRT, so output is flushed before the process exits
+    cf.exitcode = 1;           // Fatal OOB exits with code 1 by default
+    cf.abort_on_error = false; // Use the exitcode path, not SIGABRT, so output
+                               // is flushed before the process exits
     OverrideCommonFlags(cf);
   }
 
   // Register all common flags with a parser and read FLEXFAT_OPTIONS.
-  //    Allow overriding flags at runtime, e.g.: FLEXFAT_OPTIONS=exitcode=42:verbosity=1 ./my_program
+  //    Allow overriding flags at runtime, e.g.:
+  //    FLEXFAT_OPTIONS=exitcode=42:verbosity=1 ./my_program
   FlagParser parser;
   RegisterCommonFlags(&parser);
   parser.ParseStringFromEnv("FLEXFAT_OPTIONS");
@@ -115,33 +119,34 @@ static void InitTables() {
   if (!MmapFixedNoReserve(kTablesBase, 64 * 1024 * 1024, "flexfat_tables"))
     Die();
 
-  u64 *sizes  = (u64 *)(kTablesBase + 0 * kTablesOffset);
+  u64 *sizes = (u64 *)(kTablesBase + 0 * kTablesOffset);
 #ifdef FLEXFAT_CUSTOM_CONFIG
   u64 *magics = (u64 *)(kTablesBase + 1 * kTablesOffset);
 #else
-  u64 *masks  = (u64 *)(kTablesBase + 3 * kTablesOffset);
+  u64 *masks = (u64 *)(kTablesBase + 3 * kTablesOffset);
 #endif
 
-  // Initialize all possible region indices (up to 1024 for now, which covers 32TB)
-  // with "poison" values: Size=0, Base=0. Any access to a non-FlexFat pointer
-  // will then result in (Base=0, End=0), which always fails the OOB check:
+  // Initialize all possible region indices (up to 1024 for now, which covers
+  // 32TB) with "poison" values: Size=0, Base=0. Any access to a non-FlexFat
+  // pointer will then result in (Base=0, End=0), which always fails the OOB
+  // check:
   //   Ptr < 0 || Ptr >= 0  => Always True.
   for (uptr i = 0; i < 1024; i++) {
     if (i < kNumSizeClasses) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
-      sizes[i]  = (u64)kFlexFatGenSizes[i];
+      sizes[i] = (u64)kFlexFatGenSizes[i];
       magics[i] = (u64)kFlexFatGenMagics[i];
 #else
       u64 size = (u64)SizeClassToSize(i);
-      sizes[i]  = size;
-      masks[i]  = ~(size - 1);
+      sizes[i] = size;
+      masks[i] = ~(size - 1);
 #endif
     } else {
-      sizes[i]  = 0;
+      sizes[i] = 0;
 #ifdef FLEXFAT_CUSTOM_CONFIG
       magics[i] = 0;
 #else
-      masks[i]  = 0;
+      masks[i] = 0;
 #endif
     }
   }
@@ -150,7 +155,7 @@ static void InitTables() {
 static void InitRegionTable() {
   for (uptr i = 0; i < kNumSizeClasses; i++) {
     uptr size = SizeClassToSize(i);
-    kRegions[i].size      = size;
+    kRegions[i].size = size;
     kRegions[i].alignment = size;
     free_lists[i] = nullptr;
   }
@@ -161,27 +166,30 @@ static void InitRegionTable() {
 static bool InitMemoryRegions() {
   for (uptr i = 0; i < kNumSizeClasses; i++) {
     uptr region_start = GetRegionStart(i);
-    
+
     // Reserve the region without committing physical memory
-    // MmapFixedNoReserve maps memory but doesn't allocate physical pages until they're accessed
-    bool success = MmapFixedNoReserve(region_start, kRegionSize, "flexfat_region");
-    
+    // MmapFixedNoReserve maps memory but doesn't allocate physical pages until
+    // they're accessed
+    bool success =
+        MmapFixedNoReserve(region_start, kRegionSize, "flexfat_region");
+
     if (!success)
       return false;
-    
+
     region_bases[i] = region_start;
-    
-    // The first allocation must be aligned to the object size relative to absolute zero.
-    // This is required for the magic-number fixed point math to securely compute object bases.
+
+    // The first allocation must be aligned to the object size relative to
+    // absolute zero. This is required for the magic-number fixed point math to
+    // securely compute object bases.
     uptr size = kRegions[i].size;
     uptr offset = region_start % size;
     uptr initial_alloc = region_start;
     if (offset != 0)
       initial_alloc += (size - offset);
-      
+
     region_next_alloc[i] = initial_alloc;
   }
-  
+
   return true;
 }
 

@@ -4,24 +4,22 @@
 // Mode-difference test: one-past-end overflow on an allocation where aligned
 // right-biasing still leaves a non-zero shift within the slot.
 //
-// Default (left-align): a 112-byte object lives at the start of a 128-byte
-// slot; buf[112] falls in the 16-byte right padding -> access is within the
-// slot ->
-// NOT caught.
+// Default (left-align): a 176-byte object lives at the start of a larger
+// slot; buf[176] falls in the right padding and is not caught.
 //
-// Right-align: the same 112-byte object is shifted to slot_base+16 to preserve
-// malloc alignment; buf[112] = slot_base+128, which is exactly the slot
-// boundary -> OOB -> caught.
+// Right-align: the same object is shifted by at least 16 bytes while preserving
+// malloc alignment; buf[176] reaches the slot boundary -> OOB -> caught.
 
 #include <cstdio>
 #include <cstdlib>
 
 int main() {
-  // 112 bytes -> 128-byte class in both POW2 and custom-config mode.
-  char *buf = (char *)malloc(112);
-  if (!buf) return 1;
+  // 176 leaves an exact multiple of 16 bytes of slack in both profiles.
+  char *buf = (char *)malloc(176);
+  if (!buf)
+    return 1;
 
-  buf[112] = 'X'; // one-past-end write
+  buf[176] = 'X'; // one-past-end write
 
   // CHECK-MISS: overflow: not caught (in right padding)
   // CHECK-CATCH: FLEXFAT ERROR: out-of-bounds error detected!
