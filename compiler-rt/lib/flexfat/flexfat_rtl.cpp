@@ -206,11 +206,18 @@ static bool InitMemoryRegions() {
 //
 // The free list always stores slot bases (not right-aligned pointers) so that
 // freed blocks can be reused with a different offset for a new request size.
-void *Allocate(uptr size) {
+static void *AllocateImpl(uptr size, uptr alignment) {
   if (size == 0)
     size = 1;
 
-  uptr class_index = SizeClassIndex(size);
+  uptr class_request = size;
+  if (alignment) {
+    if (alignment - 1 > ~(uptr)0 - class_request)
+      return nullptr;
+    class_request += alignment - 1;
+  }
+
+  uptr class_index = SizeClassIndex(class_request);
   if (class_index >= kNumSizeClasses)
     return nullptr;
 
@@ -233,9 +240,9 @@ void *Allocate(uptr size) {
     uptr addr = region_next_alloc[class_index];
 
     if (addr + alloc_size > region_end) {
-      // Region exhausted: fall back to standard libc-style allocation.
-      // The resulting pointer will not be a FlexFat pointer (wide-bounds).
-      return (void *)InternalAlloc(size);
+      // Interceptors perform matched system-allocation fallback.  Returning an
+      // InternalAlloc pointer here would later send it to libc free().
+      return nullptr;
     }
 
     region_next_alloc[class_index] = addr + alloc_size;
@@ -244,12 +251,22 @@ void *Allocate(uptr size) {
 
   // In right-align mode, preserve malloc alignment by rounding the available
   // slack down to the nearest alignment boundary before shifting the pointer.
+  if (alignment) {
+    return (void *)RoundUpTo(slot_base, alignment);
+  }
   if (flexfat_right_align) {
     uptr slack = alloc_size - size;
     uptr aligned_offset = RoundDownTo(slack, kMallocAlignment);
     return (void *)(slot_base + aligned_offset);
   }
   return (void *)slot_base;
+}
+
+void *Allocate(uptr size) { return AllocateImpl(size, 0); }
+
+void *AllocateAligned(uptr size, uptr alignment) {
+  CHECK(IsPowerOfTwo(alignment));
+  return AllocateImpl(size, alignment);
 }
 
 // Free a FlexFat allocation by pushing its slot base onto the free list.
@@ -264,11 +281,7 @@ void Deallocate(void *ptr) {
 
   uptr addr = (uptr)ptr;
 
-  // Validate this is a FlexFat pointer
-  if (!IsFlexFatPointer(addr)) {
-    InternalFree(ptr);
-    return;
-  }
+  CHECK(IsFlexFatPointer(addr));
 
   uptr region = GetRegionIndex(addr);
   // Recover the slot base: in right-align mode ptr is offset within the slot;
@@ -313,7 +326,7 @@ static void PrintWarning(uptr ptr, uptr base, uptr bound, int is_write,
   stack.Print();
 }
 
-}  // namespace __flexfat
+} // namespace __flexfat
 
 // ---------------------- Interface Functions ----------------------
 
@@ -361,14 +374,10 @@ void __flexfat_warn_oob(uptr ptr, uptr base, uptr bound, int is_write) {
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-uptr __flexfat_get_base(uptr ptr) {
-  return __flexfat::GetBase(ptr);
-}
+uptr __flexfat_get_base(uptr ptr) { return __flexfat::GetBase(ptr); }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-uptr __flexfat_get_size(uptr ptr) {
-  return __flexfat::GetSize(ptr);
-}
+uptr __flexfat_get_size(uptr ptr) { return __flexfat::GetSize(ptr); }
 
 SANITIZER_INTERFACE_ATTRIBUTE
 uptr __flexfat_get_offset(uptr ptr) {
@@ -388,16 +397,12 @@ uptr __flexfat_get_usable_size(uptr ptr) {
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void *__flexfat_malloc(uptr size) {
-  return __flexfat::Allocate(size);
-}
+void *__flexfat_malloc(uptr size) { return __flexfat::Allocate(size); }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void __flexfat_free(void *ptr) {
-  __flexfat::Deallocate(ptr);
-}
+void __flexfat_free(void *ptr) { __flexfat::Deallocate(ptr); }
 
-}  // extern "C"
+} // extern "C"
 
 #if SANITIZER_CAN_USE_PREINIT_ARRAY
 // ELF platforms: use .preinit_array for earliest possible initialization
