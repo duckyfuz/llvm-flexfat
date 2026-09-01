@@ -439,6 +439,15 @@ Value *FlexFatSanitizer::getRecoveredBase(Value *CompanionBase) {
   if (auto It = RecoveredBases.find(CompanionBase); It != RecoveredBases.end())
     return It->second;
 
+  // A musttail result may only be followed by its return.  Recovery would be
+  // dead for that zero-width return escape, and inserting it after the call
+  // would invalidate the required musttail/ret pair.
+  if (auto *Call = dyn_cast<CallInst>(CompanionBase);
+      Call && Call->isMustTailCall()) {
+    RecoveredBases[CompanionBase] = CompanionBase;
+    return CompanionBase;
+  }
+
   Function *F = nullptr;
   if (auto *I = dyn_cast<Instruction>(CompanionBase))
     F = I->getFunction();
@@ -746,10 +755,41 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
     if (CE->isCast() && CE->getOperand(0)->getType()->isPointerTy()) {
       Result = getBounds(CE->getOperand(0));
       Result.CheckedPointer = Ptr;
+    } else if (CE->getOpcode() == Instruction::IntToPtr) {
+      auto *AddressConstant = dyn_cast<ConstantInt>(CE->getOperand(0));
+      if (!AddressConstant) {
+        Result = makeRecord(
+            ConstantPointerNull::get(cast<PointerType>(Ptr->getType())),
+            BaseKind::Dynamic, std::nullopt);
+      } else {
+        uint64_t Address = AddressConstant->getValue()
+                               .zextOrTrunc(IntptrTy->getIntegerBitWidth())
+                               .getZExtValue();
+        uint64_t RegionIndex =
+            Address < UserAddressLimit ? Address >> RegionSizeLog : 0;
+        bool IsManaged = RegionIndex >= ManagedTableBegin &&
+                         RegionIndex < ManagedTableBegin + NumSizeClasses;
+        uint64_t BaseAddress = 0;
+        if (IsManaged) {
+          uint64_t ClassIndex = RegionIndex - ManagedTableBegin;
+#ifdef FLEXFAT_CUSTOM_CONFIG
+          uint64_t AllocSize = kFlexFatGenSizes[ClassIndex];
+#else
+          uint64_t AllocSize = 1ULL << (ClassIndex + 4);
+#endif
+          BaseAddress = Address - Address % AllocSize;
+        } else {
+          RegionIndex = 0;
+        }
+
+        Constant *Base = ConstantExpr::getIntToPtr(
+            ConstantInt::get(IntptrTy, BaseAddress),
+            cast<PointerType>(Ptr->getType()));
+        SafeTableIndices[Base] = ConstantInt::get(IntptrTy, RegionIndex);
+        Result = makeRecord(Base, BaseKind::Dynamic, std::nullopt);
+      }
     } else {
-      // Constant integer-derived pointers have no function-local definition
-      // after which recovery can be inserted.  They use the index-zero
-      // sentinel, which is the dynamic fallback result for foreign pointers.
+      // Unknown constant expressions use the foreign-pointer sentinel.
       Result = makeRecord(
           ConstantPointerNull::get(cast<PointerType>(Ptr->getType())),
           BaseKind::Dynamic, std::nullopt);

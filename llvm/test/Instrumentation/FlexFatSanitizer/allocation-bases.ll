@@ -81,6 +81,16 @@ define i8 @aligned_families(i64 %offset) {
   ret i8 %sum
 }
 
+; A musttail result must remain immediately adjacent to its return.  Its
+; zero-width return escape is statically valid, so no base recovery is needed.
+define ptr @musttail_aligned_alloc(i64 %alignment, i64 %size) {
+; FAST-LABEL: @musttail_aligned_alloc(
+; FAST: %p = musttail call ptr @aligned_alloc(i64 %alignment, i64 %size)
+; FAST-NEXT: ret ptr %p
+  %p = musttail call ptr @aligned_alloc(i64 %alignment, i64 %size)
+  ret ptr %p
+}
+
 ; Unknown call results also retain recovery.
 define i8 @unknown_result(i64 %offset) {
 ; FAST-LABEL: @unknown_result(

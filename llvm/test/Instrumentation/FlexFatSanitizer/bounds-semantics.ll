@@ -84,6 +84,17 @@ define i8 @non_flexfat_pointer() {
   ret i8 %v
 }
 
+; Integer-derived constants in a managed region use that region's real base
+; and size metadata rather than the foreign-pointer sentinel.
+define i64 @managed_constant_pointer() {
+; CHECK-LABEL: @managed_constant_pointer(
+; CHECK: load i64, ptr getelementptr inbounds (i64, ptr inttoptr (i64 {{[0-9]+}} to ptr), i64 {{[0-9]+}})
+; CHECK: call void @__flexfat_report_oob
+; CHECK: load i64, ptr inttoptr (i64 17592186044428 to ptr)
+  %v = load i64, ptr inttoptr (i64 17592186044428 to ptr)
+  ret i64 %v
+}
+
 ; Constant pointers above 2^48 also fold to sentinel index zero rather than
 ; forming an out-of-range metadata address.
 define i8 @high_constant_pointer() {
