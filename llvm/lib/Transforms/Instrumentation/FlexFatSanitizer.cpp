@@ -261,7 +261,10 @@ FunctionCallee FlexFatSanitizer::getWarnOobFn() {
 //   %mul128     = mul i128 %ptr128, %magic128
 //   %idx128     = lshr i128 %mul128, 64
 //   %idx        = trunc i128 %idx128 to i64
-//   %base_mul   = mul i64 %idx, %alloc_size
+//   %candidate  = mul i64 %idx, %alloc_size
+//   %too_high   = icmp ugt i64 %candidate, %ptr
+//   %corrected  = sub i64 %candidate, %alloc_size
+//   %base       = select i1 %too_high, i64 %corrected, i64 %candidate
 // ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
 FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
@@ -288,13 +291,15 @@ FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
   Value *Mul128 = IRB.CreateMul(Ptr128, Magic128);
   Value *Idx128 = IRB.CreateLShr(Mul128, ConstantInt::get(I128Ty, 64));
   Value *Idx = IRB.CreateTrunc(Idx128, IntptrTy);
-  Value *BaseMul = IRB.CreateMul(Idx, AllocSize);
-  Value *QuotientTooHigh = IRB.CreateICmpUGT(BaseMul, PtrInt);
-  Value *CorrectedIdx = IRB.CreateSelect(
-      QuotientTooHigh, IRB.CreateSub(Idx, ConstantInt::get(IntptrTy, 1)), Idx);
-  BaseMul = IRB.CreateMul(CorrectedIdx, AllocSize);
+  Value *Candidate = IRB.CreateMul(Idx, AllocSize, "flexfat.base.candidate");
+  Value *QuotientTooHigh =
+      IRB.CreateICmpUGT(Candidate, PtrInt, "flexfat.quotient.high");
+  Value *CorrectedCandidate =
+      IRB.CreateSub(Candidate, AllocSize, "flexfat.base.corrected");
+  Value *Base = IRB.CreateSelect(QuotientTooHigh, CorrectedCandidate,
+                                 Candidate, "flexfat.base.int");
 
-  return {AllocSize, BaseMul};
+  return {AllocSize, Base};
 }
 #endif // FLEXFAT_CUSTOM_CONFIG
 

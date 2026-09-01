@@ -173,8 +173,8 @@ inline uptr GetSize(uptr ptr) {
 // classes. This keeps base recovery uniform across custom layouts.
 //
 //   quotient = (u128)ptr * magic >> 64
-//   if (quotient * size > ptr) --quotient
-//   base = quotient * size
+//   candidate = quotient * size
+//   base = candidate > ptr ? candidate - size : candidate
 inline uptr GetBase(uptr ptr) {
   uptr table_index = GetTableIndex(ptr);
   const uptr *sizes = (const uptr *)(kTablesBase + 0 * kTablesOffset);
@@ -183,9 +183,8 @@ inline uptr GetBase(uptr ptr) {
   u128 mul = (u128)ptr * (u128)magics[table_index];
   uptr idx = (uptr)(mul >> 64);
   uptr size = sizes[table_index];
-  if ((u128)idx * size > ptr)
-    --idx;
-  return idx * size;
+  uptr candidate = idx * size;
+  return candidate > ptr ? candidate - size : candidate;
 }
 
 // CheckBounds override: uses the custom GetBase above.

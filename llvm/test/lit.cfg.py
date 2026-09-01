@@ -89,6 +89,9 @@ config.test_source_root = os.path.dirname(__file__)
 # test_exec_root: The root path where tests should be run.
 config.test_exec_root = os.path.join(config.llvm_obj_root, "test")
 
+if getattr(config, "flexfat_custom_config", False):
+    config.available_features.add("flexfat-custom-config")
+
 # Tweak the PATH to include the tools dir.
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 

@@ -1,4 +1,5 @@
 ; RUN: opt < %s -passes='flexfat,verify' -S | FileCheck %s
+; RUN: %if flexfat-custom-config %{ opt < %s -passes='flexfat,verify' -S | FileCheck %s --check-prefix=CUSTOM %}
 
 target datalayout = "e-m:e-i64:64-i128:128-n32:64-S128"
 
@@ -23,6 +24,14 @@ define i8 @argument_gep_chain(ptr %p, i64 %a, i64 %b) {
 ; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
 ; CHECK: load i64, ptr
 ; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
+; CUSTOM-LABEL: @argument_gep_chain(
+; CUSTOM: %[[MUL128:.*]] = mul i128
+; CUSTOM: %[[IDX:.*]] = trunc i128 {{.*}} to i64
+; CUSTOM: %[[CANDIDATE:.*]] = mul i64 %[[IDX]], %[[SIZE:.*]]
+; CUSTOM-NOT: mul i64
+; CUSTOM: %[[TOO_HIGH:.*]] = icmp ugt i64 %[[CANDIDATE]], %flexfat.root.int
+; CUSTOM: %[[CORRECTED:.*]] = sub i64 %[[CANDIDATE]], %[[SIZE]]
+; CUSTOM: %flexfat.base.int = select i1 %[[TOO_HIGH]], i64 %[[CORRECTED]], i64 %[[CANDIDATE]]
   %q1 = getelementptr i8, ptr %p, i64 %a
   %x = load i8, ptr %q1
   %q2 = getelementptr i8, ptr %q1, i64 %b
