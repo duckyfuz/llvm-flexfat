@@ -1,5 +1,5 @@
 // RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=optimizer-last %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
-// RUN: %clangxx_flexfat_safe -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
+// RUN: %clangxx_flexfat_safe -mllvm -flexfat-check-whole-access -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
 
 // An out-of-bounds read inside peek(), with the return value discarded.
 // With the legacy optimizer-last placement, the dead computation can be

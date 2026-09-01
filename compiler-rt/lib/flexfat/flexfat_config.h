@@ -1,4 +1,5 @@
-//===-- flexfat_config.h - FlexFat Memory Layout Configuration -----------------===//
+//===-- flexfat_config.h - FlexFat Memory Layout Configuration
+//-----------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -22,10 +23,10 @@
 //   ...
 //   Region N: [0xN0_0000_0000, ...)            - 2^(N+4)-byte allocations
 //
-// Custom Config Mode (FLEXFAT_CUSTOM_CONFIG, kRegionSizeLog=35):
+// Custom Config Mode (FLEXFAT_CUSTOM_CONFIG, kRegionSizeLog=38):
 //   Arbitrary configured sizes (e.g. 48, 80, 96 bytes) are also supported.
-//   kRegionSizeLog increases to 35 (32 GB per region) to preserve precision
-//   of the magic-number arithmetic across the full region.
+//   kRegionSizeLog increases to 38 (256 GiB per region), allowing all 64
+//   LowFat source classes through 64 GiB.
 //   The key helpers (SizeClassIndex, SizeClassToSize) switch to table lookups.
 //   Base recovery uses generated reciprocal tables for every size class.
 //
@@ -57,7 +58,7 @@ inline bool CheckBoundsImpl(uptr ptr, uptr access_size, uptr base,
 //===----------------------------------------------------------------------===//
 
 // Minimum allocation size (must be power of 2)
-constexpr uptr kMinSizeLog = 4;  // 16 bytes
+constexpr uptr kMinSizeLog = 4; // 16 bytes
 constexpr uptr kMinSize = 1ULL << kMinSizeLog;
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -81,7 +82,7 @@ inline uptr SizeClassToSize(uptr class_index) {
 #else
 
 // Maximum allocation size (must be power of 2)
-constexpr uptr kMaxSizeLog = 30;  // 1 GB
+constexpr uptr kMaxSizeLog = 30; // 1 GB
 constexpr uptr kMaxSize = 1ULL << kMaxSizeLog;
 
 // Number of size classes (one per power of 2)
@@ -112,7 +113,7 @@ inline uptr SizeClassToSize(uptr class_index) {
 //===----------------------------------------------------------------------===//
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
-constexpr uptr kRegionSizeLog = FLEXFAT_REGION_SIZE_LOG; // 35
+constexpr uptr kRegionSizeLog = FLEXFAT_REGION_SIZE_LOG;
 #else
 // Each region is 4GB (32 bits of address space per region)
 constexpr uptr kRegionSizeLog = 32;
@@ -123,12 +124,18 @@ constexpr uptr kRegionSize = 1ULL << kRegionSizeLog;
 // Base address where FlexFat regions start
 // We use the upper portion of the address space
 // On 64-bit systems: 0x100000000000 (17.6 TB mark)
+#ifdef FLEXFAT_CUSTOM_CONFIG
+constexpr uptr kRegionBase = FLEXFAT_REGION_BASE;
+constexpr uptr kTablesBase = FLEXFAT_TABLES_BASE;
+#else
 constexpr uptr kRegionBase = 0x100000000000ULL;
+constexpr uptr kTablesBase = 0x118000000000ULL;
+#endif
 
 // Get the region number from a pointer
 inline uptr GetRegionIndex(uptr ptr) {
   if (ptr < kRegionBase)
-    return (uptr)-1;  // Not a FlexFat pointer
+    return (uptr)-1; // Not a FlexFat pointer
   return (ptr - kRegionBase) >> kRegionSizeLog;
 }
 
@@ -151,7 +158,7 @@ inline bool IsFlexFatPointer(uptr ptr) {
 inline uptr GetSize(uptr ptr) {
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
-    return (uptr)-1;  // Wide-bounds for non-FlexFat pointers
+    return (uptr)-1; // Wide-bounds for non-FlexFat pointers
   return SizeClassToSize(region);
 }
 
@@ -161,14 +168,18 @@ inline uptr GetSize(uptr ptr) {
 // multiplication for every configured size class, including power-of-two
 // classes. This keeps base recovery uniform across custom layouts.
 //
-//   base = ((u128)ptr * magic >> 64) * size
+//   quotient = (u128)ptr * magic >> 64
+//   if (quotient * size > ptr) --quotient
+//   base = quotient * size
 inline uptr GetBase(uptr ptr) {
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
     return 0;
   typedef unsigned __int128 u128;
-  u128 mul  = (u128)ptr * (u128)kFlexFatGenMagics[region];
-  uptr idx  = (uptr)(mul >> 64);
+  u128 mul = (u128)ptr * (u128)kFlexFatGenMagics[region];
+  uptr idx = (uptr)(mul >> 64);
+  if ((u128)idx * (uptr)kFlexFatGenSizes[region] > ptr)
+    --idx;
   return idx * (uptr)kFlexFatGenSizes[region];
 }
 
@@ -176,9 +187,9 @@ inline uptr GetBase(uptr ptr) {
 inline bool CheckBounds(uptr ptr, uptr access_size) {
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
-    return true;  // Not a FlexFat pointer — assume valid
+    return true; // Not a FlexFat pointer — assume valid
   uptr alloc_size = SizeClassToSize(region);
-  uptr base       = GetBase(ptr);
+  uptr base = GetBase(ptr);
   return CheckBoundsImpl(ptr, access_size, base, alloc_size);
 }
 
@@ -189,10 +200,10 @@ inline bool CheckBounds(uptr ptr, uptr access_size) {
 inline uptr GetBase(uptr ptr) {
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
-    return 0;  // Not a valid FlexFat pointer
-  
+    return 0; // Not a valid FlexFat pointer
+
   uptr size = SizeClassToSize(region);
-  uptr mask = ~(size - 1);  // Mask off low bits
+  uptr mask = ~(size - 1); // Mask off low bits
   return ptr & mask;
 }
 
@@ -200,8 +211,8 @@ inline uptr GetBase(uptr ptr) {
 inline bool CheckBounds(uptr ptr, uptr access_size) {
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
-    return true;  // Not a FlexFat pointer, assume valid (or could error)
-  
+    return true; // Not a FlexFat pointer, assume valid (or could error)
+
   uptr alloc_size = SizeClassToSize(region);
   uptr base = ptr & ~(alloc_size - 1);
 
@@ -215,14 +226,14 @@ inline bool CheckBounds(uptr ptr, uptr access_size) {
 //===----------------------------------------------------------------------===//
 
 struct RegionInfo {
-  uptr size;           // Allocation size for this region
-  uptr alignment;      // Alignment (same as size for FlexFat)
+  uptr size;      // Allocation size for this region
+  uptr alignment; // Alignment (same as size for FlexFat)
 };
 
 // This table is indexed by region number
 // Initialized in flexfat_rtl.cpp
 extern RegionInfo kRegions[kNumSizeClasses];
 
-}  // namespace __flexfat
+} // namespace __flexfat
 
-#endif  // LF_CONFIG_H
+#endif // LF_CONFIG_H
