@@ -139,6 +139,7 @@ private:
   Value *getSafeTableIndex(IRBuilder<> &IRB, Value *PtrInt);
   Value *getMemoizedTableIndex(Value *CompanionBase) const;
   bool isAllocationResult(Value *Ptr) const;
+  bool isDirectAllocationBase(Value *Ptr) const;
   bool isDefinitelyNonFlexFat(Value *Ptr, SmallPtrSetImpl<Value *> &Seen) const;
   bool doesIntEscape(Value *V, SmallPtrSetImpl<Value *> &Seen) const;
   std::optional<unsigned> getConsumedOperandIndex(const CallBase &CB) const;
@@ -377,7 +378,33 @@ bool FlexFatSanitizer::isAllocationResult(Value *Ptr) const {
          Name == "aligned_alloc" || Name == "valloc" || Name == "memalign" ||
          Name == "pvalloc" || Name == "strdup" || Name == "strndup" ||
          Name == "_Znwm" || Name == "_Znam" || Name == "_ZnwmRKSt9nothrow_t" ||
-         Name == "_ZnamRKSt9nothrow_t";
+         Name == "_ZnamRKSt9nothrow_t" || Name == "_Znwj" || Name == "_Znaj" ||
+         Name == "_ZnwjRKSt9nothrow_t" || Name == "_ZnajRKSt9nothrow_t" ||
+         Name == "_ZnwmSt11align_val_t" || Name == "_ZnamSt11align_val_t" ||
+         Name == "_ZnwmSt11align_val_tRKSt9nothrow_t" ||
+         Name == "_ZnamSt11align_val_tRKSt9nothrow_t" ||
+         Name == "_ZnwjSt11align_val_t" || Name == "_ZnajSt11align_val_t" ||
+         Name == "_ZnwjSt11align_val_tRKSt9nothrow_t" ||
+         Name == "_ZnajSt11align_val_tRKSt9nothrow_t";
+}
+
+bool FlexFatSanitizer::isDirectAllocationBase(Value *Ptr) const {
+  if (Options.Mode == FlexFatSanitizerOptions::FlexFatMode::RightAlign)
+    return false;
+
+  auto *CB = dyn_cast<CallBase>(Ptr);
+  if (!CB)
+    return false;
+  const auto *F =
+      dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
+  if (!F)
+    return false;
+  StringRef Name = F->getName();
+  return Name == "malloc" || Name == "calloc" || Name == "realloc" ||
+         Name == "strdup" || Name == "strndup" || Name == "_Znwm" ||
+         Name == "_Znam" || Name == "_ZnwmRKSt9nothrow_t" ||
+         Name == "_ZnamRKSt9nothrow_t" || Name == "_Znwj" || Name == "_Znaj" ||
+         Name == "_ZnwjRKSt9nothrow_t" || Name == "_ZnajRKSt9nothrow_t";
 }
 
 bool FlexFatSanitizer::isDefinitelyNonFlexFat(
@@ -564,8 +591,9 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
 
   BoundsRecord Result;
   if (isAllocationResult(Ptr)) {
-    Result = makeRecord(getRecoveredBase(Ptr), BaseKind::StaticKnown,
-                        getAllocationUpperBound(Ptr));
+    Value *Base = isDirectAllocationBase(Ptr) ? Ptr : getRecoveredBase(Ptr);
+    Result =
+        makeRecord(Base, BaseKind::StaticKnown, getAllocationUpperBound(Ptr));
   } else if (auto *GEP = dyn_cast<GEPOperator>(Ptr)) {
     Result = getBounds(GEP->getPointerOperand());
     Result.CheckedPointer = Ptr;
@@ -634,16 +662,51 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
   } else if (auto *Phi = dyn_cast<PHINode>(Ptr)) {
     BasicBlock::iterator InsertPt = Phi->getParent()->getFirstNonPHIIt();
     unsigned NumIncoming = Phi->getNumIncomingValues();
+    auto HasDirectAllocation = [&](Value *V, auto &&Recurse,
+                                   SmallPtrSetImpl<Value *> &Seen) -> bool {
+      if (!Seen.insert(V).second)
+        return false;
+      if (isDirectAllocationBase(V))
+        return true;
+      if (auto *GEP = dyn_cast<GEPOperator>(V))
+        return Recurse(GEP->getPointerOperand(), Recurse, Seen);
+      if (auto *Cast = dyn_cast<BitCastOperator>(V))
+        return Recurse(Cast->getOperand(0), Recurse, Seen);
+      if (auto *Cast = dyn_cast<AddrSpaceCastOperator>(V))
+        return Recurse(Cast->getOperand(0), Recurse, Seen);
+      if (auto *Freeze = dyn_cast<FreezeInst>(V))
+        return Recurse(Freeze->getOperand(0), Recurse, Seen);
+      if (auto *Select = dyn_cast<SelectInst>(V))
+        return Recurse(Select->getTrueValue(), Recurse, Seen) ||
+               Recurse(Select->getFalseValue(), Recurse, Seen);
+      if (auto *IncomingPhi = dyn_cast<PHINode>(V))
+        for (Value *Incoming : IncomingPhi->incoming_values())
+          if (Recurse(Incoming, Recurse, Seen))
+            return true;
+      return false;
+    };
+    bool UseIndexPhi = true;
+    SmallPtrSet<Value *, 16> DirectSeen;
+    for (Value *Incoming : Phi->incoming_values())
+      if (HasDirectAllocation(Incoming, HasDirectAllocation, DirectSeen)) {
+        UseIndexPhi = false;
+        break;
+      }
+
     auto *BasePhi =
         PHINode::Create(Phi->getType(), NumIncoming, "flexfat.base", InsertPt);
-    auto *IndexPhi =
-        PHINode::Create(IntptrTy, NumIncoming, "flexfat.region", InsertPt);
+    PHINode *IndexPhi =
+        UseIndexPhi
+            ? PHINode::Create(IntptrTy, NumIncoming, "flexfat.region", InsertPt)
+            : nullptr;
     markNoSanitize(BasePhi);
-    markNoSanitize(IndexPhi);
-    BoundsIRGeneration += 2;
+    if (IndexPhi)
+      markNoSanitize(IndexPhi);
+    BoundsIRGeneration += IndexPhi ? 2 : 1;
     Result = makeRecord(BasePhi, BaseKind::Dynamic, std::nullopt);
     Bounds[Ptr] = Result;
-    SafeTableIndices[BasePhi] = IndexPhi;
+    if (IndexPhi)
+      SafeTableIndices[BasePhi] = IndexPhi;
 
     // Complete the companion PHI's predecessor list before recursively
     // resolving any incoming value.  Recovering an invoke result splits its
@@ -653,18 +716,22 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
     for (unsigned I = 0; I != NumIncoming; ++I)
       BasePhi->addIncoming(PoisonValue::get(Phi->getType()),
                            Phi->getIncomingBlock(I));
-    for (unsigned I = 0; I != NumIncoming; ++I)
-      IndexPhi->addIncoming(PoisonValue::get(IntptrTy),
-                            Phi->getIncomingBlock(I));
+    if (IndexPhi)
+      for (unsigned I = 0; I != NumIncoming; ++I)
+        IndexPhi->addIncoming(PoisonValue::get(IntptrTy),
+                              Phi->getIncomingBlock(I));
 
     bool AllNonFlexFat = true;
     std::optional<uint64_t> StaticUpperBound = UINT64_MAX;
     for (unsigned I = 0; I != NumIncoming; ++I) {
       BoundsRecord Incoming = getBounds(Phi->getIncomingValue(I));
       BasePhi->setIncomingValue(I, Incoming.CompanionBase);
-      Value *IncomingIndex = getMemoizedTableIndex(Incoming.CompanionBase);
-      assert(IncomingIndex && "companion base is missing its safe table index");
-      IndexPhi->setIncomingValue(I, IncomingIndex);
+      if (IndexPhi) {
+        Value *IncomingIndex = getMemoizedTableIndex(Incoming.CompanionBase);
+        assert(IncomingIndex &&
+               "companion base is missing its safe table index");
+        IndexPhi->setIncomingValue(I, IncomingIndex);
+      }
       AllNonFlexFat &= Incoming.Kind == BaseKind::NonFlexFat;
       if (StaticUpperBound && Incoming.StaticUpperBound)
         *StaticUpperBound =

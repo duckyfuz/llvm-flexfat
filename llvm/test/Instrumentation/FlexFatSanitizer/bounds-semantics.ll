@@ -310,9 +310,9 @@ define i8 @address_space_origin(ptr %p) {
 define i8 @invoke_allocation() personality ptr @__gxx_personality_v0 {
 ; CHECK-LABEL: @invoke_allocation(
 ; CHECK: %p = invoke ptr @malloc(i64 16)
-; CHECK: to label %normal.split unwind label %exception
-; CHECK: normal.split:
-; CHECK: ptrtoint ptr %p to i64
+; CHECK: to label %normal unwind label %exception
+; CHECK: normal:
+; CHECK-NOT: ptrtoint ptr %p
 ; CHECK: %v = load i8, ptr %p
 entry:
   %p = invoke ptr @malloc(i64 16) to label %normal unwind label %exception

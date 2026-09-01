@@ -54,12 +54,13 @@ define i8 @loaded_root(ptr %slot) {
   ret i8 %sum
 }
 
-; Allocation results also recover their slot base once.  This is required by
-; right-align mode and makes system-allocation fallback select the sentinels.
+; Ordinary allocation results are already slot bases in fast/safe mode.  A
+; fallback pointer still selects sentinel metadata when the size is loaded.
 define i8 @allocation_root(i64 %a, i64 %b) {
 ; CHECK-LABEL: @allocation_root(
 ; CHECK: %p = call ptr @malloc(i64 64)
-; CHECK-NEXT: %flexfat.root.int = ptrtoint ptr %p to i64
+; CHECK-NEXT: %q1 = getelementptr i8, ptr %p, i64 %a
+; CHECK: ptrtoint ptr %p to i64
 ; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
   %p = call ptr @malloc(i64 64)
   %q1 = getelementptr i8, ptr %p, i64 %a
@@ -142,13 +143,13 @@ exit:
   ret i8 %x
 }
 
-; Invoke recovery is placed on a split normal edge and dominates all uses.
+; A direct-base allocation invoke needs no normal-edge split or recovery.
 define i8 @invoke_root(i64 %a, i64 %b) personality ptr @__gxx_personality_v0 {
 ; CHECK-LABEL: @invoke_root(
 ; CHECK: %p = invoke ptr @malloc(i64 64)
-; CHECK: to label %normal.split unwind label %exception
-; CHECK: normal.split:
-; CHECK-NEXT: %flexfat.root.int = ptrtoint ptr %p to i64
+; CHECK: to label %normal unwind label %exception
+; CHECK: normal:
+; CHECK-NEXT: %q1 = getelementptr i8, ptr %p, i64 %a
 ; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
 entry:
   %p = invoke ptr @malloc(i64 64) to label %normal unwind label %exception
