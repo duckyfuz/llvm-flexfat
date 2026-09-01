@@ -89,7 +89,18 @@ static StaticSpinMutex region_locks[kMaxSizeClasses];
 //   kTablesBase + 1 * kTablesOffset: Magics (custom mode)
 //   kTablesBase + 3 * kTablesOffset: Masks (POW2 mode)
 // Custom mode generates kTablesBase together with its region geometry.
-static constexpr uptr kTablesOffset = 0x1000000ULL; // 16 MB between tables
+static constexpr uptr kTablesMappingSize = 4 * kTablesOffset;
+static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
+static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
+
+static_assert(kTableEntries * sizeof(u64) <= kTablesOffset,
+              "FlexFat metadata table exceeds its fixed mapping");
+static_assert(kManagedTableBegin + kNumSizeClasses <= kTableEntries,
+              "FlexFat managed regions exceed the 48-bit metadata table");
+static_assert(kRegionBase + kNumSizeClasses * kRegionSize <= kTablesBase,
+              "FlexFat managed regions overlap fixed metadata");
+static_assert(kTablesBase + kTablesMappingSize <= kUserAddressLimit,
+              "FlexFat fixed metadata exceeds the 48-bit address space");
 
 static void InitializeFlags() {
   SetCommonFlagsDefaults();
@@ -116,7 +127,7 @@ static void InitializeFlags() {
 
 static void InitTables() {
   // Reserve enough address space for the fixed table offsets used by the pass.
-  if (!MmapFixedNoReserve(kTablesBase, 64 * 1024 * 1024, "flexfat_tables"))
+  if (!MmapFixedNoReserve(kTablesBase, kTablesMappingSize, "flexfat_tables"))
     Die();
 
   u64 *sizes = (u64 *)(kTablesBase + 0 * kTablesOffset);
@@ -126,29 +137,28 @@ static void InitTables() {
   u64 *masks = (u64 *)(kTablesBase + 3 * kTablesOffset);
 #endif
 
-  // Initialize all possible region indices (up to 1024 for now, which covers
-  // 32TB) with "poison" values: Size=0, Base=0. Any access to a non-FlexFat
-  // pointer will then result in (Base=0, End=0), which always fails the OOB
-  // check:
-  //   Ptr < 0 || Ptr >= 0  => Always True.
-  for (uptr i = 0; i < 1024; i++) {
-    if (i < kNumSizeClasses) {
+  // LowFat-style absolute indexing covers every user address below 2^48.
+  // Foreign regions receive wide bounds and zero recovery metadata; managed
+  // regions overwrite those sentinels with their real class metadata.
+  for (uptr i = 0; i < kTableEntries; ++i) {
+    sizes[i] = ~(u64)0;
 #ifdef FLEXFAT_CUSTOM_CONFIG
-      sizes[i] = (u64)kFlexFatGenSizes[i];
-      magics[i] = (u64)kFlexFatGenMagics[i];
+    magics[i] = 0;
 #else
-      u64 size = (u64)SizeClassToSize(i);
-      sizes[i] = size;
-      masks[i] = ~(size - 1);
+    masks[i] = 0;
 #endif
-    } else {
-      sizes[i] = 0;
+  }
+
+  for (uptr i = 0; i < kNumSizeClasses; ++i) {
+    uptr table_index = kManagedTableBegin + i;
 #ifdef FLEXFAT_CUSTOM_CONFIG
-      magics[i] = 0;
+    sizes[table_index] = (u64)kFlexFatGenSizes[i];
+    magics[table_index] = (u64)kFlexFatGenMagics[i];
 #else
-      masks[i] = 0;
+    u64 size = (u64)SizeClassToSize(i);
+    sizes[table_index] = size;
+    masks[table_index] = ~(size - 1);
 #endif
-    }
   }
 }
 
