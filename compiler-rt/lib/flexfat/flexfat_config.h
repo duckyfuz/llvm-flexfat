@@ -120,6 +120,8 @@ constexpr uptr kRegionSizeLog = 32;
 #endif
 
 constexpr uptr kRegionSize = 1ULL << kRegionSizeLog;
+constexpr uptr kTablesOffset = 0x1000000ULL;
+constexpr uptr kUserAddressLimit = 1ULL << 48;
 
 // Base address where FlexFat regions start
 // We use the upper portion of the address space
@@ -150,16 +152,18 @@ inline bool IsFlexFatPointer(uptr ptr) {
   return region < kNumSizeClasses;
 }
 
+inline uptr GetTableIndex(uptr ptr) {
+  return ptr < kUserAddressLimit ? ptr >> kRegionSizeLog : 0;
+}
+
 //===----------------------------------------------------------------------===//
 // Bounds Computation
 //===----------------------------------------------------------------------===//
 
 // Get the allocation size from a FlexFat pointer
 inline uptr GetSize(uptr ptr) {
-  uptr region = GetRegionIndex(ptr);
-  if (region >= kNumSizeClasses)
-    return (uptr)-1; // Wide-bounds for non-FlexFat pointers
-  return SizeClassToSize(region);
+  const uptr *sizes = (const uptr *)(kTablesBase + 0 * kTablesOffset);
+  return sizes[GetTableIndex(ptr)];
 }
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -169,18 +173,18 @@ inline uptr GetSize(uptr ptr) {
 // classes. This keeps base recovery uniform across custom layouts.
 //
 //   quotient = (u128)ptr * magic >> 64
-//   if (quotient * size > ptr) --quotient
-//   base = quotient * size
+//   candidate = quotient * size
+//   base = candidate > ptr ? candidate - size : candidate
 inline uptr GetBase(uptr ptr) {
-  uptr region = GetRegionIndex(ptr);
-  if (region >= kNumSizeClasses)
-    return 0;
+  uptr table_index = GetTableIndex(ptr);
+  const uptr *sizes = (const uptr *)(kTablesBase + 0 * kTablesOffset);
+  const uptr *magics = (const uptr *)(kTablesBase + 1 * kTablesOffset);
   typedef unsigned __int128 u128;
-  u128 mul = (u128)ptr * (u128)kFlexFatGenMagics[region];
+  u128 mul = (u128)ptr * (u128)magics[table_index];
   uptr idx = (uptr)(mul >> 64);
-  if ((u128)idx * (uptr)kFlexFatGenSizes[region] > ptr)
-    --idx;
-  return idx * (uptr)kFlexFatGenSizes[region];
+  uptr size = sizes[table_index];
+  uptr candidate = idx * size;
+  return candidate > ptr ? candidate - size : candidate;
 }
 
 // CheckBounds override: uses the custom GetBase above.
@@ -198,13 +202,9 @@ inline bool CheckBounds(uptr ptr, uptr access_size) {
 // Get the base address of an allocation from a FlexFat pointer
 // This uses the key FlexFat insight: allocations are aligned to their size
 inline uptr GetBase(uptr ptr) {
-  uptr region = GetRegionIndex(ptr);
-  if (region >= kNumSizeClasses)
-    return 0; // Not a valid FlexFat pointer
-
-  uptr size = SizeClassToSize(region);
-  uptr mask = ~(size - 1); // Mask off low bits
-  return ptr & mask;
+  uptr table_index = GetTableIndex(ptr);
+  const uptr *masks = (const uptr *)(kTablesBase + 3 * kTablesOffset);
+  return ptr & masks[table_index];
 }
 
 // Check if ptr..ptr+access_size is within bounds

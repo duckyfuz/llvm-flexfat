@@ -87,6 +87,12 @@ struct BoundsRecord {
   std::optional<uint64_t> StaticUpperBound;
 };
 
+struct SelectProvenance {
+  Value *Root = nullptr;
+  BaseKind Kind = BaseKind::Dynamic;
+  std::optional<uint64_t> StaticUpperBound;
+};
+
 /// Helper class to instrument a module with FlexFat bounds checks.
 class FlexFatSanitizer {
 public:
@@ -107,6 +113,8 @@ private:
   Type *IntptrTy;
   const uint64_t TablesBase;
   DenseMap<Value *, BoundsRecord> Bounds;
+  DenseMap<Value *, Value *> RecoveredBases;
+  DenseMap<Value *, Value *> SafeTableIndices;
   unsigned BoundsIRGeneration = 0;
 
   FunctionCallee ReportOobFn = nullptr;
@@ -123,8 +131,15 @@ private:
   bool instrumentPointerCheck(Instruction *I, Value *Ptr,
                               uint64_t FixedAccessSize, Value *DynAccessSize,
                               CheckKind Kind);
+  void prepareBounds(Instruction *I);
   BoundsRecord getBounds(Value *Ptr);
+  SelectProvenance analyzeSelectOperand(Value *Ptr);
+  std::optional<uint64_t> getAllocationUpperBound(Value *Ptr);
+  Value *getRecoveredBase(Value *CompanionBase);
+  Value *getSafeTableIndex(IRBuilder<> &IRB, Value *PtrInt);
+  Value *getMemoizedTableIndex(Value *CompanionBase) const;
   bool isAllocationResult(Value *Ptr) const;
+  bool isDirectAllocationBase(Value *Ptr) const;
   bool isDefinitelyNonFlexFat(Value *Ptr, SmallPtrSetImpl<Value *> &Seen) const;
   bool doesIntEscape(Value *V, SmallPtrSetImpl<Value *> &Seen) const;
   std::optional<unsigned> getConsumedOperandIndex(const CallBase &CB) const;
@@ -148,12 +163,6 @@ private:
   std::pair<Value *, Value *>
   emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt, Value *RegionIndex);
 
-  // Lazily get or create the global arrays that mirror the generated tables.
-  GlobalVariable *getSizesTable();
-  GlobalVariable *getMagicsTable();
-
-  GlobalVariable *SizesTableGV = nullptr;
-  GlobalVariable *MagicsTableGV = nullptr;
 #endif
 
   // Helper: GEP + load from a fixed absolute base at runtime index.
@@ -173,18 +182,28 @@ private:
   static constexpr uint64_t RegionBase = FLEXFAT_REGION_BASE;
   static constexpr uint64_t RegionSizeLog = FLEXFAT_REGION_SIZE_LOG;
   static constexpr uint64_t NumSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
-  static constexpr uint64_t MinSizeLog = 4; // unused in custom mode
   static constexpr uint64_t kTablesBase = FLEXFAT_TABLES_BASE;
 #else
   static constexpr uint64_t RegionBase = 0x100000000000ULL;
   static constexpr uint64_t RegionSizeLog = 32;
   static constexpr uint64_t NumSizeClasses =
       27; // kMaxSizeLog(30) - kMinSizeLog(4) + 1
-  static constexpr uint64_t MinSizeLog = 4;
   static constexpr uint64_t kTablesBase = 0x118000000000ULL;
 #endif
 
   static constexpr uint64_t kTablesOffset = 0x1000000ULL;
+  static constexpr uint64_t UserAddressLimit = 1ULL << 48;
+  static constexpr uint64_t NumTableEntries = UserAddressLimit >> RegionSizeLog;
+  static constexpr uint64_t ManagedTableBegin = RegionBase >> RegionSizeLog;
+
+  static_assert(NumTableEntries * sizeof(uint64_t) <= kTablesOffset,
+                "FlexFat metadata table exceeds its fixed mapping");
+  static_assert(ManagedTableBegin + NumSizeClasses <= NumTableEntries,
+                "FlexFat managed regions exceed the 48-bit metadata table");
+  static_assert(RegionBase + (NumSizeClasses << RegionSizeLog) <= kTablesBase,
+                "FlexFat managed regions overlap fixed metadata");
+  static_assert(kTablesBase + 4 * kTablesOffset <= UserAddressLimit,
+                "FlexFat fixed metadata exceeds the 48-bit address space");
 
   MDNode *InstrumentedMD = nullptr;
   MDNode *NoSanitizeMD = nullptr;
@@ -226,60 +245,6 @@ FunctionCallee FlexFatSanitizer::getWarnOobFn() {
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
 // ---------------------------------------------------------------------------
-// Custom-config pass helpers: table-accessor lazy initializers
-// ---------------------------------------------------------------------------
-//
-// We mirror the generated size and reciprocal tables from
-// flexfat_config_generated.h as LLVM GlobalVariable constants embedded inside
-// the module. This lets the optimiser see them as constant loads and fold them
-// through inlining.
-//
-// Arrays are initialised once (lazy, per-module) with the same values that
-// flexfat_config_gen baked into the header.
-
-static GlobalVariable *makeConstantArray(Module &M, StringRef Name,
-                                         ArrayRef<uint64_t> Data,
-                                         Type *ElemTy) {
-  SmallVector<Constant *, 64> Elems;
-  for (uint64_t V : Data)
-    Elems.push_back(ConstantInt::get(ElemTy, V));
-  auto *ArrayTy = ArrayType::get(ElemTy, Elems.size());
-  auto *Init = ConstantArray::get(ArrayTy, Elems);
-  auto *GV = new GlobalVariable(M, ArrayTy, /*isConstant=*/true,
-                                GlobalValue::PrivateLinkage, Init, Name);
-  GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-  return GV;
-}
-
-GlobalVariable *FlexFatSanitizer::getSizesTable() {
-  if (!SizesTableGV) {
-    SizesTableGV =
-        M.getGlobalVariable("__flexfat_gen_sizes", /*AllowLocal=*/true);
-  }
-  if (!SizesTableGV) {
-    SmallVector<uint64_t, 64> D(kFlexFatGenSizes,
-                                kFlexFatGenSizes + FLEXFAT_NUM_SIZE_CLASSES);
-    SizesTableGV = makeConstantArray(M, "__flexfat_gen_sizes", D,
-                                     Type::getInt64Ty(M.getContext()));
-  }
-  return SizesTableGV;
-}
-
-GlobalVariable *FlexFatSanitizer::getMagicsTable() {
-  if (!MagicsTableGV) {
-    MagicsTableGV =
-        M.getGlobalVariable("__flexfat_gen_magics", /*AllowLocal=*/true);
-  }
-  if (!MagicsTableGV) {
-    SmallVector<uint64_t, 64> D(kFlexFatGenMagics,
-                                kFlexFatGenMagics + FLEXFAT_NUM_SIZE_CLASSES);
-    MagicsTableGV = makeConstantArray(M, "__flexfat_gen_magics", D,
-                                      Type::getInt64Ty(M.getContext()));
-  }
-  return MagicsTableGV;
-}
-
-// ---------------------------------------------------------------------------
 // emitDynamicBaseMagic
 //
 // Given a runtime RegionIndex, emit IR that loads the per-class size and
@@ -297,7 +262,10 @@ GlobalVariable *FlexFatSanitizer::getMagicsTable() {
 //   %mul128     = mul i128 %ptr128, %magic128
 //   %idx128     = lshr i128 %mul128, 64
 //   %idx        = trunc i128 %idx128 to i64
-//   %base_mul   = mul i64 %idx, %alloc_size
+//   %candidate  = mul i64 %idx, %alloc_size
+//   %too_high   = icmp ugt i64 %candidate, %ptr
+//   %corrected  = sub i64 %candidate, %alloc_size
+//   %base       = select i1 %too_high, i64 %corrected, i64 %candidate
 // ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
 FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
@@ -324,13 +292,15 @@ FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
   Value *Mul128 = IRB.CreateMul(Ptr128, Magic128);
   Value *Idx128 = IRB.CreateLShr(Mul128, ConstantInt::get(I128Ty, 64));
   Value *Idx = IRB.CreateTrunc(Idx128, IntptrTy);
-  Value *BaseMul = IRB.CreateMul(Idx, AllocSize);
-  Value *QuotientTooHigh = IRB.CreateICmpUGT(BaseMul, PtrInt);
-  Value *CorrectedIdx = IRB.CreateSelect(
-      QuotientTooHigh, IRB.CreateSub(Idx, ConstantInt::get(IntptrTy, 1)), Idx);
-  BaseMul = IRB.CreateMul(CorrectedIdx, AllocSize);
+  Value *Candidate = IRB.CreateMul(Idx, AllocSize, "flexfat.base.candidate");
+  Value *QuotientTooHigh =
+      IRB.CreateICmpUGT(Candidate, PtrInt, "flexfat.quotient.high");
+  Value *CorrectedCandidate =
+      IRB.CreateSub(Candidate, AllocSize, "flexfat.base.corrected");
+  Value *Base = IRB.CreateSelect(QuotientTooHigh, CorrectedCandidate,
+                                 Candidate, "flexfat.base.int");
 
-  return {AllocSize, BaseMul};
+  return {AllocSize, Base};
 }
 #endif // FLEXFAT_CUSTOM_CONFIG
 
@@ -408,7 +378,33 @@ bool FlexFatSanitizer::isAllocationResult(Value *Ptr) const {
          Name == "aligned_alloc" || Name == "valloc" || Name == "memalign" ||
          Name == "pvalloc" || Name == "strdup" || Name == "strndup" ||
          Name == "_Znwm" || Name == "_Znam" || Name == "_ZnwmRKSt9nothrow_t" ||
-         Name == "_ZnamRKSt9nothrow_t";
+         Name == "_ZnamRKSt9nothrow_t" || Name == "_Znwj" || Name == "_Znaj" ||
+         Name == "_ZnwjRKSt9nothrow_t" || Name == "_ZnajRKSt9nothrow_t" ||
+         Name == "_ZnwmSt11align_val_t" || Name == "_ZnamSt11align_val_t" ||
+         Name == "_ZnwmSt11align_val_tRKSt9nothrow_t" ||
+         Name == "_ZnamSt11align_val_tRKSt9nothrow_t" ||
+         Name == "_ZnwjSt11align_val_t" || Name == "_ZnajSt11align_val_t" ||
+         Name == "_ZnwjSt11align_val_tRKSt9nothrow_t" ||
+         Name == "_ZnajSt11align_val_tRKSt9nothrow_t";
+}
+
+bool FlexFatSanitizer::isDirectAllocationBase(Value *Ptr) const {
+  if (Options.Mode == FlexFatSanitizerOptions::FlexFatMode::RightAlign)
+    return false;
+
+  auto *CB = dyn_cast<CallBase>(Ptr);
+  if (!CB)
+    return false;
+  const auto *F =
+      dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
+  if (!F)
+    return false;
+  StringRef Name = F->getName();
+  return Name == "malloc" || Name == "calloc" || Name == "realloc" ||
+         Name == "strdup" || Name == "strndup" || Name == "_Znwm" ||
+         Name == "_Znam" || Name == "_ZnwmRKSt9nothrow_t" ||
+         Name == "_ZnamRKSt9nothrow_t" || Name == "_Znwj" || Name == "_Znaj" ||
+         Name == "_ZnwjRKSt9nothrow_t" || Name == "_ZnajRKSt9nothrow_t";
 }
 
 bool FlexFatSanitizer::isDefinitelyNonFlexFat(
@@ -439,6 +435,148 @@ bool FlexFatSanitizer::isDefinitelyNonFlexFat(
   return false;
 }
 
+Value *FlexFatSanitizer::getRecoveredBase(Value *CompanionBase) {
+  if (auto It = RecoveredBases.find(CompanionBase); It != RecoveredBases.end())
+    return It->second;
+
+  // A musttail result may only be followed by its return.  Recovery would be
+  // dead for that zero-width return escape, and inserting it after the call
+  // would invalidate the required musttail/ret pair.
+  if (auto *Call = dyn_cast<CallInst>(CompanionBase);
+      Call && Call->isMustTailCall()) {
+    RecoveredBases[CompanionBase] = CompanionBase;
+    return CompanionBase;
+  }
+
+  Function *F = nullptr;
+  if (auto *I = dyn_cast<Instruction>(CompanionBase))
+    F = I->getFunction();
+  else if (auto *Arg = dyn_cast<Argument>(CompanionBase))
+    F = Arg->getParent();
+  assert(F && "dynamic FlexFat roots must belong to a function");
+
+  Instruction *InsertBefore = nullptr;
+  if (auto *Invoke = dyn_cast<InvokeInst>(CompanionBase)) {
+    BasicBlock *NormalEdge =
+        SplitEdge(Invoke->getParent(), Invoke->getNormalDest());
+    assert(NormalEdge && "failed to split an invoke normal edge");
+    InsertBefore = NormalEdge->getTerminator();
+  } else if (isa<Argument>(CompanionBase)) {
+    InsertBefore = &*F->getEntryBlock().getFirstInsertionPt();
+  } else if (auto *Phi = dyn_cast<PHINode>(CompanionBase)) {
+    InsertBefore = &*Phi->getParent()->getFirstNonPHIIt();
+  } else if (auto *I = dyn_cast<Instruction>(CompanionBase)) {
+    InsertBefore = I->getNextNode();
+    assert(InsertBefore &&
+           "pointer root must have a following insertion point");
+  }
+
+  IRBuilder<> IRB(InsertBefore);
+  IRB.SetNoSanitizeMetadata();
+  Value *PtrInt =
+      IRB.CreatePtrToInt(CompanionBase, IntptrTy, "flexfat.root.int");
+  Value *RegionIndex = getSafeTableIndex(IRB, PtrInt);
+
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  auto [_, BaseInt] = emitDynamicBaseMagic(IRB, PtrInt, RegionIndex);
+#else
+  Type *I64Ty = Type::getInt64Ty(M.getContext());
+  Value *Mask64 = loadFromFixedTable(IRB, TablesBase + 3 * kTablesOffset, I64Ty,
+                                     RegionIndex);
+  if (auto *MaskLoad = dyn_cast<Instruction>(Mask64))
+    MaskLoad->setName("flexfat.mask");
+  Value *Mask = IRB.CreateZExtOrTrunc(Mask64, IntptrTy);
+  Value *BaseInt = IRB.CreateAnd(PtrInt, Mask, "flexfat.base.int");
+#endif
+
+  Value *Base =
+      IRB.CreateIntToPtr(BaseInt, CompanionBase->getType(), "flexfat.base");
+  RecoveredBases[CompanionBase] = Base;
+  SafeTableIndices[Base] = RegionIndex;
+  ++BoundsIRGeneration;
+  return Base;
+}
+
+Value *FlexFatSanitizer::getMemoizedTableIndex(Value *CompanionBase) const {
+  if (auto It = SafeTableIndices.find(CompanionBase);
+      It != SafeTableIndices.end())
+    return It->second;
+  if (isa<ConstantPointerNull>(CompanionBase))
+    return ConstantInt::get(IntptrTy, 0);
+  return nullptr;
+}
+
+Value *FlexFatSanitizer::getSafeTableIndex(IRBuilder<> &IRB, Value *PtrInt) {
+  Value *RawIndex = IRB.CreateLShr(
+      PtrInt, ConstantInt::get(IntptrTy, RegionSizeLog), "flexfat.region.raw");
+  Value *InUserAddressSpace =
+      IRB.CreateICmpULT(PtrInt, ConstantInt::get(IntptrTy, UserAddressLimit),
+                        "flexfat.address.valid");
+  return IRB.CreateSelect(InUserAddressSpace, RawIndex,
+                          ConstantInt::get(IntptrTy, 0), "flexfat.region");
+}
+
+std::optional<uint64_t> FlexFatSanitizer::getAllocationUpperBound(Value *Ptr) {
+  uint64_t ObjectSize = 0;
+  std::optional<uint64_t> StaticUpperBound = 0;
+  if (getObjectSize(Ptr, ObjectSize, DL, &TLI))
+    return ObjectSize;
+
+  auto *CB = dyn_cast<CallBase>(Ptr);
+  if (!CB)
+    return StaticUpperBound;
+  const auto *F =
+      dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
+  StringRef Name = F ? F->getName() : StringRef();
+  unsigned SizeArg = 0;
+  if (Name == "realloc" || Name == "aligned_alloc" || Name == "memalign")
+    SizeArg = 1;
+  if (Name == "calloc" && CB->arg_size() >= 2) {
+    auto *Count = dyn_cast<ConstantInt>(CB->getArgOperand(0));
+    auto *Size = dyn_cast<ConstantInt>(CB->getArgOperand(1));
+    bool Overflow = false;
+    if (Count && Size) {
+      APInt Product = Count->getValue().umul_ov(Size->getValue(), Overflow);
+      if (!Overflow && Product.getActiveBits() <= 64)
+        StaticUpperBound = Product.getZExtValue();
+    }
+  } else if (SizeArg < CB->arg_size()) {
+    if (auto *Size = dyn_cast<ConstantInt>(CB->getArgOperand(SizeArg));
+        Size && Size->getValue().getActiveBits() <= 64)
+      StaticUpperBound = Size->getZExtValue();
+  }
+  return StaticUpperBound;
+}
+
+SelectProvenance FlexFatSanitizer::analyzeSelectOperand(Value *Ptr) {
+  SmallPtrSet<Value *, 16> NonFlexFatSeen;
+  if (isDefinitelyNonFlexFat(Ptr, NonFlexFatSeen))
+    return {nullptr, BaseKind::NonFlexFat, UINT64_MAX};
+
+  if (auto *GEP = dyn_cast<GEPOperator>(Ptr)) {
+    SelectProvenance Result = analyzeSelectOperand(GEP->getPointerOperand());
+    if (Result.StaticUpperBound) {
+      APInt Offset(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
+      if (GEP->accumulateConstantOffset(DL, Offset) && Offset.isNonNegative() &&
+          Offset.getActiveBits() <= 64 &&
+          Offset.getZExtValue() <= *Result.StaticUpperBound)
+        *Result.StaticUpperBound -= Offset.getZExtValue();
+      else
+        Result.StaticUpperBound.reset();
+    }
+    return Result;
+  }
+  if (auto *Cast = dyn_cast<BitCastOperator>(Ptr))
+    return analyzeSelectOperand(Cast->getOperand(0));
+  if (auto *Cast = dyn_cast<AddrSpaceCastOperator>(Ptr))
+    return analyzeSelectOperand(Cast->getOperand(0));
+  if (auto *Freeze = dyn_cast<FreezeInst>(Ptr))
+    return analyzeSelectOperand(Freeze->getOperand(0));
+  if (isAllocationResult(Ptr))
+    return {Ptr, BaseKind::StaticKnown, getAllocationUpperBound(Ptr)};
+  return {Ptr, BaseKind::Dynamic, 0};
+}
+
 BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
   if (auto It = Bounds.find(Ptr); It != Bounds.end())
     return It->second;
@@ -462,34 +600,9 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
 
   BoundsRecord Result;
   if (isAllocationResult(Ptr)) {
-    uint64_t ObjectSize = 0;
-    std::optional<uint64_t> StaticUpperBound = 0;
-    if (getObjectSize(Ptr, ObjectSize, DL, &TLI))
-      StaticUpperBound = ObjectSize;
-    else if (auto *CB = dyn_cast<CallBase>(Ptr)) {
-      const auto *F = dyn_cast<Function>(
-          CB->getCalledOperand()->stripPointerCasts());
-      StringRef Name = F ? F->getName() : StringRef();
-      unsigned SizeArg = 0;
-      if (Name == "realloc" || Name == "aligned_alloc" ||
-          Name == "memalign")
-        SizeArg = 1;
-      if (Name == "calloc" && CB->arg_size() >= 2) {
-        auto *Count = dyn_cast<ConstantInt>(CB->getArgOperand(0));
-        auto *Size = dyn_cast<ConstantInt>(CB->getArgOperand(1));
-        bool Overflow = false;
-        if (Count && Size) {
-          APInt Product = Count->getValue().umul_ov(Size->getValue(), Overflow);
-          if (!Overflow && Product.getActiveBits() <= 64)
-            StaticUpperBound = Product.getZExtValue();
-        }
-      } else if (SizeArg < CB->arg_size()) {
-        if (auto *Size = dyn_cast<ConstantInt>(CB->getArgOperand(SizeArg));
-            Size && Size->getValue().getActiveBits() <= 64)
-          StaticUpperBound = Size->getZExtValue();
-      }
-    }
-    Result = makeRecord(Ptr, BaseKind::StaticKnown, StaticUpperBound);
+    Value *Base = isDirectAllocationBase(Ptr) ? Ptr : getRecoveredBase(Ptr);
+    Result =
+        makeRecord(Base, BaseKind::StaticKnown, getAllocationUpperBound(Ptr));
   } else if (auto *GEP = dyn_cast<GEPOperator>(Ptr)) {
     Result = getBounds(GEP->getPointerOperand());
     Result.CheckedPointer = Ptr;
@@ -509,10 +622,13 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
     Result = getBounds(Cast->getOperand(0));
     Result.CheckedPointer = Ptr;
     if (Result.Kind != BaseKind::NonFlexFat) {
+      Value *OriginalBase = Result.CompanionBase;
       IRBuilder<> IRB(Cast->getNextNode());
       IRB.SetNoSanitizeMetadata();
       Result.CompanionBase = IRB.CreateAddrSpaceCast(
           Result.CompanionBase, Cast->getType(), "flexfat.base.cast");
+      if (Value *Index = getMemoizedTableIndex(OriginalBase))
+        SafeTableIndices[Result.CompanionBase] = Index;
       BoundsIRGeneration += isa<Instruction>(Result.CompanionBase);
     } else {
       Result.CompanionBase =
@@ -522,49 +638,109 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
     Result = getBounds(Freeze->getOperand(0));
     Result.CheckedPointer = Ptr;
   } else if (auto *Select = dyn_cast<SelectInst>(Ptr)) {
-    BoundsRecord TrueBounds = getBounds(Select->getTrueValue());
-    BoundsRecord FalseBounds = getBounds(Select->getFalseValue());
-    if (TrueBounds.Kind == BaseKind::NonFlexFat &&
-        FalseBounds.Kind == BaseKind::NonFlexFat) {
+    SelectProvenance TrueInfo = analyzeSelectOperand(Select->getTrueValue());
+    SelectProvenance FalseInfo = analyzeSelectOperand(Select->getFalseValue());
+    std::optional<uint64_t> StaticUpperBound =
+        TrueInfo.StaticUpperBound && FalseInfo.StaticUpperBound
+            ? std::optional<uint64_t>(std::min(*TrueInfo.StaticUpperBound,
+                                               *FalseInfo.StaticUpperBound))
+            : std::nullopt;
+    if (TrueInfo.Kind == BaseKind::NonFlexFat &&
+        FalseInfo.Kind == BaseKind::NonFlexFat) {
       Result = nonFlexFat();
-    } else if (TrueBounds.CompanionBase == FalseBounds.CompanionBase) {
-      Result =
-          makeRecord(TrueBounds.CompanionBase,
-                     TrueBounds.Kind == FalseBounds.Kind ? TrueBounds.Kind
-                                                         : BaseKind::Dynamic,
-                     TrueBounds.StaticUpperBound && FalseBounds.StaticUpperBound
-                         ? std::optional<uint64_t>(std::min(
-                               *TrueBounds.StaticUpperBound,
-                               *FalseBounds.StaticUpperBound))
-                         : std::nullopt);
+    } else if (TrueInfo.Root && TrueInfo.Root == FalseInfo.Root) {
+      BoundsRecord RootBounds = getBounds(TrueInfo.Root);
+      Value *Base = RootBounds.CompanionBase;
+      if (Base->getType() != Select->getType()) {
+        IRBuilder<> IRB(Select->getNextNode());
+        IRB.SetNoSanitizeMetadata();
+        Base = IRB.CreateAddrSpaceCast(Base, Select->getType(),
+                                       "flexfat.base.cast");
+        if (Value *Index = getMemoizedTableIndex(RootBounds.CompanionBase))
+          SafeTableIndices[Base] = Index;
+        BoundsIRGeneration += isa<Instruction>(Base);
+      }
+      Result = makeRecord(Base,
+                          TrueInfo.Kind == FalseInfo.Kind ? TrueInfo.Kind
+                                                          : BaseKind::Dynamic,
+                          StaticUpperBound);
     } else {
-      IRBuilder<> IRB(Select->getNextNode());
-      IRB.SetNoSanitizeMetadata();
-      Value *Base =
-          IRB.CreateSelect(Select->getCondition(), TrueBounds.CompanionBase,
-                           FalseBounds.CompanionBase, "flexfat.base");
-      BoundsIRGeneration += isa<Instruction>(Base);
-      Result = makeRecord(
-          Base, BaseKind::Dynamic,
-          TrueBounds.StaticUpperBound && FalseBounds.StaticUpperBound
-              ? std::optional<uint64_t>(
-                    std::min(*TrueBounds.StaticUpperBound,
-                             *FalseBounds.StaticUpperBound))
-              : std::nullopt);
+      Result = makeRecord(getRecoveredBase(Select), BaseKind::Dynamic,
+                          StaticUpperBound);
     }
   } else if (auto *Phi = dyn_cast<PHINode>(Ptr)) {
     BasicBlock::iterator InsertPt = Phi->getParent()->getFirstNonPHIIt();
-    auto *BasePhi = PHINode::Create(Phi->getType(), Phi->getNumIncomingValues(),
-                                    "flexfat.base", InsertPt);
+    unsigned NumIncoming = Phi->getNumIncomingValues();
+    auto HasDirectAllocation = [&](Value *V, auto &&Recurse,
+                                   SmallPtrSetImpl<Value *> &Seen) -> bool {
+      if (!Seen.insert(V).second)
+        return false;
+      if (isDirectAllocationBase(V))
+        return true;
+      if (auto *GEP = dyn_cast<GEPOperator>(V))
+        return Recurse(GEP->getPointerOperand(), Recurse, Seen);
+      if (auto *Cast = dyn_cast<BitCastOperator>(V))
+        return Recurse(Cast->getOperand(0), Recurse, Seen);
+      if (auto *Cast = dyn_cast<AddrSpaceCastOperator>(V))
+        return Recurse(Cast->getOperand(0), Recurse, Seen);
+      if (auto *Freeze = dyn_cast<FreezeInst>(V))
+        return Recurse(Freeze->getOperand(0), Recurse, Seen);
+      if (auto *Select = dyn_cast<SelectInst>(V))
+        return Recurse(Select->getTrueValue(), Recurse, Seen) ||
+               Recurse(Select->getFalseValue(), Recurse, Seen);
+      if (auto *IncomingPhi = dyn_cast<PHINode>(V))
+        for (Value *Incoming : IncomingPhi->incoming_values())
+          if (Recurse(Incoming, Recurse, Seen))
+            return true;
+      return false;
+    };
+    bool UseIndexPhi = true;
+    SmallPtrSet<Value *, 16> DirectSeen;
+    for (Value *Incoming : Phi->incoming_values())
+      if (HasDirectAllocation(Incoming, HasDirectAllocation, DirectSeen)) {
+        UseIndexPhi = false;
+        break;
+      }
+
+    auto *BasePhi =
+        PHINode::Create(Phi->getType(), NumIncoming, "flexfat.base", InsertPt);
+    PHINode *IndexPhi =
+        UseIndexPhi
+            ? PHINode::Create(IntptrTy, NumIncoming, "flexfat.region", InsertPt)
+            : nullptr;
     markNoSanitize(BasePhi);
-    ++BoundsIRGeneration;
+    if (IndexPhi)
+      markNoSanitize(IndexPhi);
+    BoundsIRGeneration += IndexPhi ? 2 : 1;
     Result = makeRecord(BasePhi, BaseKind::Dynamic, std::nullopt);
     Bounds[Ptr] = Result;
+    if (IndexPhi)
+      SafeTableIndices[BasePhi] = IndexPhi;
+
+    // Complete the companion PHI's predecessor list before recursively
+    // resolving any incoming value.  Recovering an invoke result splits its
+    // normal edge, and SplitEdge updates every PHI in the destination block.
+    // A partially constructed BasePhi would not yet have the edge that LLVM
+    // is trying to rewrite.
+    for (unsigned I = 0; I != NumIncoming; ++I)
+      BasePhi->addIncoming(PoisonValue::get(Phi->getType()),
+                           Phi->getIncomingBlock(I));
+    if (IndexPhi)
+      for (unsigned I = 0; I != NumIncoming; ++I)
+        IndexPhi->addIncoming(PoisonValue::get(IntptrTy),
+                              Phi->getIncomingBlock(I));
+
     bool AllNonFlexFat = true;
     std::optional<uint64_t> StaticUpperBound = UINT64_MAX;
-    for (unsigned I = 0; I != Phi->getNumIncomingValues(); ++I) {
+    for (unsigned I = 0; I != NumIncoming; ++I) {
       BoundsRecord Incoming = getBounds(Phi->getIncomingValue(I));
-      BasePhi->addIncoming(Incoming.CompanionBase, Phi->getIncomingBlock(I));
+      BasePhi->setIncomingValue(I, Incoming.CompanionBase);
+      if (IndexPhi) {
+        Value *IncomingIndex = getMemoizedTableIndex(Incoming.CompanionBase);
+        assert(IncomingIndex &&
+               "companion base is missing its safe table index");
+        IndexPhi->setIncomingValue(I, IncomingIndex);
+      }
       AllNonFlexFat &= Incoming.Kind == BaseKind::NonFlexFat;
       if (StaticUpperBound && Incoming.StaticUpperBound)
         *StaticUpperBound =
@@ -579,14 +755,50 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
     if (CE->isCast() && CE->getOperand(0)->getType()->isPointerTy()) {
       Result = getBounds(CE->getOperand(0));
       Result.CheckedPointer = Ptr;
+    } else if (CE->getOpcode() == Instruction::IntToPtr) {
+      auto *AddressConstant = dyn_cast<ConstantInt>(CE->getOperand(0));
+      if (!AddressConstant) {
+        Result = makeRecord(
+            ConstantPointerNull::get(cast<PointerType>(Ptr->getType())),
+            BaseKind::Dynamic, std::nullopt);
+      } else {
+        uint64_t Address = AddressConstant->getValue()
+                               .zextOrTrunc(IntptrTy->getIntegerBitWidth())
+                               .getZExtValue();
+        uint64_t RegionIndex =
+            Address < UserAddressLimit ? Address >> RegionSizeLog : 0;
+        bool IsManaged = RegionIndex >= ManagedTableBegin &&
+                         RegionIndex < ManagedTableBegin + NumSizeClasses;
+        uint64_t BaseAddress = 0;
+        if (IsManaged) {
+          uint64_t ClassIndex = RegionIndex - ManagedTableBegin;
+#ifdef FLEXFAT_CUSTOM_CONFIG
+          uint64_t AllocSize = kFlexFatGenSizes[ClassIndex];
+#else
+          uint64_t AllocSize = 1ULL << (ClassIndex + 4);
+#endif
+          BaseAddress = Address - Address % AllocSize;
+        } else {
+          RegionIndex = 0;
+        }
+
+        Constant *Base = ConstantExpr::getIntToPtr(
+            ConstantInt::get(IntptrTy, BaseAddress),
+            cast<PointerType>(Ptr->getType()));
+        SafeTableIndices[Base] = ConstantInt::get(IntptrTy, RegionIndex);
+        Result = makeRecord(Base, BaseKind::Dynamic, std::nullopt);
+      }
     } else {
-      Result = makeRecord(Ptr, BaseKind::Dynamic, std::nullopt);
+      // Unknown constant expressions use the foreign-pointer sentinel.
+      Result = makeRecord(
+          ConstantPointerNull::get(cast<PointerType>(Ptr->getType())),
+          BaseKind::Dynamic, std::nullopt);
     }
   } else {
     // Arguments, loads, inttoptr, aggregate extraction, and unknown call
     // results follow LowFat's input-pointer rule: recover the base from the
     // pointer itself rather than guessing its stored or calling provenance.
-    Result = makeRecord(Ptr, BaseKind::Dynamic, 0);
+    Result = makeRecord(getRecoveredBase(Ptr), BaseKind::Dynamic, 0);
   }
 
   Bounds[Ptr] = Result;
@@ -670,10 +882,10 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
                                               uint64_t FixedAccessSize,
                                               Value *DynAccessSize,
                                               CheckKind Kind) {
-  unsigned InitialBoundsIRGeneration = BoundsIRGeneration;
   BoundsRecord PtrBounds = getBounds(Ptr);
   if (PtrBounds.Kind == BaseKind::NonFlexFat)
     return false;
+  markInstrumented(I);
 
   if (!DynAccessSize && PtrBounds.StaticUpperBound) {
     // C and C++ allow an exact one-past value to escape, but never to be
@@ -683,59 +895,45 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
     bool IsStaticallyValid =
         isEscapeCheck(Kind) ? FixedAccessSize <= *PtrBounds.StaticUpperBound
                             : FixedAccessSize < *PtrBounds.StaticUpperBound;
-    if (FixedAccessSize &&
-        FixedAccessSize == *PtrBounds.StaticUpperBound)
+    if (FixedAccessSize && FixedAccessSize == *PtrBounds.StaticUpperBound)
       IsStaticallyValid = true;
-    if (IsStaticallyValid) {
-      // A companion instruction can be the only IR created for an otherwise
-      // elided check.  Mark its source so a repeated FlexFat pass does not
-      // create a duplicate companion.
-      if (BoundsIRGeneration != InitialBoundsIRGeneration)
-        markInstrumented(I);
+    if (IsStaticallyValid)
       return false;
-    }
   }
 
-  markInstrumented(I);
   IRBuilder<> IRB(I);
   IRB.SetNoSanitizeMetadata();
   Value *PtrInt = IRB.CreatePtrToInt(Ptr, IntptrTy);
   Value *BasePtr = PtrBounds.CompanionBase;
-  Value *BasePtrInt =
-      BasePtr == Ptr ? PtrInt : IRB.CreatePtrToInt(BasePtr, IntptrTy);
+  Value *BasePtrInt = IRB.CreatePtrToInt(BasePtr, IntptrTy);
   Value *SizeInt =
       DynAccessSize ? IRB.CreateZExtOrTrunc(DynAccessSize, IntptrTy) : nullptr;
 
-  Value *RegionBaseVal = ConstantInt::get(IntptrTy, RegionBase);
-  Value *RegionOffset = IRB.CreateSub(BasePtrInt, RegionBaseVal);
-  Value *RegionIndex = IRB.CreateLShr(RegionOffset, RegionSizeLog);
-  Value *MaxRegion = ConstantInt::get(IntptrTy, NumSizeClasses);
-  Value *ShouldCheck = IRB.CreateICmpULT(RegionIndex, MaxRegion);
-  if (SizeInt)
-    ShouldCheck = IRB.CreateAnd(
-        IRB.CreateICmpNE(SizeInt, ConstantInt::get(IntptrTy, 0)), ShouldCheck);
+  Instruction *CheckInsertBefore = I;
+  std::optional<IRBuilder<>> GuardedIRB;
+  IRBuilder<> *CheckIRB = &IRB;
+  if (SizeInt) {
+    Value *NonZero = IRB.CreateICmpNE(SizeInt, ConstantInt::get(IntptrTy, 0));
+    Instruction *ThenTerm =
+        SplitBlockAndInsertIfThen(NonZero, I, /*Unreachable=*/false);
+    markNoSanitize(ThenTerm);
+    GuardedIRB.emplace(ThenTerm);
+    GuardedIRB->SetNoSanitizeMetadata();
+    CheckIRB = &*GuardedIRB;
+    CheckInsertBefore = ThenTerm;
+  }
 
-  Instruction *ThenTerm = SplitBlockAndInsertIfThen(ShouldCheck, I, false);
-  markNoSanitize(ThenTerm);
-  IRBuilder<> ThenIRB(ThenTerm);
-  ThenIRB.SetNoSanitizeMetadata();
+  Value *RegionIndex = getMemoizedTableIndex(BasePtr);
+  if (!RegionIndex)
+    RegionIndex = getSafeTableIndex(*CheckIRB, BasePtrInt);
 
   Type *I64Ty = Type::getInt64Ty(M.getContext());
   Value *AllocSize64 = loadFromFixedTable(
-      ThenIRB, TablesBase + 0 * kTablesOffset, I64Ty, RegionIndex);
-  Value *AllocSize = ThenIRB.CreateZExtOrTrunc(AllocSize64, IntptrTy);
+      *CheckIRB, TablesBase + 0 * kTablesOffset, I64Ty, RegionIndex);
+  Value *AllocSize = CheckIRB->CreateZExtOrTrunc(AllocSize64, IntptrTy);
 
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  auto [_, Base] = emitDynamicBaseMagic(ThenIRB, BasePtrInt, RegionIndex);
-#else
-  Value *Mask64 = loadFromFixedTable(ThenIRB, TablesBase + 3 * kTablesOffset,
-                                     I64Ty, RegionIndex);
-  Value *Mask = ThenIRB.CreateZExtOrTrunc(Mask64, IntptrTy);
-  Value *Base = ThenIRB.CreateAnd(BasePtrInt, Mask);
-#endif
-
-  emitOobCheck(ThenIRB, PtrInt, Base, AllocSize, FixedAccessSize, SizeInt,
-               ThenTerm, Kind);
+  emitOobCheck(*CheckIRB, PtrInt, BasePtrInt, AllocSize, FixedAccessSize,
+               SizeInt, CheckInsertBefore, Kind);
   return true;
 }
 
@@ -779,11 +977,68 @@ bool FlexFatSanitizer::instrumentPointerEscape(Instruction *I, Value *Ptr,
   return true;
 }
 
+void FlexFatSanitizer::prepareBounds(Instruction *I) {
+  auto Prepare = [this](Value *Ptr) { (void)getBounds(Ptr); };
+
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    Prepare(LI->getPointerOperand());
+  else if (auto *SI = dyn_cast<StoreInst>(I)) {
+    Prepare(SI->getPointerOperand());
+    if (SI->getValueOperand()->getType()->isPointerTy())
+      Prepare(SI->getValueOperand());
+  } else if (auto *RMW = dyn_cast<AtomicRMWInst>(I))
+    Prepare(RMW->getPointerOperand());
+  else if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(I))
+    Prepare(CmpXchg->getPointerOperand());
+  else if (auto *MS = dyn_cast<MemSetInst>(I)) {
+    if (auto *Size = dyn_cast<ConstantInt>(MS->getLength());
+        !Size || !Size->isZero())
+      Prepare(MS->getDest());
+  } else if (auto *MT = dyn_cast<MemTransferInst>(I)) {
+    if (auto *Size = dyn_cast<ConstantInt>(MT->getLength());
+        !Size || !Size->isZero()) {
+      Prepare(MT->getDest());
+      Prepare(MT->getSource());
+    }
+  } else if (auto *RI = dyn_cast<ReturnInst>(I)) {
+    Value *V = RI->getReturnValue();
+    if (V && V->getType()->isPointerTy())
+      Prepare(V);
+  } else if (auto *IV = dyn_cast<InsertValueInst>(I)) {
+    Value *V = IV->getInsertedValueOperand();
+    if (V->getType()->isPointerTy())
+      Prepare(V);
+  } else if (auto *IE = dyn_cast<InsertElementInst>(I)) {
+    Value *V = IE->getOperand(1);
+    if (V->getType()->isPointerTy())
+      Prepare(V);
+  } else if (auto *P2I = dyn_cast<PtrToIntInst>(I)) {
+    SmallPtrSet<Value *, 16> Seen;
+    if (doesIntEscape(P2I, Seen))
+      Prepare(P2I->getPointerOperand());
+  } else if (auto *CB = dyn_cast<CallBase>(I)) {
+    std::optional<unsigned> Consumed = getConsumedOperandIndex(*CB);
+    SmallPtrSet<Value *, 4> CheckedArgs;
+    if (Consumed) {
+      CheckedArgs.insert(CB->getArgOperand(*Consumed));
+      Prepare(CB->getArgOperand(*Consumed));
+    }
+    for (unsigned ArgNo = 0; ArgNo != CB->arg_size(); ++ArgNo) {
+      Value *Arg = CB->getArgOperand(ArgNo);
+      if ((!Consumed || ArgNo != *Consumed) && Arg->getType()->isPointerTy() &&
+          CheckedArgs.insert(Arg).second)
+        Prepare(Arg);
+    }
+  }
+}
+
 bool FlexFatSanitizer::instrumentFunction(Function &F) {
   if (F.getName().starts_with("__flexfat_"))
     return false;
 
   Bounds.clear();
+  RecoveredBases.clear();
+  SafeTableIndices.clear();
   BoundsIRGeneration = 0;
   bool Modified = false;
   SmallVector<Instruction *, 16> ToInstrument;
@@ -808,6 +1063,13 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
     }
   }
 
+  // LowFat-style phase 2: resolve every provenance root and memoize one
+  // recovered allocation base before CFG-changing checks are inserted.
+  for (Instruction *I : ToInstrument)
+    if (!I->hasMetadata(LLVMContext::MD_nosanitize))
+      prepareBounds(I);
+
+  // LowFat-style phase 3: insert checks using the cached recovered bases.
   for (Instruction *I : ToInstrument) {
     if (I->hasMetadata(LLVMContext::MD_nosanitize))
       continue;
@@ -857,13 +1119,13 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
       SmallPtrSet<Value *, 4> CheckedArgs;
       if (Consumed) {
         CheckedArgs.insert(CB->getArgOperand(*Consumed));
-        Modified |= instrumentPointerEscape(
-            I, CB->getArgOperand(*Consumed), CheckKind::Deallocation);
+        Modified |= instrumentPointerEscape(I, CB->getArgOperand(*Consumed),
+                                            CheckKind::Deallocation);
       }
       for (unsigned ArgNo = 0; ArgNo != CB->arg_size(); ++ArgNo) {
         Value *Arg = CB->getArgOperand(ArgNo);
-        if ((!Consumed || ArgNo != *Consumed) && Arg->getType()->isPointerTy() &&
-            CheckedArgs.insert(Arg).second)
+        if ((!Consumed || ArgNo != *Consumed) &&
+            Arg->getType()->isPointerTy() && CheckedArgs.insert(Arg).second)
           Modified |= instrumentPointerEscape(I, Arg, CheckKind::CallEscape);
       }
     }

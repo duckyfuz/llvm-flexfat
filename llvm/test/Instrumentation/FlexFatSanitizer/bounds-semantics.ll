@@ -44,19 +44,17 @@ define i1 @legal_one_past_integer_comparison(ptr %p) {
 ; not against a base rediscovered from the derived pointer.
 define i8 @derived_dereference(ptr %p, i64 %n) {
 ; CHECK-LABEL: @derived_dereference(
+; CHECK: %flexfat.root.int = ptrtoint ptr %p to i64
+; CHECK: %flexfat.region.raw = lshr i64 %flexfat.root.int, {{32|38}}
+; CHECK: icmp ult i64 %flexfat.root.int, 281474976710656
+; CHECK: select i1 %flexfat.address.valid, i64 %flexfat.region.raw, i64 0
+; CHECK-NOT: sub i64 {{.*}}, 17592186044416
+; CHECK: %flexfat.base = inttoptr
 ; CHECK: %q = getelementptr i8, ptr %p, i64 %n
 ; CHECK: ptrtoint ptr %q to i64
-; CHECK: ptrtoint ptr %p to i64
-; CHECK: sub i64 {{.*}}, 17592186044416
-; CHECK: lshr i64 {{.*}}, {{32|38}}
-; CHECK: icmp ult i64
-; CHECK-NOT: load i64
-; CHECK: br i1 {{.*}}, label %[[VALID:[0-9A-Za-z_.]+]], label %[[CONT:[0-9A-Za-z_.]+]]
-; CHECK: [[VALID]]:
-; CHECK: getelementptr inbounds i64, ptr inttoptr
+; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
 ; CHECK: load i64
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: [[CONT]]:
 ; CHECK: load i8, ptr %q
   %q = getelementptr i8, ptr %p, i64 %n
   %v = load i8, ptr %q
@@ -66,9 +64,10 @@ define i8 @derived_dereference(ptr %p, i64 %n) {
 ; Passing a derived pointer to an unknown callee is a genuine escape.
 define void @derived_escape(ptr %p, i64 %n) {
 ; CHECK-LABEL: @derived_escape(
+; CHECK: %flexfat.root.int = ptrtoint ptr %p to i64
 ; CHECK: %q = getelementptr i8, ptr %p, i64 %n
 ; CHECK: ptrtoint ptr %q to i64
-; CHECK: ptrtoint ptr %p to i64
+; CHECK: ptrtoint ptr %flexfat.base to i64
 ; CHECK: call void @__flexfat_report_oob
 ; CHECK: call void @sink(ptr %q)
   %q = getelementptr i8, ptr %p, i64 %n
@@ -76,18 +75,34 @@ define void @derived_escape(ptr %p, i64 %n) {
   ret void
 }
 
-; A non-FlexFat pointer is classified only by the region guard.  In
-; particular, no fixed table load can execute before that guard.
+; Dynamic foreign constants use the safely clamped index-zero sentinel.
 define i8 @non_flexfat_pointer() {
 ; CHECK-LABEL: @non_flexfat_pointer(
-; CHECK: icmp ult i64
-; CHECK-NOT: load i64
-; CHECK: br i1 {{.*}}, label %[[VALID:[0-9A-Za-z_.]+]], label %[[CONT:[0-9A-Za-z_.]+]]
-; CHECK: [[VALID]]:
-; CHECK: load i64
-; CHECK: [[CONT]]:
+; CHECK: load i64, ptr inttoptr (i64 {{[0-9]+}} to ptr)
 ; CHECK: load i8, ptr inttoptr (i64 4096 to ptr)
   %v = load i8, ptr inttoptr (i64 4096 to ptr)
+  ret i8 %v
+}
+
+; Integer-derived constants in a managed region use that region's real base
+; and size metadata rather than the foreign-pointer sentinel.
+define i64 @managed_constant_pointer() {
+; CHECK-LABEL: @managed_constant_pointer(
+; CHECK: load i64, ptr getelementptr inbounds (i64, ptr inttoptr (i64 {{[0-9]+}} to ptr), i64 {{[0-9]+}})
+; CHECK: call void @__flexfat_report_oob
+; CHECK: load i64, ptr inttoptr (i64 17592186044428 to ptr)
+  %v = load i64, ptr inttoptr (i64 17592186044428 to ptr)
+  ret i64 %v
+}
+
+; Constant pointers above 2^48 also fold to sentinel index zero rather than
+; forming an out-of-range metadata address.
+define i8 @high_constant_pointer() {
+; CHECK-LABEL: @high_constant_pointer(
+; CHECK: load i64, ptr inttoptr (i64 {{[0-9]+}} to ptr)
+; CHECK: call void @__flexfat_report_oob
+; CHECK: load i8, ptr inttoptr (i64 -281474976710655 to ptr)
+  %v = load i8, ptr inttoptr (i64 -281474976710655 to ptr)
   ret i8 %v
 }
 
@@ -102,26 +117,24 @@ define void @zero_memcpy() {
   ret void
 }
 
-; Dynamic ranges test length!=0 together with region validity before the
-; metadata-table block.
+; Dynamic ranges retain the length!=0 guard before the metadata-table block.
 define void @dynamic_memcpy(ptr %dst, ptr %src, i64 %len) {
 ; CHECK-LABEL: @dynamic_memcpy(
 ; CHECK: icmp ne i64 %len, 0
-; CHECK: icmp ult i64
-; CHECK: and i1
 ; CHECK-NOT: load i64
-; CHECK: br i1 {{.*}}, label %[[VALID:[0-9A-Za-z_.]+]], label
-; CHECK: [[VALID]]:
+; CHECK: br i1
 ; CHECK: load i64
   call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %len, i1 false)
   ret void
 }
 
-; Origin propagation through selects and loop-carried PHIs must remain valid
-; SSA while retaining the selected allocation base.
+; Differing select origins recover the selected pointer once.
 define i8 @selected_origin(i1 %choose, ptr %a, ptr %b, i64 %n) {
 ; CHECK-LABEL: @selected_origin(
-; CHECK: %flexfat.base = select i1 %choose, ptr %a, ptr %b
+; CHECK: %p = select i1 %choose, ptr %a, ptr %b
+; CHECK-NEXT: %flexfat.root.int = ptrtoint ptr %p to i64
+; CHECK-NOT: ptrtoint ptr %a
+; CHECK-NOT: ptrtoint ptr %b
 ; CHECK: ptrtoint ptr %flexfat.base to i64
   %p = select i1 %choose, ptr %a, ptr %b
   %q = getelementptr i8, ptr %p, i64 %n
@@ -131,7 +144,7 @@ define i8 @selected_origin(i1 %choose, ptr %a, ptr %b, i64 %n) {
 
 define i8 @loop_origin(ptr %a, i1 %again) {
 ; CHECK-LABEL: @loop_origin(
-; CHECK: %flexfat.base = phi ptr [ %a, %entry ], [ %flexfat.base, %{{[0-9A-Za-z_.]+}} ]
+; CHECK: %flexfat.base = phi ptr [ %flexfat.base{{[0-9]+}}, %entry ], [ %flexfat.base, %{{[0-9A-Za-z_.]+}} ]
 entry:
   br label %loop
 loop:
@@ -241,13 +254,13 @@ define i8 @stack_and_global_are_non_flexfat() {
   ret i8 %sum
 }
 
-; Mixed managed/foreign selects mirror the original condition rather than
-; guessing that both inputs have the same provenance.
+; Mixed managed/foreign selects also recover from the selected value.
 define i8 @mixed_select(i1 %choose) {
 ; CHECK-LABEL: @mixed_select(
 ; CHECK: %heap = call ptr @malloc(i64 16)
-; CHECK: %flexfat.base = select i1 %choose, ptr %heap, ptr null
-; CHECK-NOT: ptrtoint
+; CHECK-NEXT: %p = select i1 %choose, ptr %heap, ptr @global_byte
+; CHECK-NEXT: %flexfat.root.int = ptrtoint ptr %p to i64
+; CHECK-NOT: ptrtoint ptr %heap
 ; CHECK: %v = load i8, ptr %p
   %heap = call ptr @malloc(i64 16)
   %p = select i1 %choose, ptr %heap, ptr @global_byte
@@ -259,7 +272,7 @@ define i8 @mixed_select(i1 %choose) {
 ; the corresponding predecessor ordering through self-referential edges.
 define i8 @nested_phi(ptr %seed, i1 %outer_again, i1 %inner_again) {
 ; CHECK-LABEL: @nested_phi(
-; CHECK: %flexfat.base1 = phi ptr [ %seed, %entry ], [ %flexfat.base, %outer.latch ]
+; CHECK: %flexfat.base1 = phi ptr [ %flexfat.base{{[0-9]+}}, %entry ], [ %flexfat.base, %outer.latch ]
 ; CHECK: %flexfat.base = phi ptr [ %flexfat.base1, %outer ], [ %flexfat.base, %{{[0-9A-Za-z_.]+}} ]
 entry:
   br label %outer
@@ -280,8 +293,9 @@ exit:
 
 define i8 @freeze_origin(ptr %p) {
 ; CHECK-LABEL: @freeze_origin(
-; CHECK: %frozen = freeze ptr %p
 ; CHECK: ptrtoint ptr %p to i64
+; CHECK: %frozen = freeze ptr %p
+; CHECK: ptrtoint ptr %flexfat.base to i64
 ; CHECK: %v = load i8, ptr %q
   %frozen = freeze ptr %p
   %q = getelementptr i8, ptr %frozen, i64 1
@@ -291,8 +305,9 @@ define i8 @freeze_origin(ptr %p) {
 
 define i8 @address_space_origin(ptr %p) {
 ; CHECK-LABEL: @address_space_origin(
+; CHECK: %flexfat.base = inttoptr
 ; CHECK: %as = addrspacecast ptr %p to ptr addrspace(1)
-; CHECK: %flexfat.base.cast = addrspacecast ptr %p to ptr addrspace(1)
+; CHECK: %flexfat.base.cast = addrspacecast ptr %flexfat.base to ptr addrspace(1)
 ; CHECK: ptrtoint ptr addrspace(1) %as to i64
 ; CHECK: ptrtoint ptr addrspace(1) %flexfat.base.cast to i64
 ; CHECK: %v = load i8, ptr addrspace(1) %as
@@ -306,7 +321,9 @@ define i8 @address_space_origin(ptr %p) {
 define i8 @invoke_allocation() personality ptr @__gxx_personality_v0 {
 ; CHECK-LABEL: @invoke_allocation(
 ; CHECK: %p = invoke ptr @malloc(i64 16)
-; CHECK-NOT: ptrtoint
+; CHECK: to label %normal unwind label %exception
+; CHECK: normal:
+; CHECK-NOT: ptrtoint ptr %p
 ; CHECK: %v = load i8, ptr %p
 entry:
   %p = invoke ptr @malloc(i64 16) to label %normal unwind label %exception
@@ -325,12 +342,13 @@ declare ptr @malloc(i64)
 declare void @sink(ptr)
 
 ; Both inputs have a static allocation size, so the call-escape check is
-; elided.  The selected companion base is nevertheless real pass-created IR.
+; elided.  The selected pointer still has one memoized recovered base.
 define void @helper_only_select(i1 %choose) {
 ; HELPER-LABEL: @helper_only_select(
-; HELPER: %flexfat.base = select i1 %choose, ptr %a, ptr %b, !nosanitize
+; HELPER: %selected = select i1 %choose, ptr %a, ptr %b
+; HELPER-NEXT: %flexfat.root.int = ptrtoint ptr %selected to i64, !nosanitize
 ; HELPER-NOT: __flexfat_report_oob
-; IDEMPOTENT-COUNT-1: %flexfat.base = select i1 %choose, ptr %a, ptr %b, !nosanitize
+; IDEMPOTENT-COUNT-1: ptrtoint ptr %selected to i64, !nosanitize
 ; INVALIDATE: Running analysis: DominatorTreeAnalysis on helper_only_select
 ; INVALIDATE: Running pass: FlexFatSanitizerPass on [module]
 ; INVALIDATE: Invalidating analysis: InnerAnalysisManagerProxy<AnalysisManager<Function>, Module> on [module]

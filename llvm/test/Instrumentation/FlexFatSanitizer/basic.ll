@@ -6,11 +6,14 @@ target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
 ; derived pointer with an unknown static bound to exercise emitted checks.
 define i32 @test_load(ptr %p) {
 ; CHECK-LABEL: @test_load
+; CHECK: %flexfat.root.int = ptrtoint ptr %p to i64
+; CHECK: %flexfat.region.raw = lshr i64 %flexfat.root.int, {{32|38}}
+; CHECK: %flexfat.address.valid = icmp ult i64 %flexfat.root.int, 281474976710656
+; CHECK: %flexfat.region = select i1 %flexfat.address.valid, i64 %flexfat.region.raw, i64 0
+; CHECK-NOT: sub i64 {{.*}}, 17592186044416
+; CHECK: %flexfat.base = inttoptr
 ; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %q to i64
-; CHECK: sub i64 {{.*}}, 17592186044416
-; CHECK: lshr i64 {{.*}}, {{32|38}}
-; CHECK: icmp ult i64
-; CHECK: br i1
+; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
 ; CHECK: load i64
 ; CHECK: icmp uge i64
 ; CHECK: call void @__flexfat_report_oob
