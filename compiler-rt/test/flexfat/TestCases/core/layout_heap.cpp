@@ -1,9 +1,9 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 
 typedef uintptr_t uptr;
 extern "C" uptr __flexfat_get_size(uptr ptr);
@@ -11,7 +11,7 @@ extern "C" uptr __flexfat_get_base(uptr ptr);
 
 int main() {
   printf("Heap Allocation (Rounding & Alignment):\n");
-  
+
   // 1. Exact power of 2
   void *p16 = malloc(16);
   if (((uptr)p16 % 16) == 0 && __flexfat_get_size((uptr)p16) == 16)
@@ -30,9 +30,9 @@ int main() {
     printf("  1024: ok\n");
 
   printf("OOM Fallback (Simulated):\n");
-  // Requesting a size larger than FlexFat supports (e.g. > 1GB in default mode)
+  // Requesting a size larger than FlexFat supports in either profile
   // should fall back to standard malloc.
-  size_t huge = 2ULL * 1024 * 1024 * 1024; // 2GB
+  size_t huge = 128ULL * 1024 * 1024 * 1024; // 128 GiB
   void *pHuge = malloc(huge);
   if (pHuge) {
     uptr sHuge = __flexfat_get_size((uptr)pHuge);

@@ -1,5 +1,5 @@
-// RUN: %clangxx_flexfat -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-ALL
-// RUN: %clangxx_flexfat_safe -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-ALL
+// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-ALL
+// RUN: %clangxx_flexfat_safe -mllvm -flexfat-check-whole-access -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-ALL
 
 // Verifies that a genuine OOB heap read is detected in both default-fast and
 // safe mode when the loaded value is actually used (returned and printed).

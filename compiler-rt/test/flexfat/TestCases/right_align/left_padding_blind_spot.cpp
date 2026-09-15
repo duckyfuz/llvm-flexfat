@@ -4,9 +4,8 @@
 // padding are not caught because the shifted pointer still falls within the
 // same slot.
 //
-// 112-byte object in a 128-byte slot with 16-byte malloc alignment:
-//   left padding:  [slot_base,    slot_base+16)  <- blind spot
-//   live object:   [slot_base+16, slot_base+128) <- buf[0]..buf[111]
+// A 176-byte object has at least 16 bytes of aligned left padding in both
+// layouts, so buf[-1] remains inside the class slot.
 //
 // buf[-1] = slot_base+15, which is inside the slot:
 //   GetBase(slot_base+15) = slot_base
@@ -16,12 +15,12 @@
 #include <cstdlib>
 
 int main() {
-  // 112 bytes -> 128-byte class in both POW2 and custom-config mode.
-  char *buf = (char *)malloc(112);
-  if (!buf) return 1;
+  char *buf = (char *)malloc(176);
+  if (!buf)
+    return 1;
 
   // Write one byte into the left padding (blind spot).
-  // This is technically out-of-bounds for the 112-byte allocation, but
+  // This is technically out-of-bounds for the requested allocation, but
   // right-align mode cannot detect it because the access stays within the same slot.
   buf[-1] = 'X';
 

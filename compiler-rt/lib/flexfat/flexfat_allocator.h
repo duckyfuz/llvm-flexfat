@@ -1,4 +1,5 @@
-//===-- flexfat_allocator.h - FlexFat Allocator Internal Interface ----*- C++ -*-===//
+//===-- flexfat_allocator.h - FlexFat Allocator Internal Interface ----*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -19,10 +20,13 @@ namespace __flexfat {
 
 using __sanitizer::uptr;
 
-// Allocate from a FlexFat region. Returns nullptr if size exceeds max.
+// Allocate from a FlexFat region. Returns nullptr when no managed slot fits.
 void *Allocate(uptr size);
 
-// Free a FlexFat allocation.
+// Allocate a managed slot with an aligned interior user pointer.
+void *AllocateAligned(uptr size, uptr alignment);
+
+// Free a managed FlexFat allocation. Callers must classify foreign pointers.
 void Deallocate(void *ptr);
 
 // Initialize interceptors (called from __flexfat_init).

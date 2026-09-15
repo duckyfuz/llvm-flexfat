@@ -1,5 +1,6 @@
-// RUN: %clangxx_flexfat -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-ESCAPE
-// RUN: %clangxx_flexfat -O0 %s -DSENTINEL -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-SENTINEL
+// RUN: %clangxx_flexfat -O0 %s -o %t && %run %t | FileCheck %s --check-prefix=CHECK-ESCAPE
+// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t | FileCheck %s --check-prefix=CHECK-ESCAPE
+// RUN: %clangxx_flexfat -O0 %s -DSENTINEL -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,12 +17,12 @@ int main() {
 
 #ifdef SENTINEL
   // Test the "base - 1" sentinel idiom.
-  // CHECK-SENTINEL: FLEXFAT ERROR: out-of-bounds error detected!
+  // CHECK-OOB: FLEXFAT ERROR: out-of-bounds error detected!
   char *sentinel = p - 1;
   sink(sentinel);
 #else
   // Test pointer escaping an allocation boundary.
-  // CHECK-ESCAPE: FLEXFAT ERROR: out-of-bounds error detected!
+  // CHECK-ESCAPE: p = 0x
   char *escaped = p + 16;
   sink(escaped);
 #endif

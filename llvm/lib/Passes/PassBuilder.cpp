@@ -246,9 +246,9 @@
 #include "llvm/Transforms/Instrumentation/CGProfile.h"
 #include "llvm/Transforms/Instrumentation/ControlHeightReduction.h"
 #include "llvm/Transforms/Instrumentation/DataFlowSanitizer.h"
+#include "llvm/Transforms/Instrumentation/FlexFatSanitizer.h"
 #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
 #include "llvm/Transforms/Instrumentation/HWAddressSanitizer.h"
-#include "llvm/Transforms/Instrumentation/FlexFatSanitizer.h"
 #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
 #include "llvm/Transforms/Instrumentation/KCFI.h"
 #include "llvm/Transforms/Instrumentation/LowerAllowCheckPass.h"
@@ -986,9 +986,12 @@ Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
     for (StringRef Param : llvm::split(Params, ';')) {
       if (Param == "recover")
         Result.Recover = true;
+      else if (Param == "whole-access")
+        Result.CheckWholeAccess = true;
       else
         return make_error<StringError>(
-            formatv("invalid FlexFatSanitizer pass parameter '{}'", Param).str(),
+            formatv("invalid FlexFatSanitizer pass parameter '{}'", Param)
+                .str(),
             inconvertibleErrorCode());
     }
   }

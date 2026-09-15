@@ -1,8 +1,7 @@
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=optimizer-early %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=scalar-late %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=optimizer-early %s -o %t && %run %t | FileCheck %s
+// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=scalar-late %s -o %t && %run %t | FileCheck %s
 
-// FlexFat instruments pointer arithmetic as well as memory accesses. Keep the
-// derived pointer observable so the optimizer cannot discard the GEP itself.
+// Exact one-past formation and escape are valid at both pass placements.
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,4 +16,4 @@ int main() {
   free(p);
 }
 
-// CHECK: FLEXFAT ERROR: out-of-bounds error detected!
+// CHECK: 0x
