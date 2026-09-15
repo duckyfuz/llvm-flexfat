@@ -43,8 +43,10 @@ chat](https://discord.gg/xS7Z362),
 ## FlexFat prototype
 
 This checkout contains the FlexFat pointer-bounds-checking sanitizer prototype.
-Build it with `./configure_llvm.sh`, then run either layout with
-`./run_flexfat.sh pow2` or `./run_flexfat.sh custom`.
+When used in the CP4106 workspace, build and test it from the workspace root
+with `scripts/flexfat/configure_llvm.sh`, followed by
+`scripts/flexfat/run_flexfat.sh pow2` or
+`scripts/flexfat/run_flexfat.sh custom`.
 
 Use `-fsanitize=flexfat` to instrument an application. The optional hidden
 LLVM controls are `-mllvm -flexfat-mode=<fast|safe|right-align>` and
