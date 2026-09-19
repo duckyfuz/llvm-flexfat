@@ -20,6 +20,9 @@ namespace __flexfat {
 
 using __sanitizer::uptr;
 
+enum class InitState : unsigned { Uninitialized, Initializing, Ready };
+bool IsReady();
+
 // Allocate from a FlexFat region. Returns nullptr when no managed slot fits.
 void *Allocate(uptr size);
 

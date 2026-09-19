@@ -26,14 +26,25 @@
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_mutex.h"
 #include <stddef.h>
+#include "sanitizer_common/sanitizer_atomic.h"
+#ifdef FLEXFAT_TEMPORAL_TBI
+#if !defined(__aarch64__) || !defined(__linux__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || __SIZEOF_POINTER__ != 8
+#error FlexFat TBI requires little-endian Linux AArch64 with 64-bit pointers
+#endif
+#include "sanitizer_common/sanitizer_linux.h"
+#include "sanitizer_common/sanitizer_libc.h"
+#include <linux/prctl.h>
+#endif
 
 using namespace __sanitizer;
 
 namespace __flexfat {
 
-// Flag to track initialization state (not static — accessed by
-// flexfat_interceptors.cpp)
-bool flexfat_inited = false;
+// Initialization is published only after mappings and interceptors are ready.
+static atomic_uint32_t init_state;
+bool IsReady() {
+  return atomic_load(&init_state, memory_order_acquire) == unsigned(InitState::Ready);
+}
 
 // Set to true when -fsanitize-recover=flexfat is active. Controls whether
 // interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
@@ -79,6 +90,109 @@ static FreeBlock *free_lists[kMaxSizeClasses];
 // Using one lock per size class allows concurrent allocation across different
 // size classes, which is the common case in multi-threaded programs.
 static StaticSpinMutex region_locks[kMaxSizeClasses];
+
+#ifdef FLEXFAT_TEMPORAL_TBI
+struct TemporalRegion {
+  uptr first;
+  uptr count;
+  atomic_uint16_t *entries;
+};
+static TemporalRegion temporal_regions[kMaxSizeClasses];
+
+static void InitTemporal() {
+  uptr bytes = 0;
+  for (uptr i = 0; i < kNumSizeClasses; ++i) {
+    auto &r = temporal_regions[i];
+    r.first = region_next_alloc[i];
+    r.count = (GetRegionStart(i) + kRegionSize - r.first) / SizeClassToSize(i);
+    bytes += r.count * sizeof(atomic_uint16_t);
+  }
+  // Demand-paged, non-fixed mapping, after every fixed spatial reservation.
+  auto *entries = static_cast<atomic_uint16_t *>(
+      MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
+  for (uptr i = 0; i < kNumSizeClasses; ++i) {
+    temporal_regions[i].entries = entries;
+    entries += temporal_regions[i].count;
+  }
+}
+
+static atomic_uint16_t *TemporalEntry(uptr raw, uptr &base) {
+  uptr region = GetRegionIndex(raw);
+  if (region >= kNumSizeClasses)
+    return nullptr;
+  uptr size = SizeClassToSize(region);
+  base = raw - raw % size;
+  const auto &r = temporal_regions[region];
+  if (base < r.first || (base - r.first) % size ||
+      (base - r.first) / size >= r.count)
+    return nullptr;
+  return r.entries + (base - r.first) / size;
+}
+
+struct TemporalState {
+  uptr base = 0;
+  atomic_uint16_t *entry = nullptr;
+  unsigned bits = 0;
+
+  bool Matches(uptr ptr) const {
+    unsigned tag = PointerTag(ptr);
+    return entry && tag && (bits & 256) && (bits & 255) == tag;
+  }
+};
+
+static TemporalState LoadTemporalState(uptr ptr) {
+  TemporalState state;
+  state.entry = TemporalEntry(Untag(ptr), state.base);
+  if (state.entry)
+    state.bits = atomic_load(state.entry, memory_order_acquire);
+  return state;
+}
+
+// Reporting may allocate while symbolizing. Never hold an allocator lock here.
+static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
+                                    const TemporalState &state) {
+  const char *ops[] = {"read", "write", "free", "realloc"};
+  const char *reason = !state.entry ? "invalid slot geometry"
+                       : !state.bits ? "never allocated"
+                       : !PointerTag(ptr) ? "zero managed tag"
+                       : !(state.bits & 256) ? "dead slot"
+                       : "generation mismatch";
+  Printf("FLEXFAT ERROR: temporal violation\n"
+         "  operation = %s, tagged address = 0x%zx, raw slot base = 0x%zx\n"
+         "  current generation = %u, pointer tag = %u, live = %u, access size = %zu\n"
+         "  metadata = %s, reason = %s\n",
+         operation >= 0 && operation < 4 ? ops[operation] : "unknown",
+         ptr, state.base, state.bits & 255, PointerTag(ptr),
+         !!(state.bits & 256), access_size,
+         state.entry ? "available" : "unavailable (invalid slot geometry)",
+         reason);
+  GET_STACK_TRACE_FATAL_HERE;
+  stack.Print();
+  Die();
+}
+
+static void ValidateTemporal(uptr ptr, uptr access_size, int operation) {
+  if ((operation < 2 && !access_size) || !IsFlexFatPointer(ptr))
+    return;
+  TemporalState state = LoadTemporalState(ptr);
+  if (!state.Matches(ptr))
+    ReportTemporal(ptr, access_size, operation, state);
+}
+
+static void EnableTaggedAddresses() {
+  uptr result = internal_prctl(PR_SET_TAGGED_ADDR_CTRL, PR_TAGGED_ADDR_ENABLE, 0, 0, 0);
+  int error = 0;
+  if (internal_iserror(result, &error)) {
+    Printf("FLEXFAT initialization failed: PR_SET_TAGGED_ADDR_CTRL, errno=%d\n", error);
+    Die();
+  }
+  result = internal_prctl(PR_GET_TAGGED_ADDR_CTRL, 0, 0, 0, 0);
+  if (internal_iserror(result, &error) || !(result & PR_TAGGED_ADDR_ENABLE)) {
+    Printf("FLEXFAT initialization failed: PR_GET_TAGGED_ADDR_CTRL, errno=%d\n", error);
+    Die();
+  }
+}
+#endif
 
 // Fixed address where the metadata tables are mapped during initialization.
 // Pow2 mode uses the size and mask tables. Custom mode uses the size and magic
@@ -127,8 +241,10 @@ static void InitializeFlags() {
 
 static void InitTables() {
   // Reserve enough address space for the fixed table offsets used by the pass.
-  if (!MmapFixedNoReserve(kTablesBase, kTablesMappingSize, "flexfat_tables"))
+  if (!MmapFixedNoReserve(kTablesBase, kTablesMappingSize, "flexfat_tables")) {
+    Printf("FLEXFAT initialization failed: fixed spatial tables\n");
     Die();
+  }
 
   u64 *sizes = (u64 *)(kTablesBase + 0 * kTablesOffset);
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -261,15 +377,21 @@ static void *AllocateImpl(uptr size, uptr alignment) {
 
   // In right-align mode, preserve malloc alignment by rounding the available
   // slack down to the nearest alignment boundary before shifting the pointer.
-  if (alignment) {
-    return (void *)RoundUpTo(slot_base, alignment);
-  }
-  if (flexfat_right_align) {
-    uptr slack = alloc_size - size;
-    uptr aligned_offset = RoundDownTo(slack, kMallocAlignment);
-    return (void *)(slot_base + aligned_offset);
-  }
-  return (void *)slot_base;
+  uptr user = slot_base;
+  if (alignment)
+    user = RoundUpTo(slot_base, alignment);
+  else if (flexfat_right_align)
+    user += RoundDownTo(alloc_size - size, kMallocAlignment);
+#ifdef FLEXFAT_TEMPORAL_TBI
+  uptr base;
+  auto *entry = TemporalEntry(slot_base, base);
+  CHECK(entry);
+  unsigned previous = atomic_load(entry, memory_order_relaxed) & 255;
+  unsigned generation = previous == 255 ? 1 : previous + 1;
+  atomic_store(entry, u16(generation | 256), memory_order_release);
+  user = TagPointer(user, generation);
+#endif
+  return (void *)user;
 }
 
 void *Allocate(uptr size) { return AllocateImpl(size, 0); }
@@ -289,7 +411,7 @@ void Deallocate(void *ptr) {
   if (!ptr)
     return;
 
-  uptr addr = (uptr)ptr;
+  uptr addr = Untag((uptr)ptr);
 
   CHECK(IsFlexFatPointer(addr));
 
@@ -298,12 +420,29 @@ void Deallocate(void *ptr) {
   // in normal mode GetBase(addr) == addr since allocations are class-aligned.
   uptr slot_base = GetBase(addr);
 
-  SpinMutexLock lock(&region_locks[region]);
-
-  // Push slot base to the head of the free list for this size class
-  FreeBlock *block = (FreeBlock *)slot_base;
-  block->next = free_lists[region];
-  free_lists[region] = block;
+#ifdef FLEXFAT_TEMPORAL_TBI
+  TemporalState state;
+#endif
+  bool valid = true;
+  {
+    SpinMutexLock lock(&region_locks[region]);
+#ifdef FLEXFAT_TEMPORAL_TBI
+    state = LoadTemporalState((uptr)ptr);
+    valid = state.Matches((uptr)ptr);
+    if (valid)
+      atomic_store(state.entry, u16(state.bits & 255), memory_order_release);
+#endif
+    if (valid) {
+      // Invalidate before overwriting the slot with the raw free-list link.
+      FreeBlock *block = (FreeBlock *)slot_base;
+      block->next = free_lists[region];
+      free_lists[region] = block;
+    }
+  }
+#ifdef FLEXFAT_TEMPORAL_TBI
+  if (!valid)
+    ReportTemporal((uptr)ptr, 0, 2, state);
+#endif
 }
 
 static void PrintOobHeader(const char *level, uptr ptr, uptr base, uptr bound,
@@ -354,21 +493,30 @@ void __flexfat_set_right_align(int right_align) {
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_init() {
-  if (__flexfat::flexfat_inited)
+  using namespace __flexfat;
+  u32 expected = unsigned(InitState::Uninitialized);
+  if (!atomic_compare_exchange_strong(&init_state, &expected,
+          unsigned(InitState::Initializing), memory_order_acq_rel))
     return;
 
-  __flexfat::InitializeFlags();
+  InitializeFlags();
+#ifdef FLEXFAT_TEMPORAL_TBI
+  EnableTaggedAddresses();
+#endif
 
   __flexfat::InitTables();
 
   __flexfat::InitRegionTable();
 
-  if (!__flexfat::InitMemoryRegions())
+  if (!__flexfat::InitMemoryRegions()) {
+    Printf("FLEXFAT initialization failed: fixed spatial regions\n");
     Die();
-
-  __flexfat::flexfat_inited = true;
-
+  }
+#ifdef FLEXFAT_TEMPORAL_TBI
+  InitTemporal();
+#endif
   __flexfat::InitializeInterceptors();
+  atomic_store(&init_state, unsigned(InitState::Ready), memory_order_release);
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
@@ -384,7 +532,14 @@ void __flexfat_warn_oob(uptr ptr, uptr base, uptr bound, int is_write) {
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-uptr __flexfat_get_base(uptr ptr) { return __flexfat::GetBase(ptr); }
+uptr __flexfat_get_base(uptr ptr) {
+  uptr base = __flexfat::GetBase(ptr);
+#ifdef FLEXFAT_TEMPORAL_TBI
+  if (__flexfat::IsFlexFatPointer(ptr))
+    return __flexfat::TagPointer(base, __flexfat::PointerTag(ptr));
+#endif
+  return base;
+}
 
 SANITIZER_INTERFACE_ATTRIBUTE
 uptr __flexfat_get_size(uptr ptr) { return __flexfat::GetSize(ptr); }
@@ -394,7 +549,7 @@ uptr __flexfat_get_offset(uptr ptr) {
   uptr base = __flexfat::GetBase(ptr);
   if (base == 0)
     return 0;
-  return ptr - base;
+  return __flexfat::Untag(ptr) - base;
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
@@ -403,7 +558,7 @@ uptr __flexfat_get_usable_size(uptr ptr) {
   uptr size = __flexfat::GetSize(ptr);
   if (base == 0)
     return (uptr)-1;
-  return size - (ptr - base);
+  return size - (__flexfat::Untag(ptr) - base);
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
@@ -411,6 +566,17 @@ void *__flexfat_malloc(uptr size) { return __flexfat::Allocate(size); }
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_free(void *ptr) { __flexfat::Deallocate(ptr); }
+
+#ifdef FLEXFAT_TEMPORAL_TBI
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1() {
+  __flexfat_init();
+  CHECK(__flexfat::IsReady());
+}
+SANITIZER_INTERFACE_ATTRIBUTE
+void __flexfat_check_temporal(uptr ptr, uptr size, int operation) {
+  __flexfat::ValidateTemporal(ptr, size, operation);
+}
+#endif
 
 } // extern "C"
 

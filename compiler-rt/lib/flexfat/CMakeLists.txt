@@ -95,6 +95,18 @@ if(COMPILER_RT_HAS_FLEXFAT)
       DEPS ${FLEXFAT_DEPS}
       PARENT_TARGET flexfat)
   else()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND "aarch64" IN_LIST FLEXFAT_SUPPORTED_ARCH)
+      add_compiler_rt_runtime(clang_rt.flexfat_tbi
+        STATIC ARCHS aarch64
+        SOURCES ${FLEXFAT_SOURCES}
+        ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
+        OBJECT_LIBS RTInterception RTSanitizerCommon RTSanitizerCommonLibc
+                    RTSanitizerCommonSymbolizer RTSanitizerCommonSymbolizerInternal
+        CFLAGS ${FLEXFAT_CFLAGS}
+        DEFS ${FLEXFAT_COMMON_DEFINITIONS} FLEXFAT_TEMPORAL_TBI=1
+        DEPS ${FLEXFAT_DEPS}
+        PARENT_TARGET flexfat)
+    endif()
     add_compiler_rt_runtime(clang_rt.flexfat
       STATIC
       ARCHS ${FLEXFAT_SUPPORTED_ARCH}

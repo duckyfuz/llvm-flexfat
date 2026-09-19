@@ -23,6 +23,11 @@ extern "C" {
 // Initialize the FlexFat Sanitizer runtime. Called early during program startup.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_init();
 
+// Implemented only by the Linux AArch64 temporal runtime.
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_check_temporal(
+    uptr tagged_ptr, uptr access_size, int operation);
+
 // Report an out-of-bounds error.
 // ptr: The pointer that caused the violation
 // base: The base address of the allocation
