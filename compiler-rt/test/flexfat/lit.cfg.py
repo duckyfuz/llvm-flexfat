@@ -7,6 +7,7 @@ config.name = "FlexFatSanitizer" + getattr(config, "name_suffix", "")
 # Setup source root.
 config.test_source_root = os.path.dirname(__file__)
 config.suffixes = [".c", ".cpp"]
+config.excludes = ["Inputs"]
 
 # Teach lit that these are shell tests (// RUN: ... lines).
 # When loaded via the build-dir site config, lit.common.configured sets this;
@@ -79,3 +80,9 @@ if getattr(config, "target_os", "Unknown") not in ["Darwin", "Linux"]:
 # Tests guarded with REQUIRES: flexfat-custom-config are skipped otherwise.
 if getattr(config, "flexfat_custom_config", False):
     config.available_features.add("flexfat-custom-config")
+
+config.substitutions.append(
+    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-fsanitize-flexfat-tbi"])))
+if (getattr(config, "target_arch", "") == "aarch64" and
+        getattr(config, "target_os", "") == "Linux"):
+    config.available_features.add("flexfat-tbi")
