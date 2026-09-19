@@ -15,6 +15,7 @@ class Module;
 
 struct FlexFatSanitizerOptions {
   bool Recover = false;
+  bool TemporalTBI = false;
   /// Check the complete width of scalar accesses.  The LowFat-compatible
   /// default checks only the pointer position used by the access.
   bool CheckWholeAccess = false;

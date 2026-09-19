@@ -1829,6 +1829,16 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
 #include "clang/Options/Options.inc"
 #undef CODEGEN_OPTION_WITH_MARSHALLING
 
+  if (Opts.SanitizeFlexFatTBI) {
+    if (!LangOptsRef.Sanitize.has(SanitizerKind::FlexFat))
+      Diags.Report(diag::err_drv_argument_only_allowed_with)
+          << "-fsanitize-flexfat-tbi" << "-fsanitize=flexfat";
+    if (T.getArch() != llvm::Triple::aarch64 || !T.isOSLinux() ||
+        T.getEnvironment() == llvm::Triple::GNUILP32)
+      Diags.Report(diag::err_drv_unsupported_opt_for_target)
+          << "-fsanitize-flexfat-tbi" << T.str();
+  }
+
   // At O0 we want to fully disable inlining outside of cases marked with
   // 'alwaysinline' that are required for correctness.
   if (Opts.OptimizationLevel == 0) {

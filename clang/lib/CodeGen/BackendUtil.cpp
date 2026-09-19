@@ -821,6 +821,7 @@ static void addSanitizers(const Triple &TargetTriple,
     FlexFatSanitizerOptions FlexFatOpts;
     FlexFatOpts.Recover =
         CodeGenOpts.SanitizeRecover.has(SanitizerKind::FlexFat);
+    FlexFatOpts.TemporalTBI = CodeGenOpts.SanitizeFlexFatTBI;
     FlexFatOpts.Mode = FlexFatMode;
     FlexFatOpts.PassPlacement = FlexFatPlacement;
     FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
