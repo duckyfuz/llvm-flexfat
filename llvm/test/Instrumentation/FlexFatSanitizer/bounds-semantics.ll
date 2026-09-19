@@ -351,7 +351,7 @@ define void @helper_only_select(i1 %choose) {
 ; IDEMPOTENT-COUNT-1: ptrtoint ptr %selected to i64, !nosanitize
 ; INVALIDATE: Running analysis: DominatorTreeAnalysis on helper_only_select
 ; INVALIDATE: Running pass: FlexFatSanitizerPass on [module]
-; INVALIDATE: Invalidating analysis: InnerAnalysisManagerProxy<AnalysisManager<Function>, Module> on [module]
+; INVALIDATE: Invalidating analysis: InnerAnalysisManagerProxy<{{(llvm::)?}}AnalysisManager<{{(llvm::)?}}Function>, {{(llvm::)?}}Module> on [module]
   %a = call ptr @malloc(i64 16)
   %b = call ptr @malloc(i64 16)
   %selected = select i1 %choose, ptr %a, ptr %b
