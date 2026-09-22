@@ -20,7 +20,8 @@ namespace __flexfat {
 
 using __sanitizer::uptr;
 
-// Allocate from a FlexFat region. Returns nullptr when no managed slot fits.
+// Allocate from a FlexFat region. The requested object's one-past pointer
+// remains strictly inside the slot. Returns nullptr when no managed slot fits.
 void *Allocate(uptr size);
 
 // Allocate a managed slot with an aligned interior user pointer.

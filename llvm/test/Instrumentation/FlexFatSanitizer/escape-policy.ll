@@ -15,19 +15,18 @@ declare void @custom_free(ptr allocptr, ptr) allockind("free")
 declare ptr @custom_realloc(ptr, ptr allocptr, i64) allockind("realloc") allocsize(2)
 declare void @sink(ptr)
 
-; Every dynamically checked pointer escape uses an unsigned > class-size
-; predicate so an exact one-past value can cross the escape boundary.
+; Every dynamic pointer escape rejects offsets >= slot size. The allocator
+; keeps the requested object's legal one-past pointer strictly inside its slot.
 define void @call_escape(i64 %n) {
 ; CHECK-LABEL: @call_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %q = getelementptr i8, ptr %p, i64 %n
   call void @sink(ptr %q)
   ret void
 }
 
-; Calls that release or replace an allocation require its original base and
-; therefore reject an exact one-past consumed operand.
+; Consumed operands retain their slot-bound checks.
 define void @free_escape(i64 %n) {
 ; CHECK-LABEL: @free_escape(
 ; CHECK: icmp uge i64
@@ -55,13 +54,12 @@ define void @delete_escape(i64 %n) {
   ret void
 }
 
-; Allocation attributes can place the consumed operand anywhere.  Only that
-; operand is strict; unrelated pointer arguments retain ordinary call-escape
-; one-past permission.
+; Allocation attributes can place the consumed operand anywhere. Both it and
+; unrelated escaping pointer arguments receive strict slot-bound checks.
 define void @attribute_free_escape(i64 %consumed_offset, i64 %other_offset) {
 ; CHECK-LABEL: @attribute_free_escape(
 ; CHECK: icmp uge i64
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %consumed = getelementptr i8, ptr %p, i64 %consumed_offset
   %other_base = call ptr @malloc(i64 16)
@@ -83,7 +81,7 @@ define void @attribute_free_duplicate_operand(i64 %offset) {
 define void @attribute_realloc_escape(i64 %consumed_offset, i64 %other_offset) {
 ; CHECK-LABEL: @attribute_realloc_escape(
 ; CHECK: icmp uge i64
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %consumed = getelementptr i8, ptr %p, i64 %consumed_offset
   %other_base = call ptr @malloc(i64 16)
@@ -94,7 +92,7 @@ define void @attribute_realloc_escape(i64 %consumed_offset, i64 %other_offset) {
 
 define ptr @return_escape(i64 %n) {
 ; CHECK-LABEL: @return_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %q = getelementptr i8, ptr %p, i64 %n
   ret ptr %q
@@ -102,7 +100,7 @@ define ptr @return_escape(i64 %n) {
 
 define void @store_escape(ptr %slot, i64 %n) {
 ; CHECK-LABEL: @store_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %q = getelementptr i8, ptr %p, i64 %n
   store ptr %q, ptr %slot
@@ -111,7 +109,7 @@ define void @store_escape(ptr %slot, i64 %n) {
 
 define { ptr } @aggregate_escape(i64 %n) {
 ; CHECK-LABEL: @aggregate_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %q = getelementptr i8, ptr %p, i64 %n
   %aggregate = insertvalue { ptr } poison, ptr %q, 0
@@ -120,7 +118,7 @@ define { ptr } @aggregate_escape(i64 %n) {
 
 define <2 x ptr> @vector_aggregate_escape(i64 %n) {
 ; CHECK-LABEL: @vector_aggregate_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %q = getelementptr i8, ptr %p, i64 %n
   %aggregate = insertelement <2 x ptr> poison, ptr %q, i32 0
@@ -129,7 +127,7 @@ define <2 x ptr> @vector_aggregate_escape(i64 %n) {
 
 define i64 @integer_escape(i64 %n) {
 ; CHECK-LABEL: @integer_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
   %p = call ptr @malloc(i64 16)
   %q = getelementptr i8, ptr %p, i64 %n
   %bits = ptrtoint ptr %q to i64
@@ -234,7 +232,7 @@ define void @static_exact_one_past_store() {
 ; An offset beyond one-past becomes unknown and keeps its dynamic escape check.
 define void @static_beyond_one_past_escape() {
 ; CHECK-LABEL: @static_beyond_one_past_escape(
-; CHECK: icmp ugt i64
+; CHECK: icmp uge i64
 ; CHECK: call void @__flexfat_report_oob
   %p = call ptr @malloc(i64 16)
   %past = getelementptr i8, ptr %p, i64 17

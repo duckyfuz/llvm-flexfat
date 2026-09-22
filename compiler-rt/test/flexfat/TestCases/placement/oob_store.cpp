@@ -11,7 +11,7 @@ __attribute__((noinline)) static void write_past_end(char *p) {
 }
 
 int main() {
-  char *p = static_cast<char *>(malloc(16));
+  char *p = static_cast<char *>(malloc(15));
   write_past_end(p);
   free(p);
   std::puts("DONE");

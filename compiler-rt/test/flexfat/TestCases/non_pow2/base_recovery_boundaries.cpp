@@ -1,3 +1,5 @@
+// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t
+// RUN: %clangxx_flexfat -O3 %s -o %t && %run %t
 // REQUIRES: flexfat-custom-config
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t
 
@@ -9,7 +11,7 @@ extern "C" uintptr_t __flexfat_get_base(uintptr_t);
 extern "C" uintptr_t __flexfat_get_size(uintptr_t);
 
 int main() {
-  void *allocation = malloc(48);
+  void *allocation = malloc(47);
   assert(allocation != nullptr);
 
   const uintptr_t base = __flexfat_get_base((uintptr_t)allocation);

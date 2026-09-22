@@ -10,8 +10,8 @@
 #include <cstring>
 
 int main() {
-  char *dst   = (char *)malloc(16);
-  char *guard = (char *)malloc(16);
+  char *dst = (char *)malloc(15);
+  char *guard = (char *)malloc(15);
   if (!dst || !guard) return 1;
 
   const char payload[32] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

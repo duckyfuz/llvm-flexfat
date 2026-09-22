@@ -312,12 +312,11 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     Instruction *InsertBefore, CheckKind Kind) {
   Value *IsOOB = nullptr;
   if (!FixedAccessSize && !DynAccessSize) {
-    // C and C++ permit an exact one-past pointer value to escape, although
-    // dereferencing it remains invalid; offsets beyond one-past still report.
-    // This deliberately differs from released LowFat's >= escape predicate.
+    // The allocator reserves a trailing byte, so legal requested-object
+    // one-past pointers remain strictly inside the slot. Reject slot-boundary
+    // escapes before storing/reloading them can recover a neighbouring base.
     Value *Diff = IRB.CreateSub(PtrInt, Base);
-    IsOOB = isEscapeCheck(Kind) ? IRB.CreateICmpUGT(Diff, AllocSize)
-                                : IRB.CreateICmpUGE(Diff, AllocSize);
+    IsOOB = IRB.CreateICmpUGE(Diff, AllocSize);
   } else {
     Value *AccessSize = DynAccessSize;
     if (!AccessSize)
@@ -888,10 +887,10 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
   markInstrumented(I);
 
   if (!DynAccessSize && PtrBounds.StaticUpperBound) {
-    // C and C++ allow an exact one-past value to escape, but never to be
-    // dereferenced; beyond-one-past values retain their checks.  This static
-    // rule intentionally diverges from released LowFat by keeping exact
-    // one-past scalar point checks while preserving width-aware elision.
+    // StaticUpperBound describes the requested object, not its allocation
+    // slot. The reserved trailing byte makes its exact one-past escape valid.
+    // Keep scalar point accesses at that offset dynamically checked and
+    // preserve width-aware access elision.
     bool IsStaticallyValid =
         isEscapeCheck(Kind) ? FixedAccessSize <= *PtrBounds.StaticUpperBound
                             : FixedAccessSize < *PtrBounds.StaticUpperBound;

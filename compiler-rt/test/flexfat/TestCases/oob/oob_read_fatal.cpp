@@ -8,13 +8,13 @@
 #include <cstdlib>
 
 int main() {
-  char *buf = (char *)malloc(32);
+  char *buf = (char *)malloc(31);
   if (!buf) return 1;
 
   buf[0] = 'H';
-  buf[31] = 'i';
+  buf[30] = 'i';
 
-  // Read 8 bytes at offset 28 of a 32-byte allocation:
+  // Read 8 bytes at offset 28 of a 32-byte slot:
   //   bytes 28-35 exceed the 32-byte boundary: OOB.
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   double *p = (double *)(buf + 28);

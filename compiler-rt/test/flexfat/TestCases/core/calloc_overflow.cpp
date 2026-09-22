@@ -1,3 +1,9 @@
+// RUN: %clangxx_flexfat -O2 %s -o %t
+// RUN: not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-FATAL
+// RUN: env FLEXFAT_OPTIONS=allocator_may_return_null=1 %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-NULL
+// RUN: %clangxx_flexfat -O3 %s -o %t
+// RUN: not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-FATAL
+// RUN: env FLEXFAT_OPTIONS=allocator_may_return_null=1 %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-NULL
 // RUN: %clangxx_flexfat -O0 %s -o %t
 // RUN: not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-FATAL
 // RUN: env FLEXFAT_OPTIONS=allocator_may_return_null=1 %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-NULL

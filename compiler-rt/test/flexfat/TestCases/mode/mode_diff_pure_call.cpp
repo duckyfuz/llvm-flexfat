@@ -13,14 +13,14 @@
 // noinline keeps this as an inter-procedural case.
 __attribute__((noinline))
 static double peek(char *p) {
-  // 8-byte (double) OOB read. p was allocated with malloc(16); a double starting
+  // 8-byte (double) OOB read. p was allocated with malloc(15); a double starting
   // at offset 14 spans bytes [14, 22), which overflows the 16-byte FlexFat slot
   // boundary at byte 16. FlexFat detects this as an out-of-bounds access.
   return *reinterpret_cast<double *>(p + 14);
 }
 
 int main() {
-  char *p = (char *)malloc(16);
+  char *p = (char *)malloc(15);
   peek(p);   // Return value intentionally discarded.
   free(p);
 
