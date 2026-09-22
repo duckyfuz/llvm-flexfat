@@ -27,6 +27,10 @@
 #include "sanitizer_common/sanitizer_mutex.h"
 #include <stddef.h>
 #include "sanitizer_common/sanitizer_atomic.h"
+#if defined(FLEXFAT_EXACT_DEALLOCATION) && !defined(FLEXFAT_TEMPORAL_TBI)
+#error "Exact deallocation requires temporal support"
+#endif
+
 #ifdef FLEXFAT_TEMPORAL_TBI
 #if !defined(__aarch64__) || !defined(__linux__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || __SIZEOF_POINTER__ != 8
 #error FlexFat TBI requires little-endian Linux AArch64 with 64-bit pointers
@@ -96,23 +100,41 @@ struct TemporalRegion {
   uptr first;
   uptr count;
   atomic_uint16_t *entries;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+  // Accessed only under the corresponding region_locks entry.
+  u64 *user_offsets;
+#endif
 };
 static TemporalRegion temporal_regions[kMaxSizeClasses];
 
 static void InitTemporal() {
-  uptr bytes = 0;
+  uptr slots = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     auto &r = temporal_regions[i];
     r.first = region_next_alloc[i];
     r.count = (GetRegionStart(i) + kRegionSize - r.first) / SizeClassToSize(i);
-    bytes += r.count * sizeof(atomic_uint16_t);
+    slots += r.count;
   }
   // Demand-paged, non-fixed mapping, after every fixed spatial reservation.
   auto *entries = static_cast<atomic_uint16_t *>(
-      MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
+      MmapNoReserveOrDie(slots * sizeof(atomic_uint16_t),
+                         "flexfat temporal metadata initialization"));
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+  // A separate mapping keeps every u64 aligned even when a region has an odd
+  // number of temporal entries. Neither demand-paged mapping is eagerly cleared.
+  auto *offsets = static_cast<u64 *>(
+      MmapNoReserveOrDie(slots * sizeof(u64),
+                         "flexfat allocation offset metadata initialization"));
+#endif
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     temporal_regions[i].entries = entries;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+    temporal_regions[i].user_offsets = offsets;
+#endif
     entries += temporal_regions[i].count;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+    offsets += temporal_regions[i].count;
+#endif
   }
 }
 
@@ -148,6 +170,15 @@ static TemporalState LoadTemporalState(uptr ptr) {
   return state;
 }
 
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+// The caller must hold the class lock and have validated the entry's geometry.
+// Keep offset lookups separate from ordinary read/write temporal validation.
+static u64 &UserOffset(uptr region, atomic_uint16_t *entry) {
+  const auto &r = temporal_regions[region];
+  return r.user_offsets[entry - r.entries];
+}
+#endif
+
 // Reporting may allocate while symbolizing. Never hold an allocator lock here.
 static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
                                     const TemporalState &state) {
@@ -171,9 +202,45 @@ static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
   Die();
 }
 
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+static void NORETURN ReportInvalidDeallocation(uptr ptr, int operation,
+                                              uptr expected, uptr base) {
+  Printf("FLEXFAT ERROR: invalid deallocation\n"
+         "  operation = %s, tagged address = 0x%zx\n"
+         "  supplied address = 0x%zx, expected allocation address = 0x%zx, slot base = 0x%zx\n"
+         "  reason = not allocation start\n",
+         operation == 2 ? "free" : "realloc", ptr, Untag(ptr), expected, base);
+  GET_STACK_TRACE_FATAL_HERE;
+  stack.Print();
+  Die();
+}
+#endif
+
 static void ValidateTemporal(uptr ptr, uptr access_size, int operation) {
   if ((operation < 2 && !access_size) || !IsFlexFatPointer(ptr))
     return;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+  if (operation == 3) {
+    uptr region = GetRegionIndex(Untag(ptr));
+    TemporalState state;
+    uptr expected = 0;
+    bool temporal_valid;
+    bool exact_valid;
+    {
+      SpinMutexLock lock(&region_locks[region]);
+      state = LoadTemporalState(ptr);
+      temporal_valid = state.Matches(ptr);
+      if (temporal_valid)
+        expected = state.base + UserOffset(region, state.entry);
+      exact_valid = temporal_valid && Untag(ptr) == expected;
+    }
+    if (!temporal_valid)
+      ReportTemporal(ptr, access_size, operation, state);
+    if (!exact_valid)
+      ReportInvalidDeallocation(ptr, operation, expected, state.base);
+    return;
+  }
+#endif
   TemporalState state = LoadTemporalState(ptr);
   if (!state.Matches(ptr))
     ReportTemporal(ptr, access_size, operation, state);
@@ -388,6 +455,9 @@ static void *AllocateImpl(uptr size, uptr alignment) {
   CHECK(entry);
   unsigned previous = atomic_load(entry, memory_order_relaxed) & 255;
   unsigned generation = previous == 255 ? 1 : previous + 1;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+  UserOffset(class_index, entry) = user - slot_base;
+#endif
   atomic_store(entry, u16(generation | 256), memory_order_release);
   user = TagPointer(user, generation);
 #endif
@@ -422,13 +492,23 @@ void Deallocate(void *ptr) {
 
 #ifdef FLEXFAT_TEMPORAL_TBI
   TemporalState state;
+  bool temporal_valid = false;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+  uptr expected = 0;
+#endif
 #endif
   bool valid = true;
   {
     SpinMutexLock lock(&region_locks[region]);
 #ifdef FLEXFAT_TEMPORAL_TBI
     state = LoadTemporalState((uptr)ptr);
-    valid = state.Matches((uptr)ptr);
+    temporal_valid = state.Matches((uptr)ptr);
+    valid = temporal_valid;
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+    if (temporal_valid)
+      expected = state.base + UserOffset(region, state.entry);
+    valid = temporal_valid && addr == expected;
+#endif
     if (valid)
       atomic_store(state.entry, u16(state.bits & 255), memory_order_release);
 #endif
@@ -440,8 +520,12 @@ void Deallocate(void *ptr) {
     }
   }
 #ifdef FLEXFAT_TEMPORAL_TBI
-  if (!valid)
+  if (!temporal_valid)
     ReportTemporal((uptr)ptr, 0, 2, state);
+#ifdef FLEXFAT_EXACT_DEALLOCATION
+  if (!valid)
+    ReportInvalidDeallocation((uptr)ptr, 2, expected, state.base);
+#endif
 #endif
 }
 

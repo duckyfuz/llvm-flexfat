@@ -123,6 +123,8 @@ public:
   }
   bool needsRtsanRt() const { return Sanitizers.has(SanitizerKind::Realtime); }
   bool TemporalTBI = false;
+  bool ExactDeallocation = false;
+  bool needsFlexFatExactRt() const { return ExactDeallocation; }
   bool needsFlexFatTBIRt() const { return TemporalTBI; }
   bool needsFlexFatRt() const { return Sanitizers.has(SanitizerKind::FlexFat); }
 

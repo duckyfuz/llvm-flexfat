@@ -1523,6 +1523,8 @@ void CompilerInvocationBase::GenerateCodeGenArgs(const CodeGenOptions &Opts,
                                                  const std::string &OutputFile,
                                                  const LangOptions *LangOpts) {
   const CodeGenOptions &CodeGenOpts = Opts;
+  if (Opts.SanitizeFlexFatTBI)
+    GenerateArg(Consumer, OPT_fsanitize_flexfat_temporal_EQ, "tagged");
 
   if (Opts.OptimizationLevel == 0)
     GenerateArg(Consumer, OPT_O0);
@@ -1829,14 +1831,22 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
 #include "clang/Options/Options.inc"
 #undef CODEGEN_OPTION_WITH_MARSHALLING
 
+  for (const Arg *A : Args.filtered(options::OPT_fsanitize_flexfat_temporal_EQ)) {
+    StringRef Value = A->getValue();
+    if (Value != "off" && Value != "tagged")
+      Diags.Report(diag::err_drv_unsupported_option_argument)
+          << A->getSpelling() << Value;
+    Opts.SanitizeFlexFatTBI = Value == "tagged";
+  }
   if (Opts.SanitizeFlexFatTBI) {
     if (!LangOptsRef.Sanitize.has(SanitizerKind::FlexFat))
       Diags.Report(diag::err_drv_argument_only_allowed_with)
-          << "-fsanitize-flexfat-tbi" << "-fsanitize=flexfat";
+          << "-fsanitize-flexfat-temporal=tagged" << "-fsanitize=flexfat";
     if (T.getArch() != llvm::Triple::aarch64 || !T.isOSLinux() ||
-        T.getEnvironment() == llvm::Triple::GNUILP32)
+        T.getEnvironment() == llvm::Triple::GNUILP32 ||
+        Args.getLastArgValue(OPT_target_abi) == "ilp32")
       Diags.Report(diag::err_drv_unsupported_opt_for_target)
-          << "-fsanitize-flexfat-tbi" << T.str();
+          << "-fsanitize-flexfat-temporal=tagged" << T.str();
   }
 
   // At O0 we want to fully disable inlining outside of cases marked with

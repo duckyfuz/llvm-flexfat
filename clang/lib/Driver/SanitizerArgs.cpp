@@ -689,17 +689,32 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
   }
 
   Kinds |= Default;
-  TemporalTBI = Args.hasFlag(options::OPT_fsanitize_flexfat_tbi,
-                            options::OPT_fno_sanitize_flexfat_tbi, false);
+  for (const Arg *A : Args.filtered(options::OPT_fsanitize_flexfat_temporal_EQ)) {
+    A->claim();
+    StringRef Value = A->getValue();
+    if (Value != "off" && Value != "tagged" && DiagnoseErrors)
+      D.Diag(diag::err_drv_unsupported_option_argument) << A->getSpelling() << Value;
+    TemporalTBI = Value == "tagged";
+  }
+  for (const Arg *A : Args.filtered(options::OPT_fsanitize_flexfat_deallocation_check_EQ)) {
+    A->claim();
+    StringRef Value = A->getValue();
+    if (Value != "basic" && Value != "exact" && DiagnoseErrors)
+      D.Diag(diag::err_drv_unsupported_option_argument) << A->getSpelling() << Value;
+    ExactDeallocation = Value == "exact";
+  }
+  if (ExactDeallocation && !TemporalTBI && DiagnoseErrors)
+    D.Diag(diag::err_drv_argument_only_allowed_with)
+        << "-fsanitize-flexfat-deallocation-check=exact" << "-fsanitize-flexfat-temporal=tagged";
   if (TemporalTBI && DiagnoseErrors) {
     if (!(Kinds & SanitizerKind::FlexFat))
       D.Diag(diag::err_drv_argument_only_allowed_with)
-          << "-fsanitize-flexfat-tbi" << "-fsanitize=flexfat";
+          << "-fsanitize-flexfat-temporal=tagged" << "-fsanitize=flexfat";
     if (Triple.getArch() != llvm::Triple::aarch64 || !Triple.isOSLinux() ||
         Triple.isArch32Bit() || Triple.getEnvironment() == llvm::Triple::GNUILP32 ||
         Args.getLastArgValue(options::OPT_mabi_EQ) == "ilp32")
       D.Diag(diag::err_drv_unsupported_opt_for_target)
-          << "-fsanitize-flexfat-tbi" << Triple.str();
+          << "-fsanitize-flexfat-temporal=tagged" << Triple.str();
   }
 
   // We disable the vptr sanitizer if it was enabled by group expansion but RTTI
@@ -1329,7 +1344,7 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
   }
 
   if (TemporalTBI)
-    CmdArgs.push_back("-fsanitize-flexfat-tbi");
+    CmdArgs.push_back("-fsanitize-flexfat-temporal=tagged");
 
   // Translate available CoverageFeatures to corresponding clang-cc1 flags.
   // Do it even if Sanitizers.empty() since some forms of coverage don't require

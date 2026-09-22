@@ -6,6 +6,9 @@
 // RUN: not %t write 2>&1 | FileCheck %s --check-prefix=WRITE
 // RUN: not %t double-free 2>&1 | FileCheck %s --check-prefix=FREE
 // RUN: not %t realloc 2>&1 | FileCheck %s --check-prefix=REALLOC
+// RUN: not %t dead-interior-free 2>&1 | FileCheck %s --check-prefixes=TEMPORAL,FREE
+// RUN: not %t stale-interior-realloc 2>&1 | FileCheck %s --check-prefixes=TEMPORAL,REALLOC
+// TEMPORAL: FLEXFAT ERROR: temporal violation
 // READ: operation = read
 // WRITE: operation = write
 // FREE: operation = free
@@ -17,6 +20,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <sys/resource.h>
 extern "C" uintptr_t __flexfat_get_base(uintptr_t);
 extern "C" uintptr_t __flexfat_get_size(uintptr_t);
@@ -45,6 +49,18 @@ int main(int argc, char **argv) {
   assert(__flexfat_get_usable_size((uintptr_t)p) <= __flexfat_get_size((uintptr_t)p));
   if (argc > 1) {
     const char *mode = argv[1];
+    if (!strcmp(mode, "foreign")) {
+      // Bypass the executable's interceptor to obtain a real libc allocation.
+      auto system_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+      assert(system_malloc);
+      char *q = (char *)system_malloc(32); assert(q && !tag(q));
+      q[0] = 17;
+      q = (char *)realloc(q, 64); assert(q && !tag(q) && q[0] == 17);
+      free(q);
+      q = (char *)system_malloc(32); assert(q && !tag(q));
+      assert(!realloc(q, 0));
+      free(p); return 0;
+    }
     if (!strcmp(mode, "zero-tag")) return read_byte((char *)raw(p));
     if (!strcmp(mode, "geometry") || !strcmp(mode, "geometry-tail")) {
       for (unsigned n = 33; n < 1000; n += 16) {
@@ -82,10 +98,15 @@ int main(int argc, char **argv) {
       assert(!pthread_join(t, nullptr)); return read_byte(p);
     }
     free(p);
-    if (!strcmp(mode, "reuse") || !strcmp(mode, "stale-free") || !strcmp(mode, "stale-realloc")) {
+    if (!strcmp(mode, "reuse") || !strcmp(mode, "stale-free") || !strcmp(mode, "stale-realloc") ||
+        !strcmp(mode, "stale-interior-free") || !strcmp(mode, "stale-interior-realloc")) {
       char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) != tag(p));
     }
     if (!strcmp(mode, "write")) write_byte(p);
+    else if (!strcmp(mode, "dead-interior-free") || !strcmp(mode, "stale-interior-free")) free(opaque(p + 1));
+    else if (!strcmp(mode, "dead-interior-realloc") || !strcmp(mode, "stale-interior-realloc")) {
+      p = (char *)realloc(opaque(p + 1), 24); asm volatile("" : : "r"(p) : "memory");
+    }
     else if (!strcmp(mode, "double-free") || !strcmp(mode, "stale-free")) free(p);
     else if (!strcmp(mode, "realloc") || !strcmp(mode, "stale-realloc")) {
       p = (char *)realloc(p, 24); asm volatile("" : : "r"(p) : "memory");
@@ -112,7 +133,7 @@ int main(int argc, char **argv) {
   dup = strndup("abc", 2); assert(tag(dup) && !strcmp(dup, "ab")); free(dup);
   // Both layouts have enough slack here to shift the user pointer in
   // right-align mode. Realloc must copy from that interior user address.
-  char *shifted = (char *)malloc(257);
+  char *shifted = (char *)malloc(273);
   shifted[0] = 17; shifted[256] = 29;
   char *grown = (char *)realloc(shifted, 513);
   assert(grown && grown[0] == 17 && grown[256] == 29);

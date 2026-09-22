@@ -2533,12 +2533,13 @@ def fno_sanitize_hwaddress_experimental_aliasing
     Group<f_clang_Group>,
     Visibility<[ClangOption, CLOption]>,
     HelpText<"Disable aliasing mode in HWAddressSanitizer">;
-defm sanitize_flexfat_tbi : BoolOption<"f", "sanitize-flexfat-tbi",
-  CodeGenOpts<"SanitizeFlexFatTBI">, DefaultFalse,
-  PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
-  NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
-  BothFlags<[], [ClangOption], " Linux AArch64 FlexFat temporal checking">>,
-  Group<f_clang_Group>;
+def fsanitize_flexfat_temporal_EQ : Joined<["-"], "fsanitize-flexfat-temporal=">,
+  Group<f_clang_Group>, Visibility<[ClangOption, CC1Option]>,
+  Values<"off,tagged">, HelpText<"Select FlexFat temporal checking (off or tagged)">;
+let Visibility = [ClangOption] in
+def fsanitize_flexfat_deallocation_check_EQ : Joined<["-"], "fsanitize-flexfat-deallocation-check=">,
+  Group<f_clang_Group>, Visibility<[ClangOption]>,
+  Values<"basic,exact">, HelpText<"Select FlexFat deallocation checking (basic or exact)">;
 defm sanitize_memory_use_after_dtor : BoolOption<"f", "sanitize-memory-use-after-dtor",
   CodeGenOpts<"SanitizeMemoryUseAfterDtor">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
