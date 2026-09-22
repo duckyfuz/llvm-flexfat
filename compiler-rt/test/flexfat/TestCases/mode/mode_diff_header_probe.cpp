@@ -14,12 +14,12 @@
 
 static uint32_t probe_header_magic(char *packet) {
   // Simulate reading a 4-byte header field at byte offset 14. The caller
-  // allocated only 16 bytes, so bytes [14, 18) cross the allocation boundary.
+  // allocated 15 bytes in a 16-byte slot, so bytes [14, 18) cross the allocation boundary.
   return *reinterpret_cast<uint32_t *>(packet + 14);
 }
 
 int main() {
-  char *packet = (char *)malloc(16);
+  char *packet = (char *)malloc(15);
   probe_header_magic(packet); // Best-effort probe; caller ignores the result.
   free(packet);
 

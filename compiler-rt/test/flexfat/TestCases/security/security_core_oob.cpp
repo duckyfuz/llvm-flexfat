@@ -6,7 +6,9 @@
 // RUN: %clangxx_flexfat -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-READ
 // RUN: %clangxx_flexfat -O3 %s -DWRITE -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-WRITE
 
+#include <stdint.h>
 #include <stdlib.h>
+extern "C" size_t __flexfat_get_usable_size(uintptr_t);
 #include <stdio.h>
 
 __attribute__((noinline)) static size_t opaqueSize(size_t size) {
@@ -24,6 +26,7 @@ int main() {
   size_t size = runtime_size;
   char *p = (char *)malloc(size);
   if (!p) return 1;
+  size = __flexfat_get_usable_size((uintptr_t)p);
 
 #ifdef UNDERFLOW
   // CHECK-UNDERFLOW: FLEXFAT ERROR: out-of-bounds error detected!

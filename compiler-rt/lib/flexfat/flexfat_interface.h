@@ -39,9 +39,9 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_set_recover(int recover);
 // -flexfat-mode=right-align is active. Instructs the allocator to bias objects
 // toward the high end of their size-class slot while preserving the default
 // malloc alignment. This can improve detection of some small rightward
-// overflows, but the alignment constraint means the object will not always end
-// exactly at the slot boundary. The trade-off is a possible blind spot on the
-// left side when the shifted pointer still remains within the same slot.
+// overflows, but the reserved trailing byte and alignment constraint keep the
+// object strictly inside the slot. The trade-off is a possible blind spot on
+// the left side when the shifted pointer still remains within the same slot.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_set_right_align(int right_align);
 
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_report_oob(uptr ptr, uptr base,

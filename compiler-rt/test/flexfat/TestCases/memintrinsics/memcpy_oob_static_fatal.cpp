@@ -7,13 +7,13 @@
 #include <cstring>
 
 int main() {
-  char *dst   = (char *)malloc(16);
-  char *guard = (char *)malloc(16); // keep adjacent memory mapped
+  char *dst = (char *)malloc(15);
+  char *guard = (char *)malloc(15); // keep adjacent memory mapped
   if (!dst || !guard) return 1;
 
   const char payload[32] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-  // memcpy of 32 bytes into a 16-byte allocation overflows by 16 bytes.
+  // memcpy of 32 bytes into a 16-byte slot overflows by 16 bytes.
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   memcpy(dst, payload, 32);
 

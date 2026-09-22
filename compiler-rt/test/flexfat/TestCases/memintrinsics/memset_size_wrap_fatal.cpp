@@ -1,8 +1,7 @@
-// RUN: %clangxx_flexfat -fno-builtin-memset -O0 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memset -O1 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memset -O2 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memset -O3 %s -o %t
-// RUN: not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // A wrapped dynamic size must still be rejected by the runtime interceptor
 // before libc sees it.

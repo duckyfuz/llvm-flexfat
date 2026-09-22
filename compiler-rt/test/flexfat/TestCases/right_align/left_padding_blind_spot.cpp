@@ -4,18 +4,16 @@
 // padding are not caught because the shifted pointer still falls within the
 // same slot.
 //
-// A 176-byte object has at least 16 bytes of aligned left padding in both
+// A 175-byte object has at least 16 bytes of aligned left padding in both
 // layouts, so buf[-1] remains inside the class slot.
 //
-// buf[-1] = slot_base+15, which is inside the slot:
-//   GetBase(slot_base+15) = slot_base
-//   (slot_base+15 - slot_base) = 15 < 128 -> NOT OOB
+// GetBase(buf - 1) still equals slot_base, and its offset is below class_size.
 
 #include <cstdio>
 #include <cstdlib>
 
 int main() {
-  char *buf = (char *)malloc(176);
+  char *buf = (char *)malloc(175);
   if (!buf)
     return 1;
 

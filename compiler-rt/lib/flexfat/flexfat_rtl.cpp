@@ -42,8 +42,8 @@ bool flexfat_recover = false;
 // Set to true when -flexfat-mode=right-align is active. Instructs Allocate()
 // to bias objects toward the high end of their size-class slot while still
 // preserving the default malloc alignment guarantee. This can improve detection
-// of some right-side overflows, but the object's right edge does not always
-// coincide exactly with the slot boundary once alignment is enforced.
+// of some right-side overflows, but the reserved trailing byte and alignment
+// keep the object's right edge strictly inside the slot.
 bool flexfat_right_align = false;
 
 // malloc() must return a pointer suitably aligned for any object type.
@@ -208,9 +208,9 @@ static bool InitMemoryRegions() {
 // Thread-safe: protected by per-size-class spin mutex.
 //
 // In right-align mode, returns the highest malloc-aligned address within the
-// slot that still leaves room for the requested object. The bounds check
-// (ptr - GetBase(ptr)) < class_size is still correct: GetBase() recovers
-// slot_base via reciprocal multiplication since slot_base is always
+// slot that leaves room for the requested object and its one-past pointer. The
+// bounds check (ptr - GetBase(ptr)) < class_size is still correct: GetBase()
+// recovers slot_base via reciprocal multiplication since slot_base is always
 // class-aligned, and any
 // access past slot_base+class_size fails the check.
 //
@@ -220,7 +220,10 @@ static void *AllocateImpl(uptr size, uptr alignment) {
   if (size == 0)
     size = 1;
 
-  uptr class_request = size;
+  // Keep the requested object's one-past pointer strictly inside the slot.
+  if (size == ~(uptr)0)
+    return nullptr;
+  uptr class_request = size + 1;
   if (alignment) {
     if (alignment - 1 > ~(uptr)0 - class_request)
       return nullptr;
@@ -265,7 +268,7 @@ static void *AllocateImpl(uptr size, uptr alignment) {
     return (void *)RoundUpTo(slot_base, alignment);
   }
   if (flexfat_right_align) {
-    uptr slack = alloc_size - size;
+    uptr slack = alloc_size - size - 1;
     uptr aligned_offset = RoundDownTo(slack, kMallocAlignment);
     return (void *)(slot_base + aligned_offset);
   }
