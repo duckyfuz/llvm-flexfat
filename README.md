@@ -56,3 +56,22 @@ Set `FLEXFAT_SIZES_CFG` to select a custom size-class configuration and
 
 The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
 participants to all modes of communication within the project.
+
+### FlexFat heap slot policy
+
+Managed heap allocations reserve at least one byte after the requested object.
+Pointer escapes at or beyond the allocation slot boundary report an error;
+legal requested-object one-past pointers remain inside the slot. Bounds are
+still recovered from addresses, without pointer metadata. Padding within a
+slot remains a spatial detection blind spot.
+
+Class selection uses the normalized request plus one byte, and aligned
+allocations additionally reserve worst-case alignment padding. Exact class-size
+requests therefore move to the next class (doubling slot size in POW2).
+The largest managed ordinary request is the largest class minus one byte;
+alignment padding can reduce that limit further. Larger requests and exhausted
+regions use matched system allocation/free fallback. Right-align mode rounds
+the offset down while retaining the trailing byte and malloc alignment.
+
+Rebuild the compiler and runtime together when changing this policy. Previously
+linked exact-fit runtimes do not satisfy the strict escape check invariant.

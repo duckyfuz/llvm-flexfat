@@ -1,3 +1,5 @@
+// RUN: %clangxx_flexfat_right_align -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_right_align -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat_right_align -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 #include <cassert>
@@ -11,17 +13,20 @@ extern "C" std::uintptr_t __flexfat_get_base(std::uintptr_t ptr);
 extern "C" std::uintptr_t __flexfat_get_size(std::uintptr_t ptr);
 
 int main() {
-  char *p = static_cast<char *>(malloc(176));
-  char *neighbor = static_cast<char *>(malloc(176));
+  char *p = static_cast<char *>(malloc(175));
+  char *neighbor = static_cast<char *>(malloc(175));
   if (!p || !neighbor)
     return 1;
 
   size_t class_size = __flexfat_get_size(reinterpret_cast<uintptr_t>(p));
+  size_t old_usable =
+      class_size - (reinterpret_cast<uintptr_t>(p) -
+                    __flexfat_get_base(reinterpret_cast<uintptr_t>(p)));
   uintptr_t delta = static_cast<uintptr_t>(neighbor - p);
   assert(delta == class_size && "expected adjacent class slots");
 
-  memset(p, 'A', 176);
-  memset(neighbor, 0, 176);
+  memset(p, 'A', 175);
+  memset(neighbor, 0, 175);
   char *neighbor_slot_base = reinterpret_cast<char *>(
       __flexfat_get_base(reinterpret_cast<std::uintptr_t>(neighbor)));
   size_t padding = static_cast<size_t>(neighbor - neighbor_slot_base);
@@ -32,10 +37,11 @@ int main() {
   size_t slot_count = class_size == 192 ? 256 : 4;
   void **blockers = static_cast<void **>(calloc(slot_count, sizeof(void *)));
   for (size_t i = 0; i < slot_count; ++i) {
-    blockers[i] = malloc(1ULL << 30);
+    blockers[i] = malloc((1ULL << 30) - 1);
+    asm volatile("" : : "r"(blockers[i]) : "memory");
     assert(blockers[i]);
   }
-  char *q = static_cast<char *>(realloc(p, 1ULL << 30));
+  char *q = static_cast<char *>(realloc(p, (1ULL << 30) - 1));
   if (!q) {
     // Extremely unlikely on the supported 64-bit targets because the system
     // allocator usually overcommits here, but avoid a spurious hard failure.
@@ -48,7 +54,7 @@ int main() {
   }
 
   bool copied_neighbor_prefix = true;
-  for (size_t i = 176; i < 176 + padding; ++i) {
+  for (size_t i = old_usable; i < old_usable + padding; ++i) {
     if (static_cast<unsigned char>(q[i]) != 0x5A) {
       copied_neighbor_prefix = false;
       break;

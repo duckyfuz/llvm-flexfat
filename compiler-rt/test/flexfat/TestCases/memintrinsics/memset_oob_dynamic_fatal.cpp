@@ -1,8 +1,7 @@
-// RUN: %clangxx_flexfat -fno-builtin-memset -O0 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memset -O1 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memset -O2 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memset -O3 %s -o %t
-// RUN: not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memset -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // memset OOB write with non-constant size must be reported in fatal mode.
 
@@ -10,7 +9,7 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
-  char *buf = (char *)malloc(16);
+  char *buf = (char *)malloc(15);
   if (!buf) return 1;
 
   // Use argc to prevent the optimizer from knowing the size at compile time.

@@ -1,3 +1,5 @@
+// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 // UNSUPPORTED: flexfat-custom-config
 
@@ -11,7 +13,9 @@ extern "C" uptr __flexfat_get_base(uptr);
 int main() {
   void *slots[5];
   for (unsigned i = 0; i != 5; ++i) {
-    slots[i] = malloc(1ULL << 30);
+    slots[i] = malloc((1ULL << 30) - 1);
+    // Keep every allocation live even when optimized malloc/free pairs fold.
+    asm volatile("" : : "r"(slots[i]) : "memory");
     if (!slots[i])
       return 1;
   }

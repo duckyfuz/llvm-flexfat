@@ -13,7 +13,7 @@
 volatile char sink; // volatile global: any write/read here is always observable
 
 int main() {
-  char *p = (char *)malloc(16);
+  char *p = (char *)malloc(15);
 
   // 8-byte (double) OOB read at offset 14: bytes [14, 22) overflow the
   // 16-byte FlexFat slot [0, 16).

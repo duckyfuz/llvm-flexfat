@@ -9,7 +9,7 @@
 volatile char sink;
 
 int main() {
-  char *p = (char *)malloc(16);
+  char *p = (char *)malloc(15);
   if (!p) return 1;
 
   sink = p[16];

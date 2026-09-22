@@ -1,8 +1,7 @@
-// RUN: %clangxx_flexfat -fno-builtin-memmove -O0 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memmove -O1 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memmove -O2 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memmove -O3 %s -o %t
-// RUN: not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memmove -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memmove -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memmove -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memmove -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // memmove OOB read with non-constant size must be reported.
 
@@ -10,7 +9,7 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
-  char *dst = (char *)malloc(16);
+  char *dst = (char *)malloc(15);
   char *src = dst + 4;
   if (!dst) return 1;
 

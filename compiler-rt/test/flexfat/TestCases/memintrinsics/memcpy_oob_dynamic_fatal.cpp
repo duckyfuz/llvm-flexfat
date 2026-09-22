@@ -1,8 +1,7 @@
-// RUN: %clangxx_flexfat -fno-builtin-memcpy -O0 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memcpy -O1 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memcpy -O2 %s -o %t
-// RUN: %clangxx_flexfat -fno-builtin-memcpy -O3 %s -o %t
-// RUN: not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memcpy -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memcpy -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memcpy -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-memcpy -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // memcpy OOB write with non-constant size must be reported in fatal mode.
 
@@ -10,7 +9,7 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
-  char *dst = (char *)malloc(16);
+  char *dst = (char *)malloc(15);
   char *src = strdup("ABCDEFGHIJKLMNOPQRS"); // 19 bytes
   if (!dst || !src) return 1;
 

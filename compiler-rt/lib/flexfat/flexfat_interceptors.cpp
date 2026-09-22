@@ -46,7 +46,7 @@ struct DlsymAlloc : public DlSymAllocator<DlsymAlloc> {
 // Helper: should this allocation go through FlexFat?
 // Allocations larger than our max size class fall back to system malloc.
 static inline bool ShouldUseFlexFat(uptr size) {
-  return __flexfat::IsReady() && size > 0 && size <= __flexfat::kMaxSize;
+  return __flexfat::IsReady() && size > 0 && size < __flexfat::kMaxSize;
 }
 
 static inline void check_bounds(const void *ptr, uptr access_size,
@@ -66,9 +66,11 @@ static inline bool IsValidPowerOfTwo(uptr value) {
 }
 
 static inline bool CanManageAligned(uptr alignment, uptr size) {
+  // The allocator adds one trailing byte and alignment - 1 padding bytes.
+  uptr normalized_size = size ? size : 1;
   return __flexfat::IsReady() && IsValidPowerOfTwo(alignment) &&
-         alignment - 1 <= ~(uptr)0 - (size ? size : 1) &&
-         (size ? size : 1) + alignment - 1 <= __flexfat::kMaxSize;
+         normalized_size < __flexfat::kMaxSize &&
+         alignment <= __flexfat::kMaxSize - normalized_size;
 }
 
 static inline void *ManagedOrSystemAligned(uptr alignment, uptr size,
