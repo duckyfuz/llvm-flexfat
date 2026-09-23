@@ -1,4 +1,5 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
+// RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
 // RUN: %clangxx_flexfat_right_align -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
 
 // Mode-difference test: overflow beyond the reserved byte where aligned

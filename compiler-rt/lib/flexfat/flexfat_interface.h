@@ -41,7 +41,7 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_check_temporal(
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_set_recover(int recover);
 
 // Called from a compiler-generated module constructor when
-// -flexfat-mode=right-align is active. Instructs the allocator to bias objects
+// -flexfat-alignment=right is active. Instructs the allocator to bias objects
 // toward the high end of their size-class slot while preserving the default
 // malloc alignment. This can improve detection of some small rightward
 // overflows, but the reserved trailing byte and alignment constraint keep the

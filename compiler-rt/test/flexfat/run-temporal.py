@@ -22,14 +22,15 @@ def run(cmd, failure=None):
     if failure is None:
         assert p.returncode == 0, (cmd, p.returncode, p.stdout, p.stderr)
     else:
-        assert p.returncode != 0 and failure in p.stderr, (cmd, p.returncode, p.stderr)
+        expected = [failure] if isinstance(failure, str) else failure
+        assert p.returncode != 0 and all(s in p.stderr for s in expected), (cmd, p.returncode, p.stderr)
     return p.stdout
 
 for build in args.builds:
     build = build.resolve()
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
-    common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi']
+    common = ['-fsanitize=flexfat', '-mllvm', '-flexfat-tbi=true']
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
@@ -46,19 +47,18 @@ for build in args.builds:
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
         first = ((start + size - 1) // size) * size
-        metadata_bytes += ((start + (1 << region_log) - first) // size) * 2
+        metadata_bytes += ((start + (1 << region_log) - first) // size)
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
         exe = d/'test'
         variants = [(['-O0'], 'O0'), (['-O2'], 'O2'),
                     (['-O2', '-mllvm', '-flexfat-mode=safe'], 'safe'),
-                    (['-O2', '-mllvm', '-flexfat-mode=right-align'], 'right-align'),
-                    (['-O2', '-mllvm', '-flexfat-placement=optimizer-early'], 'early'),
-                    (['-O2', '-mllvm', '-flexfat-placement=optimizer-last'], 'last'),
-                    (['-O2', '-fsanitize-recover=flexfat'], 'recover')]
+                    (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right-align'),
+                    (['-O2', '-mllvm', '-flexfat-mode=safe', '-mllvm', '-flexfat-alignment=right'], 'safe-right'),
+                    (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover')]
         failures = {
-            'read': 'read', 'write': 'write', 'reuse': 'read',
+            'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
             'stale-realloc': 'realloc', 'realloc-zero': 'realloc',
             'zero-tag': 'read', 'never': 'read', 'thread': 'read',
@@ -67,10 +67,13 @@ for build in args.builds:
         for flags, name in variants:
             run([cxx, *common, *flags, '-fno-builtin', '-pthread',
                  root/'TestCases/temporal/lifecycle.cpp', '-o', exe])
-            for mode in ['', 'zero-length', 'realloc-failure', 'fallback']:
+            for mode in ['', 'zero-length', 'realloc-failure', 'fallback',
+                         'next-generation', 'wrap-reuse']:
                 run([exe, *([mode] if mode else [])]); checks += 1
             for mode, operation in failures.items():
-                run([exe, mode], 'operation = ' + operation); checks += 1
+                reason = {'zero-tag': 'zero managed tag', 'never': 'never allocated'}.get(
+                    mode, 'generation mismatch')
+                run([exe, mode], ['operation = ' + operation, 'reason = ' + reason]); checks += 1
             if custom:
                 run([exe, 'geometry'], 'unavailable (invalid slot geometry)'); checks += 1
                 run([exe, 'geometry-tail'], 'unavailable (invalid slot geometry)'); checks += 1

@@ -691,6 +691,20 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
   Kinds |= Default;
   TemporalTBI = Args.hasFlag(options::OPT_fsanitize_flexfat_tbi,
                             options::OPT_fno_sanitize_flexfat_tbi, false);
+  // The LLVM spelling must also select the matching runtime at link time.
+  // Explicit FlexFat controls take precedence over generic sanitizer flags.
+  for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
+    // Match LLVM's option parser, which accepts one or two leading dashes.
+    StringRef Value = A->getValue();
+    if (!Value.consume_front("-"))
+      continue;
+    Value.consume_front("-");
+    if (Value == "flexfat-tbi" || Value == "flexfat-tbi=true" ||
+        Value == "flexfat-tbi=1")
+      TemporalTBI = true;
+    else if (Value == "flexfat-tbi=false" || Value == "flexfat-tbi=0")
+      TemporalTBI = false;
+  }
   if (TemporalTBI && DiagnoseErrors) {
     if (!(Kinds & SanitizerKind::FlexFat))
       D.Diag(diag::err_drv_argument_only_allowed_with)
@@ -765,6 +779,14 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       D, Args, DiagnoseErrors, RecoverableByDefault, AlwaysRecoverable,
       Unrecoverable, options::OPT_fsanitize_recover_EQ,
       options::OPT_fno_sanitize_recover_EQ);
+  for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
+    StringRef Value = A->getValue();
+    if (Value == "-flexfat-recover" || Value == "-flexfat-recover=true" ||
+        Value == "-flexfat-recover=1")
+      RecoverableKinds |= SanitizerKind::FlexFat;
+    else if (Value == "-flexfat-recover=false" || Value == "-flexfat-recover=0")
+      RecoverableKinds &= ~SanitizerKind::FlexFat;
+  }
   RecoverableKinds &= Kinds;
 
   TrappingKinds &= Kinds;

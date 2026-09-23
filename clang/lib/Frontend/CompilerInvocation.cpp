@@ -1829,6 +1829,19 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
 #include "clang/Options/Options.inc"
 #undef CODEGEN_OPTION_WITH_MARSHALLING
 
+  for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
+    // Match LLVM's option parser, which accepts one or two leading dashes.
+    StringRef Value = A->getValue();
+    if (!Value.consume_front("-"))
+      continue;
+    Value.consume_front("-");
+    if (Value == "flexfat-tbi" || Value == "flexfat-tbi=true" ||
+        Value == "flexfat-tbi=1")
+      Opts.SanitizeFlexFatTBI = true;
+    else if (Value == "flexfat-tbi=false" || Value == "flexfat-tbi=0")
+      Opts.SanitizeFlexFatTBI = false;
+  }
+
   if (Opts.SanitizeFlexFatTBI) {
     if (!LangOptsRef.Sanitize.has(SanitizerKind::FlexFat))
       Diags.Report(diag::err_drv_argument_only_allowed_with)

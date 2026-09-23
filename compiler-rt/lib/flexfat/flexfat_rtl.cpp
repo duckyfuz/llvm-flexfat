@@ -50,7 +50,7 @@ bool IsReady() {
 // interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
 bool flexfat_recover = false;
 
-// Set to true when -flexfat-mode=right-align is active. Instructs Allocate()
+// Set to true when -flexfat-alignment=right is active. Instructs Allocate()
 // to bias objects toward the high end of their size-class slot while still
 // preserving the default malloc alignment guarantee. This can improve detection
 // of some right-side overflows, but the reserved trailing byte and alignment
@@ -92,10 +92,15 @@ static FreeBlock *free_lists[kMaxSizeClasses];
 static StaticSpinMutex region_locks[kMaxSizeClasses];
 
 #ifdef FLEXFAT_TEMPORAL_TBI
+// Zero means never allocated. Generations 1..255 advance only on free;
+// there is no independent liveness tracking. A matching forged tag can pass
+// for a freed slot, and stale tags can match again after generation wraparound.
+static_assert(sizeof(atomic_uint8_t) == 1,
+              "Temporal metadata must occupy one byte per slot");
 struct TemporalRegion {
   uptr first;
   uptr count;
-  atomic_uint16_t *entries;
+  atomic_uint8_t *entries;
 };
 static TemporalRegion temporal_regions[kMaxSizeClasses];
 
@@ -105,10 +110,10 @@ static void InitTemporal() {
     auto &r = temporal_regions[i];
     r.first = region_next_alloc[i];
     r.count = (GetRegionStart(i) + kRegionSize - r.first) / SizeClassToSize(i);
-    bytes += r.count * sizeof(atomic_uint16_t);
+    bytes += r.count * sizeof(atomic_uint8_t);
   }
   // Demand-paged, non-fixed mapping, after every fixed spatial reservation.
-  auto *entries = static_cast<atomic_uint16_t *>(
+  auto *entries = static_cast<atomic_uint8_t *>(
       MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     temporal_regions[i].entries = entries;
@@ -116,7 +121,7 @@ static void InitTemporal() {
   }
 }
 
-static atomic_uint16_t *TemporalEntry(uptr raw, uptr &base) {
+static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
   uptr region = GetRegionIndex(raw);
   if (region >= kNumSizeClasses)
     return nullptr;
@@ -131,12 +136,12 @@ static atomic_uint16_t *TemporalEntry(uptr raw, uptr &base) {
 
 struct TemporalState {
   uptr base = 0;
-  atomic_uint16_t *entry = nullptr;
-  unsigned bits = 0;
+  atomic_uint8_t *entry = nullptr;
+  unsigned generation = 0;
 
   bool Matches(uptr ptr) const {
     unsigned tag = PointerTag(ptr);
-    return entry && tag && (bits & 256) && (bits & 255) == tag;
+    return entry && tag && generation == tag;
   }
 };
 
@@ -144,7 +149,7 @@ static TemporalState LoadTemporalState(uptr ptr) {
   TemporalState state;
   state.entry = TemporalEntry(Untag(ptr), state.base);
   if (state.entry)
-    state.bits = atomic_load(state.entry, memory_order_acquire);
+    state.generation = atomic_load(state.entry, memory_order_acquire);
   return state;
 }
 
@@ -153,17 +158,15 @@ static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
                                     const TemporalState &state) {
   const char *ops[] = {"read", "write", "free", "realloc"};
   const char *reason = !state.entry ? "invalid slot geometry"
-                       : !state.bits ? "never allocated"
+                       : !state.generation ? "never allocated"
                        : !PointerTag(ptr) ? "zero managed tag"
-                       : !(state.bits & 256) ? "dead slot"
                        : "generation mismatch";
   Printf("FLEXFAT ERROR: temporal violation\n"
          "  operation = %s, tagged address = 0x%zx, raw slot base = 0x%zx\n"
-         "  current generation = %u, pointer tag = %u, live = %u, access size = %zu\n"
+         "  current generation = %u, pointer tag = %u, access size = %zu\n"
          "  metadata = %s, reason = %s\n",
          operation >= 0 && operation < 4 ? ops[operation] : "unknown",
-         ptr, state.base, state.bits & 255, PointerTag(ptr),
-         !!(state.bits & 256), access_size,
+         ptr, state.base, state.generation, PointerTag(ptr), access_size,
          state.entry ? "available" : "unavailable (invalid slot geometry)",
          reason);
   GET_STACK_TRACE_FATAL_HERE;
@@ -389,9 +392,11 @@ static void *AllocateImpl(uptr size, uptr alignment) {
   uptr base;
   auto *entry = TemporalEntry(slot_base, base);
   CHECK(entry);
-  unsigned previous = atomic_load(entry, memory_order_relaxed) & 255;
-  unsigned generation = previous == 255 ? 1 : previous + 1;
-  atomic_store(entry, u16(generation | 256), memory_order_release);
+  unsigned generation = atomic_load(entry, memory_order_acquire);
+  if (!generation) {
+    generation = 1;
+    atomic_store(entry, u8(generation), memory_order_release);
+  }
   user = TagPointer(user, generation);
 #endif
   return (void *)user;
@@ -433,7 +438,9 @@ void Deallocate(void *ptr) {
     state = LoadTemporalState((uptr)ptr);
     valid = state.Matches((uptr)ptr);
     if (valid)
-      atomic_store(state.entry, u16(state.bits & 255), memory_order_release);
+      atomic_store(state.entry,
+                   u8(state.generation == 255 ? 1 : state.generation + 1),
+                   memory_order_release);
 #endif
     if (valid) {
       // Invalidate before overwriting the slot with the raw free-list link.
