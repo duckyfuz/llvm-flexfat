@@ -1,3 +1,16 @@
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=false -mllvm --flexfat-tbi=true -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=CHECK
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -mllvm -flexfat-tbi=false -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=CHECK
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=CHECK
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=1 -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=CHECK
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm --flexfat-tbi=false -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm --flexfat-tbi=0 -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
+// RUN: not %clang_cc1 -triple x86_64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -emit-llvm -o - %s 2>&1 | FileCheck %s --check-prefix=BAD
+// BAD: unsupported option '-fsanitize-flexfat-tbi' for target
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi=false -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
+// PLAIN-NOT: __flexfat_check_temporal
+// PLAIN-NOT: __flexfat_tbi_abi
 // REQUIRES: aarch64-registered-target
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O0 -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -emit-llvm -o - %s | FileCheck %s
