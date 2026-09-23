@@ -20,21 +20,14 @@ struct FlexFatSanitizerOptions {
   /// default checks only the pointer position used by the access.
   bool CheckWholeAccess = false;
 
-  enum class Placement {
-    ScalarOptimizerLate,
-    OptimizerLast,
-    OptimizerEarly,
-  };
-  Placement PassPlacement = Placement::ScalarOptimizerLate;
-
   enum class FlexFatMode {
-    Fast, /// Instrument at the selected placement (scalar-late by default)
-    Safe, /// Instrument at PipelineStartEP and again at selected placement
-    RightAlign, /// Selected placement + right-align allocations within class
-                /// slots to improve detection of right-side (overflow) OOB at
-                /// the cost of a blind spot on the left (underflow) side.
+    Fast, /// Instrument at ScalarOptimizerLateEP.
+    Safe, /// Instrument at PipelineStartEP and ScalarOptimizerLateEP.
   };
   FlexFatMode Mode = FlexFatMode::Fast;
+
+  enum class Alignment { Left, Right };
+  Alignment AllocationAlignment = Alignment::Left;
 
   bool InternalBarrierOnly_ = false;
   bool InternalModuleSetupOnly_ = false;

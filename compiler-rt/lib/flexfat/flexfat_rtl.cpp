@@ -50,7 +50,7 @@ bool IsReady() {
 // interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
 bool flexfat_recover = false;
 
-// Set to true when -flexfat-mode=right-align is active. Instructs Allocate()
+// Set to true when -flexfat-alignment=right is active. Instructs Allocate()
 // to bias objects toward the high end of their size-class slot while still
 // preserving the default malloc alignment guarantee. This can improve detection
 // of some right-side overflows, but the reserved trailing byte and alignment

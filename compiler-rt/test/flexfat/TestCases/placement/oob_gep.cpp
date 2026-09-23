@@ -1,5 +1,4 @@
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=optimizer-early %s -o %t && %run %t | FileCheck %s
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-placement=scalar-late %s -o %t && %run %t | FileCheck %s
+// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-mode=fast %s -o %t && %run %t | FileCheck %s
 
 // Exact one-past formation and escape are valid at both pass placements.
 

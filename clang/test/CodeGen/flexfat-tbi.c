@@ -11,13 +11,13 @@
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
 // PLAIN-NOT: __flexfat_check_temporal
 // PLAIN-NOT: __flexfat_tbi_abi
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -O2 -mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s
 // REQUIRES: aarch64-registered-target
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O0 -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-mode=safe -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-mode=right-align -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-placement=optimizer-early -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-placement=optimizer-last -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s
 // CHECK: @llvm.global_ctors
 // CHECK: @llvm.used
 // CHECK-LABEL: define {{.*}} @access(

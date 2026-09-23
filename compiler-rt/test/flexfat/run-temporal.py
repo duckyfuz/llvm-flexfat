@@ -30,7 +30,7 @@ for build in args.builds:
     build = build.resolve()
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
-    common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi']
+    common = ['-fsanitize=flexfat', '-mllvm', '-flexfat-tbi=true']
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
@@ -54,10 +54,9 @@ for build in args.builds:
         exe = d/'test'
         variants = [(['-O0'], 'O0'), (['-O2'], 'O2'),
                     (['-O2', '-mllvm', '-flexfat-mode=safe'], 'safe'),
-                    (['-O2', '-mllvm', '-flexfat-mode=right-align'], 'right-align'),
-                    (['-O2', '-mllvm', '-flexfat-placement=optimizer-early'], 'early'),
-                    (['-O2', '-mllvm', '-flexfat-placement=optimizer-last'], 'last'),
-                    (['-O2', '-fsanitize-recover=flexfat'], 'recover')]
+                    (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right-align'),
+                    (['-O2', '-mllvm', '-flexfat-mode=safe', '-mllvm', '-flexfat-alignment=right'], 'safe-right'),
+                    (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover')]
         failures = {
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',

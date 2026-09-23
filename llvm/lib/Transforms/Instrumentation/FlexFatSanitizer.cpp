@@ -421,7 +421,7 @@ bool FlexFatSanitizer::isAllocationResult(Value *Ptr) const {
 }
 
 bool FlexFatSanitizer::isDirectAllocationBase(Value *Ptr) const {
-  if (Options.Mode == FlexFatSanitizerOptions::FlexFatMode::RightAlign)
+  if (Options.AllocationAlignment == FlexFatSanitizerOptions::Alignment::Right)
     return false;
 
   auto *CB = dyn_cast<CallBase>(Ptr);
@@ -1302,7 +1302,7 @@ bool FlexFatSanitizer::run() {
   // Right-aligning places the object's right edge at the slot boundary,
   // making off-by-one overflows detectable at the cost of a left-side
   // blind spot of (class_size - requested_size) bytes.
-  if (Options.Mode == FlexFatSanitizerOptions::FlexFatMode::RightAlign &&
+  if (Options.AllocationAlignment == FlexFatSanitizerOptions::Alignment::Right &&
       !M.getFunction("__flexfat_set_right_align_ctor")) {
     LLVMContext &Ctx = M.getContext();
     FunctionType *SetRightAlignTy =
