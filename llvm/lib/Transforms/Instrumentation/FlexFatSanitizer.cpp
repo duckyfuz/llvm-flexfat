@@ -1088,9 +1088,12 @@ bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
     Changed = true;
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
-    TypeSize Size = DL.getTypeStoreSize(Ty);
-    if (!Size.isScalable())
-      Check(Ptr, ConstantInt::get(IntptrTy, Size.getFixedValue()), Write);
+    SmallPtrSet<Value *, 16> Seen;
+    if (isDefinitelyNonFlexFat(Ptr, Seen))
+      return;
+    IRBuilder<> B(I);
+    B.SetNoSanitizeMetadata();
+    Check(Ptr, B.CreateTypeSize(IntptrTy, DL.getTypeStoreSize(Ty)), Write);
   };
   if (auto *L = dyn_cast<LoadInst>(I))
     Scalar(L->getPointerOperand(), L->getType(), false);
