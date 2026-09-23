@@ -264,6 +264,7 @@ CODEGENOPT(SanitizeAddressPoisonCustomArrayCookie, 1, 0, Benign) ///< Enable poi
 CODEGENOPT(SanitizeAddressGlobalsDeadStripping, 1, 0, Benign) ///< Enable linker dead stripping
                                                               ///< of globals in AddressSanitizer
 CODEGENOPT(SanitizeAddressUseOdrIndicator, 1, 0, Benign) ///< Enable ODR indicator globals
+CODEGENOPT(SanitizeFlexFatTBI, 1, 0, Benign)
 CODEGENOPT(SanitizeMemoryTrackOrigins, 2, 0, Benign) ///< Enable tracking origins in
                                                      ///< MemorySanitizer
 ENUM_CODEGENOPT(SanitizeAddressDtor, AsanDtorKind, 2,

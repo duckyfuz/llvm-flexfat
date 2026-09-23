@@ -30,6 +30,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -55,6 +56,23 @@ STATISTIC(NumInstrumentedMemIntrinsics,
 STATISTIC(NumInstrumentedEscapes, "Number of pointer escapes instrumented");
 
 namespace {
+
+static bool shouldInstrumentFunction(const Function &F) {
+  return !F.isDeclaration() && !F.empty() &&
+         !F.getName().starts_with("__flexfat_") &&
+         !F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation) &&
+         !F.hasFnAttribute("no-sanitize-flexfat");
+}
+
+template <typename Callable>
+static bool invalidateTemporalAttributes(Callable &C) {
+  AttributeList Before = C.getAttributes();
+  C.setMemoryEffects(MemoryEffects::unknown());
+  C.removeFnAttr(Attribute::Speculatable);
+  C.removeFnAttr(Attribute::NoSync);
+  C.removeFnAttr(Attribute::NoFree);
+  return Before != C.getAttributes();
+}
 
 enum class CheckKind {
   Read,
@@ -99,7 +117,15 @@ public:
   FlexFatSanitizer(Module &M, const FlexFatSanitizerOptions &Options)
       : M(M), Options(Options), DL(M.getDataLayout()),
         TLII(M.getTargetTriple()), TLI(TLII),
-        IntptrTy(DL.getIntPtrType(M.getContext())), TablesBase(kTablesBase) {}
+        IntptrTy(DL.getIntPtrType(M.getContext())), TablesBase(kTablesBase) {
+    if (Options.TemporalTBI &&
+        (M.getTargetTriple().getArch() != Triple::aarch64 ||
+         !M.getTargetTriple().isOSLinux() ||
+         M.getTargetTriple().getEnvironment() == Triple::GNUILP32 ||
+         !DL.isLittleEndian() ||
+         DL.getPointerSizeInBits() != 64))
+      report_fatal_error("FlexFat TBI requires little-endian Linux AArch64 with 64-bit pointers");
+  }
 
   bool run();
   bool runFunction(Function &F);
@@ -124,6 +150,13 @@ private:
   FunctionCallee getWarnOobFn();
 
   bool instrumentFunction(Function &F);
+  bool instrumentTemporal(Instruction *I);
+  Value *rawPointer(IRBuilder<> &IRB, Value *Ptr, const Twine &Name = "") {
+    Value *Int = IRB.CreatePtrToInt(Ptr, IntptrTy, Name);
+    return Options.TemporalTBI
+        ? IRB.CreateAnd(Int, ConstantInt::get(IntptrTy, 0x00ffffffffffffffULL),
+                        "flexfat.raw") : Int;
+  }
   bool instrumentMemoryAccess(Instruction *I, Value *Ptr, Type *AccessTy);
   bool instrumentMemoryRange(Instruction *I, Value *Ptr, Value *Size,
                              CheckKind Kind);
@@ -473,7 +506,7 @@ Value *FlexFatSanitizer::getRecoveredBase(Value *CompanionBase) {
   IRBuilder<> IRB(InsertBefore);
   IRB.SetNoSanitizeMetadata();
   Value *PtrInt =
-      IRB.CreatePtrToInt(CompanionBase, IntptrTy, "flexfat.root.int");
+      rawPointer(IRB, CompanionBase, "flexfat.root.int");
   Value *RegionIndex = getSafeTableIndex(IRB, PtrInt);
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -902,9 +935,9 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
 
   IRBuilder<> IRB(I);
   IRB.SetNoSanitizeMetadata();
-  Value *PtrInt = IRB.CreatePtrToInt(Ptr, IntptrTy);
+  Value *PtrInt = rawPointer(IRB, Ptr);
   Value *BasePtr = PtrBounds.CompanionBase;
-  Value *BasePtrInt = IRB.CreatePtrToInt(BasePtr, IntptrTy);
+  Value *BasePtrInt = rawPointer(IRB, BasePtr);
   Value *SizeInt =
       DynAccessSize ? IRB.CreateZExtOrTrunc(DynAccessSize, IntptrTy) : nullptr;
 
@@ -1031,8 +1064,58 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
   }
 }
 
+// Temporal state is intentionally never cached: every covered access must
+// observe metadata again, including after calls and on each loop iteration.
+bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
+  if (!Options.TemporalTBI || I->getMetadata("flexfat.temporal"))
+    return false;
+  bool Changed = false;
+  auto Check = [&](Value *Ptr, Value *Size, bool Write) {
+    SmallPtrSet<Value *, 16> Seen;
+    if (isDefinitelyNonFlexFat(Ptr, Seen))
+      return;
+    IRBuilder<> B(I);
+    B.SetNoSanitizeMetadata();
+    auto Fn = M.getOrInsertFunction("__flexfat_check_temporal",
+        FunctionType::get(B.getVoidTy(), {IntptrTy, IntptrTy, B.getInt32Ty()}, false));
+    // Do not inherit purity attributes from an application declaration.
+    if (auto *F = dyn_cast<Function>(Fn.getCallee())) {
+      F->setMemoryEffects(MemoryEffects::unknown());
+      F->removeFnAttr(Attribute::Speculatable);
+    }
+    B.CreateCall(Fn, {B.CreatePtrToInt(Ptr, IntptrTy),
+                     B.CreateZExtOrTrunc(Size, IntptrTy), B.getInt32(Write)});
+    Changed = true;
+  };
+  auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
+    SmallPtrSet<Value *, 16> Seen;
+    if (isDefinitelyNonFlexFat(Ptr, Seen))
+      return;
+    IRBuilder<> B(I);
+    B.SetNoSanitizeMetadata();
+    Check(Ptr, B.CreateTypeSize(IntptrTy, DL.getTypeStoreSize(Ty)), Write);
+  };
+  if (auto *L = dyn_cast<LoadInst>(I))
+    Scalar(L->getPointerOperand(), L->getType(), false);
+  else if (auto *S = dyn_cast<StoreInst>(I))
+    Scalar(S->getPointerOperand(), S->getValueOperand()->getType(), true);
+  else if (auto *A = dyn_cast<AtomicRMWInst>(I))
+    Scalar(A->getPointerOperand(), A->getValOperand()->getType(), true);
+  else if (auto *A = dyn_cast<AtomicCmpXchgInst>(I))
+    Scalar(A->getPointerOperand(), A->getNewValOperand()->getType(), true);
+  else if (auto *T = dyn_cast<MemTransferInst>(I)) {
+    Check(T->getDest(), T->getLength(), true);
+    Check(T->getSource(), T->getLength(), false);
+  } else if (auto *S = dyn_cast<MemSetInst>(I))
+    Check(S->getDest(), S->getLength(), true);
+  else
+    return false;
+  I->setMetadata("flexfat.temporal", getInstrumentedMetadata());
+  return Changed;
+}
+
 bool FlexFatSanitizer::instrumentFunction(Function &F) {
-  if (F.getName().starts_with("__flexfat_"))
+  if (!shouldInstrumentFunction(F))
     return false;
 
   Bounds.clear();
@@ -1044,7 +1127,7 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
 
   for (auto &BB : F) {
     for (auto &I : BB) {
-      if (shouldSkipInstruction(&I))
+      if (I.hasMetadata(LLVMContext::MD_nosanitize))
         continue;
       if (isa<LoadInst>(&I) || isa<StoreInst>(&I) || isa<AtomicRMWInst>(&I) ||
           isa<AtomicCmpXchgInst>(&I))
@@ -1061,6 +1144,12 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
         ToInstrument.push_back(&I);
     }
   }
+
+  for (Instruction *I : ToInstrument)
+    Modified |= instrumentTemporal(I);
+  llvm::erase_if(ToInstrument, [this](Instruction *I) {
+    return shouldSkipInstruction(I);
+  });
 
   // LowFat-style phase 2: resolve every provenance root and memoize one
   // recovered allocation base before CFG-changing checks are inserted.
@@ -1129,6 +1218,8 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
       }
     }
   }
+  if (Modified && Options.TemporalTBI)
+    invalidateTemporalAttributes(F);
   return Modified || BoundsIRGeneration != 0;
 }
 
@@ -1143,9 +1234,47 @@ bool FlexFatSanitizer::run() {
   LLVM_DEBUG(dbgs() << "[FlexFat] Running on module: " << M.getName() << "\n");
 
   bool Modified = false;
-  if (!Options.InternalModuleSetupOnly_)
+  SmallPtrSet<Function *, 16> TemporalFunctions;
+  for (Function &F : M) {
+    if (Options.InternalModuleSetupOnly_) {
+      // Scalar-late instrumentation runs as a function pass. Invalidate its
+      // prospective callees here, while it is safe to modify other functions.
+      if (Options.TemporalTBI && shouldInstrumentFunction(F)) {
+        TemporalFunctions.insert(&F);
+        Modified |= invalidateTemporalAttributes(F);
+      }
+    } else if (runFunction(F)) {
+      Modified = true;
+      if (Options.TemporalTBI)
+        TemporalFunctions.insert(&F);
+    }
+  }
+  // Call-site attributes are independent of the callee's attributes. Do this
+  // after visiting all functions so caller/callee ordering does not matter.
+  if (!TemporalFunctions.empty())
     for (Function &F : M)
-      Modified |= runFunction(F);
+      for (BasicBlock &BB : F)
+        for (Instruction &I : BB)
+          if (auto *CB = dyn_cast<CallBase>(&I))
+            if (auto *Callee = dyn_cast<Function>(
+                    CB->getCalledOperand()->stripPointerCastsAndAliases());
+                TemporalFunctions.contains(Callee))
+              Modified |= invalidateTemporalAttributes(*CB);
+
+  if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor")) {
+    auto &Ctx = M.getContext();
+    auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), false);
+    auto ABI = M.getOrInsertFunction("__flexfat_tbi_abi_v1", Ty);
+    auto *Ctor = Function::Create(Ty, GlobalValue::InternalLinkage,
+                                  "__flexfat_tbi_ctor", &M);
+    IRBuilder<> B(BasicBlock::Create(Ctx, "entry", Ctor));
+    B.SetNoSanitizeMetadata();
+    B.CreateCall(ABI);
+    B.CreateRetVoid();
+    appendToGlobalCtors(M, Ctor, 0);
+    appendToUsed(M, {Ctor});
+    Modified = true;
+  }
 
   // Emit a module constructor that calls __flexfat_set_recover(Recover) so the
   // runtime interceptors (memset/memcpy/memmove) know whether to warn or abort.

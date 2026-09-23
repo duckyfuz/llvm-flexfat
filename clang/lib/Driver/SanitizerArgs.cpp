@@ -689,6 +689,18 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
   }
 
   Kinds |= Default;
+  TemporalTBI = Args.hasFlag(options::OPT_fsanitize_flexfat_tbi,
+                            options::OPT_fno_sanitize_flexfat_tbi, false);
+  if (TemporalTBI && DiagnoseErrors) {
+    if (!(Kinds & SanitizerKind::FlexFat))
+      D.Diag(diag::err_drv_argument_only_allowed_with)
+          << "-fsanitize-flexfat-tbi" << "-fsanitize=flexfat";
+    if (Triple.getArch() != llvm::Triple::aarch64 || !Triple.isOSLinux() ||
+        Triple.isArch32Bit() || Triple.getEnvironment() == llvm::Triple::GNUILP32 ||
+        Args.getLastArgValue(options::OPT_mabi_EQ) == "ilp32")
+      D.Diag(diag::err_drv_unsupported_opt_for_target)
+          << "-fsanitize-flexfat-tbi" << Triple.str();
+  }
 
   // We disable the vptr sanitizer if it was enabled by group expansion but RTTI
   // is disabled.
@@ -1315,6 +1327,9 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
       return;
     GPUSanitize = true;
   }
+
+  if (TemporalTBI)
+    CmdArgs.push_back("-fsanitize-flexfat-tbi");
 
   // Translate available CoverageFeatures to corresponding clang-cc1 flags.
   // Do it even if Sanitizers.empty() since some forms of coverage don't require

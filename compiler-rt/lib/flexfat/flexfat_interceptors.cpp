@@ -31,7 +31,6 @@ using namespace __sanitizer;
 DECLARE_REAL(void *, malloc, uptr size)
 
 namespace __flexfat {
-extern bool flexfat_inited;
 extern bool flexfat_recover;
 extern bool flexfat_right_align;
 } // namespace __flexfat
@@ -40,20 +39,22 @@ extern bool flexfat_right_align;
 // (e.g., during dynamic linker symbol resolution). Uses a small static buffer.
 namespace {
 struct DlsymAlloc : public DlSymAllocator<DlsymAlloc> {
-  static bool UseImpl() { return !__flexfat::flexfat_inited; }
+  static bool UseImpl() { return !__flexfat::IsReady(); }
 };
 } // namespace
 
 // Helper: should this allocation go through FlexFat?
 // Allocations larger than our max size class fall back to system malloc.
 static inline bool ShouldUseFlexFat(uptr size) {
-  return __flexfat::flexfat_inited && size > 0 && size < __flexfat::kMaxSize;
+  return __flexfat::IsReady() && size > 0 && size < __flexfat::kMaxSize;
 }
 
 static inline void check_bounds(const void *ptr, uptr access_size,
                                 int is_write);
 
 static inline void *ManagedOrSystemMalloc(uptr size) {
+  if (DlsymAlloc::Use())
+    return DlsymAlloc::Allocate(size);
   if (ShouldUseFlexFat(size))
     if (void *ptr = __flexfat::Allocate(size))
       return ptr;
@@ -67,13 +68,15 @@ static inline bool IsValidPowerOfTwo(uptr value) {
 static inline bool CanManageAligned(uptr alignment, uptr size) {
   // The allocator adds one trailing byte and alignment - 1 padding bytes.
   uptr normalized_size = size ? size : 1;
-  return __flexfat::flexfat_inited && IsValidPowerOfTwo(alignment) &&
+  return __flexfat::IsReady() && IsValidPowerOfTwo(alignment) &&
          normalized_size < __flexfat::kMaxSize &&
          alignment <= __flexfat::kMaxSize - normalized_size;
 }
 
 static inline void *ManagedOrSystemAligned(uptr alignment, uptr size,
                                            void *(*fallback)(uptr, uptr)) {
+  if (DlsymAlloc::Use())
+    return DlsymAlloc::Allocate(size, alignment);
   if (CanManageAligned(alignment, size))
     if (void *ptr = __flexfat::AllocateAligned(size, alignment))
       return ptr;
@@ -131,6 +134,10 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     return ManagedOrSystemMalloc(size);
   }
 
+#ifdef FLEXFAT_TEMPORAL_TBI
+  __flexfat_check_temporal((uptr)ptr, 0, 3);
+#endif
+
   // realloc(ptr, 0) == free(ptr)
   if (size == 0) {
     if (__flexfat::IsFlexFatPointer((uptr)ptr))
@@ -158,7 +165,7 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     uptr copy_size = size;
     uptr old_class_size = __flexfat::GetSize((uptr)ptr);
     uptr old_base = __flexfat::GetBase((uptr)ptr);
-    uptr old_offset = (uptr)ptr - old_base;
+    uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
     uptr old_usable = old_class_size - old_offset;
     if (old_usable < copy_size)
       copy_size = old_usable;
@@ -175,7 +182,7 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
       return nullptr;
     uptr old_class_size = __flexfat::GetSize((uptr)ptr);
     uptr old_base = __flexfat::GetBase((uptr)ptr);
-    uptr old_offset = (uptr)ptr - old_base;
+    uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
     uptr old_usable = old_class_size - old_offset;
     uptr copy_size = old_usable < size ? old_usable : size;
     internal_memcpy(new_ptr, ptr, copy_size);
@@ -188,6 +195,8 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
 
 INTERCEPTOR(void *, valloc, uptr size) {
   uptr alignment = GetPageSizeCached();
+  if (DlsymAlloc::Use())
+    return DlsymAlloc::Allocate(size, alignment);
   if (CanManageAligned(alignment, size))
     if (void *ptr = __flexfat::AllocateAligned(size, alignment))
       return ptr;
@@ -197,6 +206,13 @@ INTERCEPTOR(void *, valloc, uptr size) {
 INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
   if (!IsValidPowerOfTwo(alignment) || alignment % sizeof(void *) != 0)
     return errno_EINVAL;
+  if (DlsymAlloc::Use()) {
+    *memptr = DlsymAlloc::Allocate(size, alignment);
+    return 0;
+  }
+#ifdef FLEXFAT_TEMPORAL_TBI
+  __flexfat_check_temporal((uptr)memptr, sizeof(*memptr), 1);
+#endif
   if (CanManageAligned(alignment, size)) {
     if (void *ptr = __flexfat::AllocateAligned(size, alignment)) {
       *memptr = ptr;
@@ -234,6 +250,8 @@ INTERCEPTOR(void *, pvalloc, uptr size) {
     return nullptr;
   }
   uptr rounded = RoundUpTo(size ? size : 1, page);
+  if (DlsymAlloc::Use())
+    return DlsymAlloc::Allocate(rounded, page);
   if (CanManageAligned(page, rounded))
     if (void *ptr = __flexfat::AllocateAligned(rounded, page))
       return ptr;
@@ -247,11 +265,15 @@ static uptr BoundedStringLength(const char *src, uptr limit) {
 
 static char *DuplicateString(const char *src, uptr requested_limit,
                              bool bounded) {
+#ifdef FLEXFAT_TEMPORAL_TBI
+  if (!bounded || requested_limit)
+    __flexfat_check_temporal((uptr)src, 1, 0);
+#endif
   uptr scan_limit = requested_limit;
   bool managed = __flexfat::IsFlexFatPointer((uptr)src);
   if (managed) {
     uptr base = __flexfat::GetBase((uptr)src);
-    uptr available = __flexfat::GetSize((uptr)src) - ((uptr)src - base);
+    uptr available = __flexfat::GetSize((uptr)src) - (__flexfat::Untag((uptr)src) - base);
     if (!bounded || scan_limit > available)
       scan_limit = available;
   }
@@ -285,10 +307,13 @@ INTERCEPTOR(char *, strndup, const char *src, uptr size) {
 
 static inline void check_bounds(const void *ptr, uptr access_size,
                                 int is_write) {
-  if (!ptr || access_size == 0)
+  if (!__flexfat::IsReady() || !ptr || access_size == 0)
     return;
+#ifdef FLEXFAT_TEMPORAL_TBI
+  __flexfat_check_temporal((uptr)ptr, access_size, is_write);
+#endif
   if (!__flexfat::CheckBounds((uptr)ptr, access_size)) {
-    uptr start = (uptr)ptr;
+    uptr start = __flexfat::Untag((uptr)ptr);
     uptr size = __flexfat::GetSize(start);
     uptr base = __flexfat::GetBase(start);
     uptr report_ptr;
@@ -319,18 +344,24 @@ static inline void check_bounds(const void *ptr, uptr access_size,
 // instrument external libc calls. We intercept them here to check bounds.
 INTERCEPTOR(void *, memset, void *dst, int v, uptr size) {
   check_bounds(dst, size, 1 /* write */);
+  if (!__flexfat::IsReady())
+    return internal_memset(dst, v, size);
   return REAL(memset)(dst, v, size);
 }
 
 INTERCEPTOR(void *, memcpy, void *dst, const void *src, uptr size) {
   check_bounds(dst, size, 1 /* write */);
   check_bounds(src, size, 0 /* read */);
+  if (!__flexfat::IsReady())
+    return internal_memcpy(dst, src, size);
   return REAL(memcpy)(dst, src, size);
 }
 
 INTERCEPTOR(void *, memmove, void *dst, const void *src, uptr size) {
   check_bounds(dst, size, 1 /* write */);
   check_bounds(src, size, 0 /* read */);
+  if (!__flexfat::IsReady())
+    return internal_memmove(dst, src, size);
   return REAL(memmove)(dst, src, size);
 }
 

@@ -122,6 +122,8 @@ public:
     return Sanitizers.has(SanitizerKind::NumericalStability);
   }
   bool needsRtsanRt() const { return Sanitizers.has(SanitizerKind::Realtime); }
+  bool TemporalTBI = false;
+  bool needsFlexFatTBIRt() const { return TemporalTBI; }
   bool needsFlexFatRt() const { return Sanitizers.has(SanitizerKind::FlexFat); }
 
   bool hasMemTag() const {

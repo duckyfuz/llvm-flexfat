@@ -219,7 +219,7 @@ MODULE_PASS_WITH_PARAMS(
 MODULE_PASS_WITH_PARAMS(
     "flexfat", "FlexFatSanitizerPass",
     [](FlexFatSanitizerOptions Opts) { return FlexFatSanitizerPass(Opts); },
-    parseFlexFatPassOptions, "")
+    parseFlexFatPassOptions, "recover;whole-access;tbi")
 MODULE_PASS_WITH_PARAMS(
     "internalize", "InternalizePass",
     [](SmallVector<std::string, 0> PreservedGVs) {

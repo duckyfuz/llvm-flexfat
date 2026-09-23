@@ -986,6 +986,8 @@ Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
     for (StringRef Param : llvm::split(Params, ';')) {
       if (Param == "recover")
         Result.Recover = true;
+      else if (Param == "tbi")
+        Result.TemporalTBI = true;
       else if (Param == "whole-access")
         Result.CheckWholeAccess = true;
       else
