@@ -6,10 +6,17 @@
 // RUN: not %t write 2>&1 | FileCheck %s --check-prefix=WRITE
 // RUN: not %t double-free 2>&1 | FileCheck %s --check-prefix=FREE
 // RUN: not %t realloc 2>&1 | FileCheck %s --check-prefix=REALLOC
+// RUN: %t next-generation
+// RUN: %t wrap-reuse
+// RUN: not %t wrap-free 2>&1 | FileCheck %s --check-prefix=READ
 // READ: operation = read
+// READ: reason = generation mismatch
 // WRITE: operation = write
+// WRITE: reason = generation mismatch
 // FREE: operation = free
+// FREE: reason = generation mismatch
 // REALLOC: operation = realloc
+// REALLOC: reason = generation mismatch
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -81,9 +88,30 @@ int main(int argc, char **argv) {
       pthread_t t; assert(!pthread_create(&t, nullptr, release, p));
       assert(!pthread_join(t, nullptr)); return read_byte(p);
     }
+    if (!strcmp(mode, "wrap-free") || !strcmp(mode, "wrap-reuse")) {
+      uintptr_t slot = raw(p);
+      while (tag(p) != 255) {
+        free(p); p = opaque((char *)malloc(23)); assert(raw(p) == slot);
+      }
+      free(p);
+      if (!strcmp(mode, "wrap-free")) return read_byte(p);
+      char *q = opaque((char *)malloc(23));
+      assert(raw(q) == slot && tag(q) == 1);
+      write_byte(q); assert(read_byte(q) == 9); free(q); return 0;
+    }
     free(p);
+    if (!strcmp(mode, "next-generation")) {
+      unsigned next = tag(p) == 255 ? 1 : tag(p) + 1;
+      // Generation matching has no independent liveness check. Only call the
+      // checker: never dereference or free this deliberately forged pointer.
+      __flexfat_check_temporal(raw(p) | (uintptr_t(next) << 56), 1, 0);
+      char *q = opaque((char *)malloc(23));
+      assert(raw(q) == raw(p) && tag(q) == next);
+      write_byte(q); assert(read_byte(q) == 9); free(q); return 0;
+    }
     if (!strcmp(mode, "reuse") || !strcmp(mode, "stale-free") || !strcmp(mode, "stale-realloc")) {
-      char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) != tag(p));
+      char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) == (tag(p) == 255 ? 1 : tag(p) + 1));
+      write_byte(q); assert(read_byte(q) == 9);
     }
     if (!strcmp(mode, "write")) write_byte(p);
     else if (!strcmp(mode, "double-free") || !strcmp(mode, "stale-free")) free(p);
