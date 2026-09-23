@@ -57,6 +57,23 @@ STATISTIC(NumInstrumentedEscapes, "Number of pointer escapes instrumented");
 
 namespace {
 
+static bool shouldInstrumentFunction(const Function &F) {
+  return !F.isDeclaration() && !F.empty() &&
+         !F.getName().starts_with("__flexfat_") &&
+         !F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation) &&
+         !F.hasFnAttribute("no-sanitize-flexfat");
+}
+
+template <typename Callable>
+static bool invalidateTemporalAttributes(Callable &C) {
+  AttributeList Before = C.getAttributes();
+  C.setMemoryEffects(MemoryEffects::unknown());
+  C.removeFnAttr(Attribute::Speculatable);
+  C.removeFnAttr(Attribute::NoSync);
+  C.removeFnAttr(Attribute::NoFree);
+  return Before != C.getAttributes();
+}
+
 enum class CheckKind {
   Read,
   Write,
@@ -1095,9 +1112,7 @@ bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
 }
 
 bool FlexFatSanitizer::instrumentFunction(Function &F) {
-  if (F.getName().starts_with("__flexfat_") ||
-      F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation) ||
-      F.hasFnAttribute("no-sanitize-flexfat"))
+  if (!shouldInstrumentFunction(F))
     return false;
 
   Bounds.clear();
@@ -1200,12 +1215,8 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
       }
     }
   }
-  if (Modified && Options.TemporalTBI) {
-    F.setMemoryEffects(MemoryEffects::unknown());
-    F.removeFnAttr(Attribute::Speculatable);
-    F.removeFnAttr(Attribute::NoSync);
-    F.removeFnAttr(Attribute::NoFree);
-  }
+  if (Modified && Options.TemporalTBI)
+    invalidateTemporalAttributes(F);
   return Modified || BoundsIRGeneration != 0;
 }
 
@@ -1220,9 +1231,32 @@ bool FlexFatSanitizer::run() {
   LLVM_DEBUG(dbgs() << "[FlexFat] Running on module: " << M.getName() << "\n");
 
   bool Modified = false;
-  if (!Options.InternalModuleSetupOnly_)
+  SmallPtrSet<Function *, 16> TemporalFunctions;
+  for (Function &F : M) {
+    if (Options.InternalModuleSetupOnly_) {
+      // Scalar-late instrumentation runs as a function pass. Invalidate its
+      // prospective callees here, while it is safe to modify other functions.
+      if (Options.TemporalTBI && shouldInstrumentFunction(F)) {
+        TemporalFunctions.insert(&F);
+        Modified |= invalidateTemporalAttributes(F);
+      }
+    } else if (runFunction(F)) {
+      Modified = true;
+      if (Options.TemporalTBI)
+        TemporalFunctions.insert(&F);
+    }
+  }
+  // Call-site attributes are independent of the callee's attributes. Do this
+  // after visiting all functions so caller/callee ordering does not matter.
+  if (!TemporalFunctions.empty())
     for (Function &F : M)
-      Modified |= runFunction(F);
+      for (BasicBlock &BB : F)
+        for (Instruction &I : BB)
+          if (auto *CB = dyn_cast<CallBase>(&I))
+            if (auto *Callee = dyn_cast<Function>(
+                    CB->getCalledOperand()->stripPointerCastsAndAliases());
+                TemporalFunctions.contains(Callee))
+              Modified |= invalidateTemporalAttributes(*CB);
 
   if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor")) {
     auto &Ctx = M.getContext();
