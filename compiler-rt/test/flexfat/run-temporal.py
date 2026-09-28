@@ -13,6 +13,8 @@ root = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
+parser.add_argument('--skip-timings', action='store_true',
+                    help='run correctness checks without performance measurements')
 args = parser.parse_args()
 results = []
 
@@ -61,7 +63,8 @@ for build in args.builds:
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
             'stale-realloc': 'realloc', 'realloc-zero': 'realloc',
-            'zero-tag': 'read', 'never': 'read', 'thread': 'read',
+            'zero-tag': 'read', 'never': 'read', 'never-zero': 'read',
+            'report-observation': 'read', 'thread': 'read',
             'memset': 'write', 'memcpy-src': 'read', 'memcpy-dst': 'write',
             'memmove': 'write', 'strdup': 'read', 'strndup': 'read', 'posix': 'write'}
         for flags, name in variants:
@@ -71,22 +74,47 @@ for build in args.builds:
                          'next-generation', 'wrap-reuse']:
                 run([exe, *([mode] if mode else [])]); checks += 1
             for mode, operation in failures.items():
-                reason = {'zero-tag': 'zero managed tag', 'never': 'never allocated'}.get(
+                reason = {'zero-tag': 'zero managed tag', 'never': 'never allocated',
+                          'never-zero': 'never allocated',
+                          'report-observation': 'never allocated'}.get(
                     mode, 'generation mismatch')
                 run([exe, mode], ['operation = ' + operation, 'reason = ' + reason]); checks += 1
             if custom:
-                run([exe, 'geometry'], 'unavailable (invalid slot geometry)'); checks += 1
-                run([exe, 'geometry-tail'], 'unavailable (invalid slot geometry)'); checks += 1
+                for mode in ['geometry', 'geometry-tail', 'geometry-zero', 'geometry-tail-zero',
+                             'geometry-legacy', 'geometry-tail-legacy']:
+                    run([exe, mode], 'unavailable (invalid slot geometry)'); checks += 1
             print(build.name, name, 'passed', flush=True)
+
+        # Arithmetic uses the exported descriptors and the actual fixed tables.
+        arithmetic_obj = d/'arithmetic.o'
+        config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
+        if custom:
+            config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
+                             '-I'+str(build/'lib/Transforms/Instrumentation')]
+        run([cxx, '-O2', *config_flags, '-c', root/'Inputs/tbi-slot-arithmetic.cpp',
+             '-o', arithmetic_obj])
+        run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
+
+        # An object following the old ABI still links and checks with v2 runtime.
+        old_obj = d/'v1.o'
+        run([cc, '-O2', '-fno-builtin', '-ffunction-sections', '-fdata-sections',
+             '-c', root/'Inputs/tbi-v1-object.c', '-o', old_obj])
+        run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe])
+        run([exe]); run([exe, 'stale'], 'generation mismatch'); checks += 2
 
         # Empty object retains the ABI contract even with section GC.
         empty = d/'empty.c'; empty.write_text('int main(void) { return 0; }\n')
         obj = d/'empty.o'
         run([cc, *common, '-O2', '-ffunction-sections', '-fdata-sections', '-c', empty, '-o', obj])
         run([cc, *common, obj, '-Wl,--gc-sections', '-o', exe]); run([exe])
-        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v1')
-        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v1')
-        checks += 3
+        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v2')
+        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v2')
+        # A minimal v1-only runtime cannot satisfy even an empty v2 object.
+        old_runtime = d/'old-runtime.c'
+        old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n')
+        run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
+            '__flexfat_tbi_abi_v2')
+        checks += 4
         launcher = d/'launcher'
         run([cc, root/'Inputs/tbi-init-failure.c', '-o', launcher])
         run([launcher, exe], 'initialization failed: PR_SET_TAGGED_ADDR_CTRL, errno=1'); checks += 1
@@ -116,7 +144,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
         run([exe]); run([exe, 'stale'], 'operation = read'); checks += 2
 
         timings = {}
-        for tbi in [False, True]:
+        for tbi in ([] if args.skip_timings else [False, True]):
             run([cc, '-O2', '-fsanitize=flexfat', *(['-fsanitize-flexfat-tbi'] if tbi else []),
                  root/'Inputs/tbi-benchmark.c', '-o', exe])
             for workload in ['allocations', 'accesses']:
