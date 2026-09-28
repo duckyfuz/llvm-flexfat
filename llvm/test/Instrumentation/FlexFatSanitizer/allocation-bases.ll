@@ -1,6 +1,6 @@
 ; RUN: opt < %s -passes='flexfat,verify' -S | FileCheck %s --check-prefix=FAST
 ; RUN: clang -x ir -O0 -fsanitize=flexfat -mllvm -flexfat-mode=safe -S -emit-llvm %s -o - | FileCheck %s --check-prefix=SAFE
-; RUN: clang -x ir -O0 -fsanitize=flexfat -mllvm -flexfat-mode=right-align -S -emit-llvm %s -o - | FileCheck %s --check-prefix=RIGHT
+; RUN: clang -x ir -O0 -fsanitize=flexfat -mllvm -flexfat-alignment=right -S -emit-llvm %s -o - | FileCheck %s --check-prefix=RIGHT
 
 target datalayout = "e-m:e-i64:64-i128:128-n32:64-S128"
 

@@ -9,7 +9,7 @@
 // BAD: unsupported option '-fsanitize-flexfat-tbi' for target
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi=false -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
-// PLAIN-NOT: __flexfat_check_temporal
+// PLAIN-NOT: __flexfat_report_temporal
 // PLAIN-NOT: __flexfat_tbi_abi
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -O2 -mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s
@@ -21,7 +21,7 @@
 // CHECK: @llvm.global_ctors
 // CHECK: @llvm.used
 // CHECK-LABEL: define {{.*}} @access(
-// CHECK: call void @__flexfat_check_temporal(i64 {{.*}}, i64 4, i32 0)
+// CHECK: load atomic i8, ptr {{.*}} acquire, align 1
 // CHECK: load volatile i32
 int access(volatile int *p) { return *p; }
 // CHECK-LABEL: define {{.*}} @excluded(

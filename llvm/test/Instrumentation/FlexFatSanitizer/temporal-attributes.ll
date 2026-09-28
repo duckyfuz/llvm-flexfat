@@ -39,11 +39,11 @@ define void @invoker(ptr %p) "no-sanitize-flexfat" personality ptr @personality 
 define i32 @reader(ptr %p) #2 {
 ; CHECK-LABEL: define i32 @reader(ptr %p)
 ; CHECK-SAME: #[[READER:[0-9]+]]
-; CHECK: call void @__flexfat_check_temporal
+; CHECK: load atomic i8
 ; OPT-LABEL: define i32 @reader(
-; OPT: call void @__flexfat_check_temporal
+; OPT: load atomic i8
 ; LIVE-LABEL: define i32 @reader(
-; LIVE: call void @__flexfat_check_temporal
+; LIVE: load atomic i8
   %v = load i32, ptr %p
   ret i32 %v
 }
@@ -51,7 +51,7 @@ define i32 @reader(ptr %p) #2 {
 ; Excluded callees and their calls must retain their original attributes.
 define i32 @excluded(ptr %p) #0 "no-sanitize-flexfat" {
 ; CHECK-LABEL: define i32 @excluded(
-; CHECK-NOT: call void @__flexfat_check_temporal
+; CHECK-NOT: load atomic i8
 ; CHECK: ret i32
   %v = load i32, ptr %p
   ret i32 %v

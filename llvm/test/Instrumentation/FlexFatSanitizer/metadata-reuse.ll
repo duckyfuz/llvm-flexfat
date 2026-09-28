@@ -30,8 +30,9 @@ define i8 @argument_gep_chain(ptr %p, i64 %a, i64 %b) {
 ; CUSTOM: %[[CANDIDATE:.*]] = mul i64 %[[IDX]], %[[SIZE:.*]]
 ; CUSTOM-NOT: mul i64
 ; CUSTOM: %[[TOO_HIGH:.*]] = icmp ugt i64 %[[CANDIDATE]], %flexfat.root.int
-; CUSTOM: %[[CORRECTED:.*]] = sub i64 %[[CANDIDATE]], %[[SIZE]]
-; CUSTOM: %flexfat.base.int = select i1 %[[TOO_HIGH]], i64 %[[CORRECTED]], i64 %[[CANDIDATE]]
+; CUSTOM: %[[ADJUST:.*]] = zext i1 %[[TOO_HIGH]] to i64
+; CUSTOM: %[[SLOT:.*]] = sub i64 %[[IDX]], %[[ADJUST]]
+; CUSTOM: %flexfat.base.int = mul i64 %[[SLOT]], %[[SIZE]]
   %q1 = getelementptr i8, ptr %p, i64 %a
   %x = load i8, ptr %q1
   %q2 = getelementptr i8, ptr %q1, i64 %b

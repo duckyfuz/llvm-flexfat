@@ -27,6 +27,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Debug.h"
@@ -195,6 +196,8 @@ private:
   // the region index is only known at runtime.
   std::pair<Value *, Value *>
   emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt, Value *RegionIndex);
+  std::pair<Value *, Value *>
+  emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt, Value *RegionIndex);
 
 #endif
 
@@ -297,12 +300,12 @@ FunctionCallee FlexFatSanitizer::getWarnOobFn() {
 //   %idx        = trunc i128 %idx128 to i64
 //   %candidate  = mul i64 %idx, %alloc_size
 //   %too_high   = icmp ugt i64 %candidate, %ptr
-//   %corrected  = sub i64 %candidate, %alloc_size
-//   %base       = select i1 %too_high, i64 %corrected, i64 %candidate
+//   %slot       = sub i64 %idx, (zext i1 %too_high to i64)
+//   %base       = mul i64 %slot, %alloc_size
 // ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
-FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
-                                       Value *RegionIndex) {
+FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
+                                     Value *RegionIndex) {
   LLVMContext &Ctx = M.getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
   Type *I128Ty = Type::getInt128Ty(Ctx);
@@ -325,15 +328,21 @@ FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
   Value *Mul128 = IRB.CreateMul(Ptr128, Magic128);
   Value *Idx128 = IRB.CreateLShr(Mul128, ConstantInt::get(I128Ty, 64));
   Value *Idx = IRB.CreateTrunc(Idx128, IntptrTy);
+  // Supported addresses are below 2^48 and sizes are at most region_size / 4.
+  // The at-most-one-high quotient therefore has a non-overflowing product.
   Value *Candidate = IRB.CreateMul(Idx, AllocSize, "flexfat.base.candidate");
   Value *QuotientTooHigh =
       IRB.CreateICmpUGT(Candidate, PtrInt, "flexfat.quotient.high");
-  Value *CorrectedCandidate =
-      IRB.CreateSub(Candidate, AllocSize, "flexfat.base.corrected");
-  Value *Base = IRB.CreateSelect(QuotientTooHigh, CorrectedCandidate,
-                                 Candidate, "flexfat.base.int");
+  Value *Slot = IRB.CreateSub(Idx, IRB.CreateZExt(QuotientTooHigh, IntptrTy),
+                              "flexfat.slot");
+  return {AllocSize, Slot};
+}
 
-  return {AllocSize, Base};
+std::pair<Value *, Value *>
+FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
+                                     Value *RegionIndex) {
+  auto [AllocSize, Slot] = emitDynamicSlotMagic(IRB, PtrInt, RegionIndex);
+  return {AllocSize, IRB.CreateMul(Slot, AllocSize, "flexfat.base.int")};
 }
 #endif // FLEXFAT_CUSTOM_CONFIG
 
@@ -1074,17 +1083,92 @@ bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
     SmallPtrSet<Value *, 16> Seen;
     if (isDefinitelyNonFlexFat(Ptr, Seen))
       return;
+    if (auto *C = dyn_cast<ConstantInt>(Size); C && C->isZero())
+      return;
+    LLVMContext &Ctx = M.getContext();
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();
-    auto Fn = M.getOrInsertFunction("__flexfat_check_temporal",
-        FunctionType::get(B.getVoidTy(), {IntptrTy, IntptrTy, B.getInt32Ty()}, false));
-    // Do not inherit purity attributes from an application declaration.
-    if (auto *F = dyn_cast<Function>(Fn.getCallee())) {
-      F->setMemoryEffects(MemoryEffects::unknown());
-      F->removeFnAttr(Attribute::Speculatable);
+    Value *AccessSize = B.CreateZExtOrTrunc(Size, IntptrTy);
+    Value *Tagged = B.CreatePtrToInt(Ptr, IntptrTy);
+    Value *Raw = B.CreateAnd(Tagged, B.getInt64(0x00ffffffffffffffULL),
+                             "flexfat.temporal.raw");
+    Value *Offset = B.CreateSub(Raw, B.getInt64(RegionBase));
+    Value *Managed = B.CreateICmpULT(
+        Offset, B.getInt64(NumSizeClasses << RegionSizeLog));
+    Value *CheckAccess = Managed;
+    if (!isa<ConstantInt>(AccessSize))
+      CheckAccess = B.CreateAnd(
+          Managed, B.CreateICmpNE(AccessSize, B.getInt64(0)));
+    BasicBlock *Head = I->getParent();
+    BasicBlock *Cont = Head->splitBasicBlock(I, "flexfat.temporal.cont");
+    Head->getTerminator()->eraseFromParent();
+    Function *F = Head->getParent();
+    auto Block = [&](const char *Name) {
+      return BasicBlock::Create(Ctx, Name, F, Cont);
+    };
+    BasicBlock *Geometry = Block("flexfat.temporal.geometry");
+    BasicBlock *Observe = Block("flexfat.temporal.observe");
+    BasicBlock *Failure = Block("flexfat.temporal.failure");
+    B.SetInsertPoint(Head);
+    B.CreateCondBr(CheckAccess, Geometry, Cont);
+    B.SetInsertPoint(Geometry);
+    Value *Class = B.CreateLShr(Offset, RegionSizeLog, "flexfat.temporal.class");
+    Value *Slot;
+#ifdef FLEXFAT_CUSTOM_CONFIG
+    // Fixed tables use the absolute region index, unlike the descriptor array.
+    Value *TableIndex = B.CreateLShr(Raw, RegionSizeLog);
+    Slot = emitDynamicSlotMagic(B, Raw, TableIndex).second;
+#else
+    Slot = B.CreateLShr(Raw, B.CreateAdd(Class, B.getInt64(4)),
+                        "flexfat.temporal.slot");
+#endif
+    auto *DescriptorTy = StructType::get(Ctx, {IntptrTy, IntptrTy, IntptrTy});
+    auto *RegionsTy = ArrayType::get(DescriptorTy, NumSizeClasses);
+    Constant *Regions = M.getOrInsertGlobal("__flexfat_temporal_regions_v2",
+                                            RegionsTy);
+    Value *Descriptor = B.CreateInBoundsGEP(
+        RegionsTy, Regions, {B.getInt64(0), Class});
+    auto Field = [&](unsigned Index) {
+      return B.CreateLoad(IntptrTy,
+                          B.CreateStructGEP(DescriptorTy, Descriptor, Index));
+    };
+    Value *First = Field(0);
+    Value *Count = Field(1);
+    Value *Index = B.CreateSub(Slot, First, "flexfat.temporal.index");
+    Value *Valid = B.CreateICmpULT(Index, Count);
+    MDNode *Likely = MDBuilder(Ctx).createBranchWeights(1048575, 1);
+    B.CreateCondBr(Valid, Observe, Failure, Likely);
+    B.SetInsertPoint(Observe);
+    Value *Base = B.CreateIntToPtr(Field(2), B.getPtrTy());
+    Value *Entry = B.CreateInBoundsGEP(B.getInt8Ty(), Base, Index);
+    auto *Generation = B.CreateLoad(B.getInt8Ty(), Entry, "flexfat.generation");
+    Generation->setAtomic(AtomicOrdering::Acquire);
+    Generation->setAlignment(Align(1));
+    Value *Tag = B.CreateTrunc(B.CreateLShr(Tagged, 56), B.getInt8Ty());
+    Value *Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)),
+                                 B.CreateICmpEQ(Tag, Generation));
+    B.CreateCondBr(Matches, Cont, Failure, Likely);
+    B.SetInsertPoint(Failure);
+    auto *FailureGeneration = B.CreatePHI(B.getInt8Ty(), 2);
+    FailureGeneration->addIncoming(B.getInt8(0), Geometry);
+    FailureGeneration->addIncoming(Generation, Observe);
+    auto *SlotValid = B.CreatePHI(B.getInt32Ty(), 2);
+    SlotValid->addIncoming(B.getInt32(0), Geometry);
+    SlotValid->addIncoming(B.getInt32(1), Observe);
+    Value *Observed = B.CreateZExt(FailureGeneration, B.getInt32Ty());
+    auto Reporter = M.getOrInsertFunction("__flexfat_report_temporal",
+        FunctionType::get(B.getVoidTy(),
+            {IntptrTy, IntptrTy, B.getInt32Ty(), B.getInt32Ty(), B.getInt32Ty()},
+            false));
+    if (auto *RF = dyn_cast<Function>(Reporter.getCallee())) {
+      invalidateTemporalAttributes(*RF);
+      RF->removeFnAttr(Attribute::WillReturn);
+      RF->addFnAttr(Attribute::Cold);
+      RF->addFnAttr(Attribute::NoReturn);
     }
-    B.CreateCall(Fn, {B.CreatePtrToInt(Ptr, IntptrTy),
-                     B.CreateZExtOrTrunc(Size, IntptrTy), B.getInt32(Write)});
+    B.CreateCall(Reporter, {Tagged, AccessSize, B.getInt32(Write),
+                            Observed, SlotValid});
+    B.CreateUnreachable();
     Changed = true;
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
@@ -1261,12 +1345,12 @@ bool FlexFatSanitizer::run() {
                 TemporalFunctions.contains(Callee))
               Modified |= invalidateTemporalAttributes(*CB);
 
-  if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor")) {
+  if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor_v2")) {
     auto &Ctx = M.getContext();
     auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), false);
-    auto ABI = M.getOrInsertFunction("__flexfat_tbi_abi_v1", Ty);
+    auto ABI = M.getOrInsertFunction("__flexfat_tbi_abi_v2", Ty);
     auto *Ctor = Function::Create(Ty, GlobalValue::InternalLinkage,
-                                  "__flexfat_tbi_ctor", &M);
+                                  "__flexfat_tbi_ctor_v2", &M);
     IRBuilder<> B(BasicBlock::Create(Ctx, "entry", Ctor));
     B.SetNoSanitizeMetadata();
     B.CreateCall(ABI);
