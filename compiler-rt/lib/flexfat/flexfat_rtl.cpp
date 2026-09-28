@@ -38,6 +38,18 @@
 
 using namespace __sanitizer;
 
+#ifdef FLEXFAT_TEMPORAL_TBI
+static_assert(sizeof(FlexFatTemporalRegionV2) == 24);
+static_assert(alignof(FlexFatTemporalRegionV2) == 8);
+static_assert(offsetof(FlexFatTemporalRegionV2, first_slot_number) == 0);
+static_assert(offsetof(FlexFatTemporalRegionV2, slot_count) == 8);
+static_assert(offsetof(FlexFatTemporalRegionV2, metadata_base) == 16);
+extern "C" {
+SANITIZER_INTERFACE_ATTRIBUTE FlexFatTemporalRegionV2
+    __flexfat_temporal_regions_v2[__flexfat::kNumSizeClasses];
+}
+#endif
+
 namespace __flexfat {
 
 // Initialization is published only after mappings and interceptors are ready.
@@ -97,27 +109,21 @@ static StaticSpinMutex region_locks[kMaxSizeClasses];
 // for a freed slot, and stale tags can match again after generation wraparound.
 static_assert(sizeof(atomic_uint8_t) == 1,
               "Temporal metadata must occupy one byte per slot");
-struct TemporalRegion {
-  uptr first;
-  uptr count;
-  atomic_uint8_t *entries;
-};
-static TemporalRegion temporal_regions[kMaxSizeClasses];
-
 static void InitTemporal() {
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    auto &r = temporal_regions[i];
-    r.first = region_next_alloc[i];
-    r.count = (GetRegionStart(i) + kRegionSize - r.first) / SizeClassToSize(i);
-    bytes += r.count * sizeof(atomic_uint8_t);
+    auto &r = __flexfat_temporal_regions_v2[i];
+    uptr size = SizeClassToSize(i);
+    r.first_slot_number = region_next_alloc[i] / size;
+    r.slot_count = (GetRegionStart(i) + kRegionSize - region_next_alloc[i]) / size;
+    bytes += r.slot_count * sizeof(atomic_uint8_t);
   }
   // Demand-paged, non-fixed mapping, after every fixed spatial reservation.
   auto *entries = static_cast<atomic_uint8_t *>(
       MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    temporal_regions[i].entries = entries;
-    entries += temporal_regions[i].count;
+    __flexfat_temporal_regions_v2[i].metadata_base = (uptr)entries;
+    entries += __flexfat_temporal_regions_v2[i].slot_count;
   }
 }
 
@@ -127,11 +133,11 @@ static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
     return nullptr;
   uptr size = SizeClassToSize(region);
   base = raw - raw % size;
-  const auto &r = temporal_regions[region];
-  if (base < r.first || (base - r.first) % size ||
-      (base - r.first) / size >= r.count)
+  const auto &r = __flexfat_temporal_regions_v2[region];
+  uptr index = raw / size - r.first_slot_number;
+  if (index >= r.slot_count)
     return nullptr;
-  return r.entries + (base - r.first) / size;
+  return reinterpret_cast<atomic_uint8_t *>(r.metadata_base) + index;
 }
 
 struct TemporalState {
@@ -155,9 +161,9 @@ static TemporalState LoadTemporalState(uptr ptr) {
 
 // Reporting may allocate while symbolizing. Never hold an allocator lock here.
 static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
-                                    const TemporalState &state) {
+                                    const TemporalState &state, bool slot_valid) {
   const char *ops[] = {"read", "write", "free", "realloc"};
-  const char *reason = !state.entry ? "invalid slot geometry"
+  const char *reason = !slot_valid ? "invalid slot geometry"
                        : !state.generation ? "never allocated"
                        : !PointerTag(ptr) ? "zero managed tag"
                        : "generation mismatch";
@@ -167,7 +173,7 @@ static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
          "  metadata = %s, reason = %s\n",
          operation >= 0 && operation < 4 ? ops[operation] : "unknown",
          ptr, state.base, state.generation, PointerTag(ptr), access_size,
-         state.entry ? "available" : "unavailable (invalid slot geometry)",
+         slot_valid ? "available" : "unavailable (invalid slot geometry)",
          reason);
   GET_STACK_TRACE_FATAL_HERE;
   stack.Print();
@@ -179,7 +185,7 @@ static void ValidateTemporal(uptr ptr, uptr access_size, int operation) {
     return;
   TemporalState state = LoadTemporalState(ptr);
   if (!state.Matches(ptr))
-    ReportTemporal(ptr, access_size, operation, state);
+    ReportTemporal(ptr, access_size, operation, state, state.entry != nullptr);
 }
 
 static void EnableTaggedAddresses() {
@@ -451,7 +457,7 @@ void Deallocate(void *ptr) {
   }
 #ifdef FLEXFAT_TEMPORAL_TBI
   if (!valid)
-    ReportTemporal((uptr)ptr, 0, 2, state);
+    ReportTemporal((uptr)ptr, 0, 2, state, state.entry != nullptr);
 #endif
 }
 
@@ -581,6 +587,18 @@ void __flexfat_free(void *ptr) { __flexfat::Deallocate(ptr); }
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1() {
   __flexfat_init();
   CHECK(__flexfat::IsReady());
+}
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v2() {
+  __flexfat_tbi_abi_v1();
+}
+SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
+__flexfat_report_temporal(uptr ptr, uptr size, u32 operation,
+                          u32 observed_generation, u32 slot_valid) {
+  // Reconstruct only diagnostic geometry. Never reread mutable generation state.
+  __flexfat::TemporalState state;
+  __flexfat::TemporalEntry(__flexfat::Untag(ptr), state.base);
+  state.generation = observed_generation;
+  __flexfat::ReportTemporal(ptr, size, operation, state, slot_valid != 0);
 }
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_check_temporal(uptr ptr, uptr size, int operation) {
