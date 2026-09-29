@@ -1239,7 +1239,10 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Value *Tag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
   Value *Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)),
                                B.CreateICmpEQ(Tag, Generation));
-  Value *Valid = B.CreateOr(B.CreateNot(G.Managed), Matches);
+  auto *Managed = dyn_cast<ConstantInt>(G.Managed);
+  Value *Valid = Managed && Managed->isOne()
+                     ? Matches
+                     : B.CreateOr(B.CreateNot(G.Managed), Matches);
   auto *Failure = SplitBlockAndInsertIfThen(
       B.CreateNot(Valid), CheckBefore, true,
       MDBuilder(M.getContext()).createBranchWeights(1, 1048575));
@@ -1354,14 +1357,14 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
         Value *Ptr = nullptr;
         Type *Ty = nullptr;
         if (auto *Load = dyn_cast<LoadInst>(&I)) {
-          if (!Load->isSimple()) {
+          if (Load->isAtomic()) {
             Eligible = false;
             break;
           }
           Ptr = Load->getPointerOperand();
           Ty = Load->getType();
         } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
-          if (!Store->isSimple()) {
+          if (Store->isAtomic()) {
             Eligible = false;
             break;
           }
@@ -1393,7 +1396,7 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           }
           Stride = Step->getAPInt().getSExtValue();
           Start = AR->getStart();
-        } else if (!L->isLoopInvariant(Ptr)) {
+        } else if (!SE.isLoopInvariant(Start, L)) {
           Eligible = false;
           break;
         }
@@ -1531,6 +1534,9 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
     for (const RangeAccess &A : Accesses) {
       auto *Clone = cast<Instruction>(VMap.lookup(A.Inst));
       FastGeometry[Clone] = RootGeometry.find(A.Root)->second;
+      // Only the runtime guard proves managed allocation. Static containment
+      // can also describe an allocation that fell back to libc.
+      FastGeometry[Clone].Managed = B.getTrue();
       RangeProven.insert(Clone);
     }
     for (Loop *Version : {L, Fast}) {
