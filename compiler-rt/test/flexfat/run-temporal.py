@@ -89,8 +89,16 @@ for build in args.builds:
             run([cxx, *common, *flags, '-fno-vectorize', '-fno-slp-vectorize',
                  '-fno-unroll-loops', root/'TestCases/temporal/loops.cpp', '-o', exe])
             run([exe]); checks += 1
-            for mode in ['stale', 'overflow', 'write', 'call']:
+            for mode in ['stale', 'overflow', 'write', 'call', 'reuse', 'fixed']:
                 run([exe, mode], 'generation mismatch'); checks += 1
+
+            if custom:
+                for mode in ['geometry', 'geometry-tail']:
+                    run([exe, mode], 'unavailable (invalid slot geometry)'); checks += 1
+        run([cxx, *common, '-O2', '-mllvm', '-flexfat-check-whole-access=true',
+             '-fno-vectorize', '-fno-slp-vectorize', '-fno-unroll-loops',
+             root/'TestCases/temporal/loops.cpp', '-o', exe])
+        run([exe, 'width'], 'out-of-bounds'); checks += 1
 
         # Arithmetic exhaustively validates the v3 fixed bias table and padding.
         arithmetic_obj = d/'arithmetic.o'
