@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Native acceptance and timing harness. Pass one or more matching build dirs."""
+"""Native acceptance harness. Pass one or more matching build dirs."""
 import argparse
 import json
 import os
 import re
 from pathlib import Path
-import statistics
 import subprocess
 import tempfile
 
@@ -14,7 +13,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
 parser.add_argument('--skip-timings', action='store_true',
-                    help='run correctness checks without performance measurements')
+                    help='retained for compatibility; this harness now runs correctness checks only')
 args = parser.parse_args()
 results = []
 
@@ -106,14 +105,14 @@ for build in args.builds:
         if custom:
             config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
                              '-I'+str(build/'lib/Transforms/Instrumentation')]
-        run([cxx, '-O2', *config_flags, '-c', root/'Inputs/tbi-slot-arithmetic.cpp',
+        run([cxx, '-O2', *config_flags, '-c', root/'TestCases/temporal/tbi-slot-arithmetic.cpp',
              '-o', arithmetic_obj])
         run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
 
         # Old TBI objects must be rebuilt: both old marker versions fail.
         old_obj = d/'v1.o'
         run([cc, '-O2', '-fno-builtin', '-ffunction-sections', '-fdata-sections',
-             '-c', root/'Inputs/tbi-v1-object.c', '-o', old_obj])
+             '-c', root/'TestCases/temporal/tbi-v1-object.c', '-o', old_obj])
         run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe],
             '__flexfat_tbi_abi_v1'); checks += 1
         v2 = d/'v2.c'
@@ -139,20 +138,20 @@ for build in args.builds:
             '__flexfat_tbi_abi_v3')
         checks += 4
         launcher = d/'launcher'
-        run([cc, root/'Inputs/tbi-init-failure.c', '-o', launcher])
+        run([cc, root/'TestCases/temporal/tbi-init-failure.c', '-o', launcher])
         run([launcher, exe], 'initialization failed: PR_SET_TAGGED_ADDR_CTRL, errno=1'); checks += 1
 
         # An uninstrumented preinit hook precedes runtime initialization and
         # forces allocations/memory operations through initialization guards.
         startup = d/'startup.o'
-        run([cc, '-fno-builtin', '-c', root/'Inputs/tbi-startup.c', '-o', startup])
+        run([cc, '-fno-builtin', '-c', root/'TestCases/temporal/tbi-startup.c', '-o', startup])
         runtime = run([cc, '-print-file-name=libclang_rt.flexfat_tbi.a']).strip()
         # The driver normally puts its runtime first. Explicit ordering places
         # this test hook ahead of the runtime's preinit entry.
         run([cc, startup, '-Wl,--whole-archive', runtime,
              '-Wl,--no-whole-archive', '-lpthread', '-ldl', '-lrt', '-lm', '-o', exe])
         run([exe]); checks += 1
-        run([cc, root/'Inputs/tbi-reentrant.c', '-fno-builtin', '-c', '-o', startup])
+        run([cc, root/'TestCases/temporal/tbi-reentrant.c', '-fno-builtin', '-c', '-o', startup])
         run([cc, startup, *common, '-Wl,--wrap=dlsym', '-o', exe])
         run([exe]); checks += 1
 
@@ -166,21 +165,11 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
         run([cc, *common, '-O2', main, '-L'+str(d), '-ltest', '-Wl,-rpath,'+str(d), '-o', exe])
         run([exe]); run([exe, 'stale'], 'operation = read'); checks += 2
 
-        timings = {}
-        for tbi in ([] if args.skip_timings else [False, True]):
-            run([cc, '-O2', '-fsanitize=flexfat', *(['-fsanitize-flexfat-tbi'] if tbi else []),
-                 root/'Inputs/tbi-benchmark.c', '-o', exe])
-            for workload in ['allocations', 'accesses']:
-                samples = [run([exe, *(['access'] if workload == 'accesses' else [])]).split()
-                           for _ in range(3)]
-                timings[('tbi' if tbi else 'ordinary')+'_'+workload] = {
-                    'median_seconds': statistics.median(float(x[0]) for x in samples),
-                    'peak_rss_kib': max(int(x[1]) for x in samples), 'samples': samples}
         results.append({'build': str(build), 'checks': checks,
                         'metadata_entry_bytes': metadata_bytes,
                         'metadata_reservation_bytes': ((metadata_bytes + os.sysconf('SC_PAGE_SIZE') - 1)
                                                        // os.sysconf('SC_PAGE_SIZE')) * os.sysconf('SC_PAGE_SIZE'),
-                        'timings': timings})
+                        'timings': {}})
         print(json.dumps(results[-1], indent=2), flush=True)
 if args.output:
     args.output.write_text(json.dumps(results, indent=2)+'\n')

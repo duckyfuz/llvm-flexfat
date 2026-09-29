@@ -1,3 +1,8 @@
+// REQUIRES: flexfat-tbi
+// RUN: %clang -O2 -fno-builtin -ffunction-sections -fdata-sections -c %s -o %t.o
+// RUN: not %clangxx_flexfat_tbi %t.o -Wl,--gc-sections -o %t 2>&1 | FileCheck %s
+// CHECK: undefined {{.*}}__flexfat_tbi_abi_v1
+
 // Model the v1 object contract without using the current instrumentation pass.
 #include <stdint.h>
 #include <stdlib.h>

@@ -1,3 +1,7 @@
+// REQUIRES: flexfat-tbi
+// RUN: %clang -O2 %flexfat_config_flags -c %s -o %t.o
+// RUN: %clangxx_flexfat_tbi %t.o -o %t && %run %t
+
 // Compiled without instrumentation, with the matching generated configuration.
 #include "flexfat/flexfat_config.h"
 #include "flexfat/flexfat_interface.h"
