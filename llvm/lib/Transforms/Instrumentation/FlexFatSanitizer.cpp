@@ -19,9 +19,14 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -34,7 +39,10 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include <algorithm>
 #include <optional>
@@ -106,6 +114,28 @@ struct BoundsRecord {
   std::optional<uint64_t> StaticUpperBound;
 };
 
+struct AccessRecord {
+  Instruction *Inst;
+  Value *Pointer;
+  Value *Length;
+  bool Write;
+  uint64_t SpatialWidth;
+};
+
+// Immutable address geometry only. A generation observation must never be
+// stored here: it belongs to the individual covered memory access.
+struct GeometryRecord {
+  Value *Tagged = nullptr;
+  Value *Raw = nullptr;
+  Value *Index = nullptr;
+  Value *Size = nullptr;
+  Value *Slot = nullptr;
+  Value *Base = nullptr;
+  Value *Managed = nullptr;
+  Value *Entry = nullptr;
+  Instruction *PrepareBefore = nullptr;
+};
+
 struct SelectProvenance {
   Value *Root = nullptr;
   BaseKind Kind = BaseKind::Dynamic;
@@ -142,6 +172,20 @@ private:
   DenseMap<Value *, BoundsRecord> Bounds;
   DenseMap<Value *, Value *> RecoveredBases;
   DenseMap<Value *, Value *> SafeTableIndices;
+  DenseMap<Value *, GeometryRecord> Geometries;
+  DenseMap<Value *, Value *> BaseSizes;
+  DenseMap<Instruction *, Value *> AccessLengths;
+  DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> AccessGeometry;
+  DenseMap<Instruction *, GeometryRecord> FastGeometry;
+  SmallPtrSet<Instruction *, 16> RangeProven;
+  bool versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
+                   ScalarEvolution &SE);
+  void prepareLoopGeometry(ArrayRef<AccessRecord> Accesses, DominatorTree &DT,
+                           LoopInfo &LI);
+  GeometryRecord &getGeometry(IRBuilder<> &B, Value *Ptr);
+  GeometryRecord emitGeometry(IRBuilder<> &B, Value *Ptr, bool Temporal = true);
+  void materializeTemporalGeometry(IRBuilder<> &B, GeometryRecord &G);
+  GeometryRecord &getTemporalGeometry(Value *Ptr);
   unsigned BoundsIRGeneration = 0;
 
   FunctionCallee ReportOobFn = nullptr;
@@ -151,8 +195,13 @@ private:
   FunctionCallee getWarnOobFn();
 
   bool instrumentFunction(Function &F);
-  bool instrumentTemporal(Instruction *I);
+  void discoverAccesses(Instruction *I,
+                        SmallVectorImpl<AccessRecord> &Accesses);
+  bool instrumentTemporal(const AccessRecord &Access);
   Value *rawPointer(IRBuilder<> &IRB, Value *Ptr, const Twine &Name = "") {
+    if (auto It = Geometries.find(Ptr);
+        It != Geometries.end() && It->second.Raw)
+      return It->second.Raw;
     Value *Int = IRB.CreatePtrToInt(Ptr, IntptrTy, Name);
     return Options.TemporalTBI
         ? IRB.CreateAnd(Int, ConstantInt::get(IntptrTy, 0x00ffffffffffffffULL),
@@ -195,8 +244,6 @@ private:
   // Build the IR to compute (AllocSize, Base) using runtime table lookups when
   // the region index is only known at runtime.
   std::pair<Value *, Value *>
-  emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt, Value *RegionIndex);
-  std::pair<Value *, Value *>
   emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt, Value *RegionIndex);
 
 #endif
@@ -210,7 +257,10 @@ private:
                                         PointerType::getUnqual(Ctx));
     Value *Idx64 = IRB.CreateZExtOrTrunc(Idx, I64Ty);
     Value *GEP = IRB.CreateInBoundsGEP(ElemTy, BasePtr, {Idx64});
-    return IRB.CreateLoad(ElemTy, GEP);
+    auto *Load = IRB.CreateLoad(ElemTy, GEP);
+    if (Options.TemporalTBI)
+      Load->setMetadata(LLVMContext::MD_invariant_load, MDNode::get(Ctx, {}));
+    return Load;
   }
 
   // Constants (kept in sync with flexfat_config.h / flexfat_config_generated.h)
@@ -281,7 +331,7 @@ FunctionCallee FlexFatSanitizer::getWarnOobFn() {
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
 // ---------------------------------------------------------------------------
-// emitDynamicBaseMagic
+// emitDynamicSlotMagic
 //
 // Given a runtime RegionIndex, emit IR that loads the per-class size and
 // magic from the embedded tables and returns (AllocSize, Base) as IntptrTy.
@@ -338,12 +388,6 @@ FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
   return {AllocSize, Slot};
 }
 
-std::pair<Value *, Value *>
-FlexFatSanitizer::emitDynamicBaseMagic(IRBuilder<> &IRB, Value *PtrInt,
-                                     Value *RegionIndex) {
-  auto [AllocSize, Slot] = emitDynamicSlotMagic(IRB, PtrInt, RegionIndex);
-  return {AllocSize, IRB.CreateMul(Slot, AllocSize, "flexfat.base.int")};
-}
 #endif // FLEXFAT_CUSTOM_CONFIG
 
 // Emit the OOB-check block given a pre-computed (Base, AllocSize, PtrInt).
@@ -514,28 +558,87 @@ Value *FlexFatSanitizer::getRecoveredBase(Value *CompanionBase) {
 
   IRBuilder<> IRB(InsertBefore);
   IRB.SetNoSanitizeMetadata();
-  Value *PtrInt =
-      rawPointer(IRB, CompanionBase, "flexfat.root.int");
-  Value *RegionIndex = getSafeTableIndex(IRB, PtrInt);
-
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  auto [_, BaseInt] = emitDynamicBaseMagic(IRB, PtrInt, RegionIndex);
-#else
-  Type *I64Ty = Type::getInt64Ty(M.getContext());
-  Value *Mask64 = loadFromFixedTable(IRB, TablesBase + 3 * kTablesOffset, I64Ty,
-                                     RegionIndex);
-  if (auto *MaskLoad = dyn_cast<Instruction>(Mask64))
-    MaskLoad->setName("flexfat.mask");
-  Value *Mask = IRB.CreateZExtOrTrunc(Mask64, IntptrTy);
-  Value *BaseInt = IRB.CreateAnd(PtrInt, Mask, "flexfat.base.int");
-#endif
-
+  GeometryRecord &G = getGeometry(IRB, CompanionBase);
   Value *Base =
-      IRB.CreateIntToPtr(BaseInt, CompanionBase->getType(), "flexfat.base");
+      IRB.CreateIntToPtr(G.Base, CompanionBase->getType(), "flexfat.base");
   RecoveredBases[CompanionBase] = Base;
-  SafeTableIndices[Base] = RegionIndex;
+  SafeTableIndices[Base] = G.Index;
+  BaseSizes[Base] = G.Size;
   ++BoundsIRGeneration;
   return Base;
+}
+
+GeometryRecord &FlexFatSanitizer::getGeometry(IRBuilder<> &B, Value *Ptr) {
+  auto &G = Geometries[Ptr];
+  if (G.Raw)
+    return G;
+  G = emitGeometry(B, Ptr, false);
+  G.PrepareBefore = &*B.GetInsertPoint();
+  return G;
+}
+
+GeometryRecord &FlexFatSanitizer::getTemporalGeometry(Value *Ptr) {
+  (void)getRecoveredBase(Ptr);
+  auto &G = Geometries.find(Ptr)->second;
+  if (!G.Entry) {
+    IRBuilder<> B(G.PrepareBefore);
+    B.SetNoSanitizeMetadata();
+    materializeTemporalGeometry(B, G);
+  }
+  return G;
+}
+
+GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
+                                              bool Temporal) {
+  GeometryRecord G;
+  G.Tagged = B.CreatePtrToInt(Ptr, IntptrTy, "flexfat.root.int");
+  G.Raw = Options.TemporalTBI
+              ? B.CreateAnd(G.Tagged, B.getInt64(0x00ffffffffffffffULL),
+                            "flexfat.raw")
+              : G.Tagged;
+  G.Index = getSafeTableIndex(B, G.Raw);
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  auto [Size, Slot] = emitDynamicSlotMagic(B, G.Raw, G.Index);
+  G.Size = Size;
+  G.Slot = Slot;
+  G.Base = B.CreateMul(Slot, Size, "flexfat.base.int");
+#else
+  G.Size = B.CreateZExtOrTrunc(
+      loadFromFixedTable(B, TablesBase, B.getInt64Ty(), G.Index), IntptrTy);
+  Value *Mask =
+      B.CreateZExtOrTrunc(loadFromFixedTable(B, TablesBase + 3 * kTablesOffset,
+                                             B.getInt64Ty(), G.Index),
+                          IntptrTy);
+  Mask->setName("flexfat.mask");
+  G.Base = B.CreateAnd(G.Raw, Mask, "flexfat.base.int");
+#endif
+  if (Options.TemporalTBI && Temporal)
+    materializeTemporalGeometry(B, G);
+  return G;
+}
+
+// Temporal-only fields are requested lazily. Escape-only spatial preparation
+// does not introduce a bias-table lookup, classification, or slot shift.
+void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
+                                                   GeometryRecord &G) {
+  if (G.Entry)
+    return;
+  G.Managed = B.CreateICmpNE(G.Size, ConstantInt::getSigned(IntptrTy, -1),
+                             "flexfat.managed");
+#ifndef FLEXFAT_CUSTOM_CONFIG
+  Value *Class = B.CreateSub(G.Index, B.getInt64(ManagedTableBegin));
+  Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
+                                B.getInt64(0));
+  G.Slot = B.CreateLShr(G.Raw, Shift, "flexfat.slot");
+#endif
+  Value *Slot =
+      B.CreateSelect(G.Managed, G.Slot, B.getInt64(0), "flexfat.metadata.slot");
+  Value *Bias = loadFromFixedTable(B, TablesBase + 2 * kTablesOffset,
+                                   B.getInt64Ty(), G.Index);
+  // Biases intentionally wrap. Do not use overflow flags or pointer GEPs.
+  G.Entry =
+      B.CreateIntToPtr(B.CreateAdd(Bias, Slot, "flexfat.metadata.address"),
+                       B.getPtrTy(), "flexfat.metadata");
 }
 
 Value *FlexFatSanitizer::getMemoizedTableIndex(Value *CompanionBase) const {
@@ -670,6 +773,8 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
           Result.CompanionBase, Cast->getType(), "flexfat.base.cast");
       if (Value *Index = getMemoizedTableIndex(OriginalBase))
         SafeTableIndices[Result.CompanionBase] = Index;
+      if (Value *Size = BaseSizes.lookup(OriginalBase))
+        BaseSizes[Result.CompanionBase] = Size;
       BoundsIRGeneration += isa<Instruction>(Result.CompanionBase);
     } else {
       Result.CompanionBase =
@@ -699,6 +804,8 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
                                        "flexfat.base.cast");
         if (Value *Index = getMemoizedTableIndex(RootBounds.CompanionBase))
           SafeTableIndices[Base] = Index;
+        if (Value *Size = BaseSizes.lookup(RootBounds.CompanionBase))
+          BaseSizes[Base] = Size;
         BoundsIRGeneration += isa<Instruction>(Base);
       }
       Result = makeRecord(Base,
@@ -749,10 +856,16 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
         UseIndexPhi
             ? PHINode::Create(IntptrTy, NumIncoming, "flexfat.region", InsertPt)
             : nullptr;
+    PHINode *SizePhi = UseIndexPhi ? PHINode::Create(IntptrTy, NumIncoming,
+                                                     "flexfat.size", InsertPt)
+                                   : nullptr;
     markNoSanitize(BasePhi);
-    if (IndexPhi)
+    if (IndexPhi) {
       markNoSanitize(IndexPhi);
-    BoundsIRGeneration += IndexPhi ? 2 : 1;
+      markNoSanitize(SizePhi);
+      BaseSizes[BasePhi] = SizePhi;
+    }
+    BoundsIRGeneration += IndexPhi ? 3 : 1;
     Result = makeRecord(BasePhi, BaseKind::Dynamic, std::nullopt);
     Bounds[Ptr] = Result;
     if (IndexPhi)
@@ -770,6 +883,10 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
       for (unsigned I = 0; I != NumIncoming; ++I)
         IndexPhi->addIncoming(PoisonValue::get(IntptrTy),
                               Phi->getIncomingBlock(I));
+    if (SizePhi)
+      for (unsigned I = 0; I != NumIncoming; ++I)
+        SizePhi->addIncoming(PoisonValue::get(IntptrTy),
+                             Phi->getIncomingBlock(I));
 
     bool AllNonFlexFat = true;
     std::optional<uint64_t> StaticUpperBound = UINT64_MAX;
@@ -781,6 +898,15 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
         assert(IncomingIndex &&
                "companion base is missing its safe table index");
         IndexPhi->setIncomingValue(I, IncomingIndex);
+        Value *Size = BaseSizes.lookup(Incoming.CompanionBase);
+        if (!Size) {
+          IRBuilder<> B(Phi->getIncomingBlock(I)->getTerminator());
+          B.SetNoSanitizeMetadata();
+          Size = B.CreateZExtOrTrunc(
+              loadFromFixedTable(B, TablesBase, B.getInt64Ty(), IncomingIndex),
+              IntptrTy);
+        }
+        SizePhi->setIncomingValue(I, Size);
       }
       AllNonFlexFat &= Incoming.Kind == BaseKind::NonFlexFat;
       if (StaticUpperBound && Incoming.StaticUpperBound)
@@ -947,8 +1073,9 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
   Value *PtrInt = rawPointer(IRB, Ptr);
   Value *BasePtr = PtrBounds.CompanionBase;
   Value *BasePtrInt = rawPointer(IRB, BasePtr);
-  Value *SizeInt =
-      DynAccessSize ? IRB.CreateZExtOrTrunc(DynAccessSize, IntptrTy) : nullptr;
+  Value *SizeInt = DynAccessSize ? AccessLengths.lookup(I) : nullptr;
+  if (DynAccessSize && !SizeInt)
+    SizeInt = IRB.CreateZExtOrTrunc(DynAccessSize, IntptrTy);
 
   Instruction *CheckInsertBefore = I;
   std::optional<IRBuilder<>> GuardedIRB;
@@ -969,8 +1096,13 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
     RegionIndex = getSafeTableIndex(*CheckIRB, BasePtrInt);
 
   Type *I64Ty = Type::getInt64Ty(M.getContext());
-  Value *AllocSize64 = loadFromFixedTable(
-      *CheckIRB, TablesBase + 0 * kTablesOffset, I64Ty, RegionIndex);
+  Value *AllocSize64 = BaseSizes.lookup(BasePtr);
+  if (!AllocSize64)
+    if (auto G = Geometries.find(BasePtr); G != Geometries.end())
+      AllocSize64 = G->second.Size;
+  if (!AllocSize64)
+    AllocSize64 = loadFromFixedTable(*CheckIRB, TablesBase + 0 * kTablesOffset,
+                                     I64Ty, RegionIndex);
   Value *AllocSize = CheckIRB->CreateZExtOrTrunc(AllocSize64, IntptrTy);
 
   emitOobCheck(*CheckIRB, PtrInt, BasePtrInt, AllocSize, FixedAccessSize,
@@ -980,6 +1112,10 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
 
 bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
                                               Type *AccessTy) {
+  if (RangeProven.contains(I)) {
+    markInstrumented(I);
+    return false;
+  }
   TypeSize AccessSize = DL.getTypeStoreSize(AccessTy);
   if (AccessSize.isScalable())
     return false;
@@ -1075,101 +1211,79 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
 
 // Temporal state is intentionally never cached: every covered access must
 // observe metadata again, including after calls and on each loop iteration.
-bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
+bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
+  Instruction *I = Access.Inst;
+  IRBuilder<> B(I);
+  B.SetNoSanitizeMetadata();
+  Instruction *CheckBefore = I;
+  if (!isa<ConstantInt>(Access.Length)) {
+    CheckBefore = SplitBlockAndInsertIfThen(
+        B.CreateICmpNE(Access.Length, ConstantInt::get(IntptrTy, 0)), I, false);
+    markNoSanitize(CheckBefore);
+    B.SetInsertPoint(CheckBefore);
+  }
+  auto Existing = Geometries.find(Access.Pointer);
+  auto Shared = AccessGeometry.find({I, Access.Pointer});
+  auto Fast = FastGeometry.find(I);
+  GeometryRecord G = Fast != FastGeometry.end()       ? Fast->second
+                     : Shared != AccessGeometry.end() ? Shared->second
+                     : Existing != Geometries.end()
+                         ? Existing->second
+                         : emitGeometry(B, Access.Pointer);
+  // A proven same-slot root shares geometry, never the actual pointer tag.
+  if (Fast != FastGeometry.end() || Shared != AccessGeometry.end())
+    G.Tagged = B.CreatePtrToInt(Access.Pointer, IntptrTy);
+  auto *Generation = B.CreateLoad(B.getInt8Ty(), G.Entry, "flexfat.generation");
+  Generation->setAtomic(AtomicOrdering::Acquire);
+  Generation->setAlignment(Align(1));
+  Value *Tag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
+  Value *Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)),
+                               B.CreateICmpEQ(Tag, Generation));
+  Value *Valid = B.CreateOr(B.CreateNot(G.Managed), Matches);
+  auto *Failure = SplitBlockAndInsertIfThen(
+      B.CreateNot(Valid), CheckBefore, true,
+      MDBuilder(M.getContext()).createBranchWeights(1, 1048575));
+  markNoSanitize(Failure);
+  // Keep the data-dependent managed/tag predicate as one condition. Without
+  // this lowering hint SelectionDAG can expand the OR into an additional
+  // managed/unmanaged branch, despite the unconditional acquire observation.
+  Failure->getParent()->getSinglePredecessor()->getTerminator()->setMetadata(
+      LLVMContext::MD_unpredictable, getInstrumentedMetadata());
+  B.SetInsertPoint(Failure);
+  auto Reporter = M.getOrInsertFunction(
+      "__flexfat_report_temporal_v3",
+      FunctionType::get(B.getVoidTy(),
+                        {IntptrTy, IntptrTy, B.getInt32Ty(), B.getInt32Ty()},
+                        false));
+  if (auto *RF = dyn_cast<Function>(Reporter.getCallee())) {
+    invalidateTemporalAttributes(*RF);
+    RF->removeFnAttr(Attribute::WillReturn);
+    RF->addFnAttr(Attribute::Cold);
+    RF->addFnAttr(Attribute::NoReturn);
+  }
+  B.CreateCall(Reporter, {G.Tagged, Access.Length, B.getInt32(Access.Write),
+                          B.CreateZExt(Generation, B.getInt32Ty())});
+  I->setMetadata("flexfat.temporal", getInstrumentedMetadata());
+  return true;
+}
+
+void FlexFatSanitizer::discoverAccesses(
+    Instruction *I, SmallVectorImpl<AccessRecord> &Accesses) {
   if (!Options.TemporalTBI || I->getMetadata("flexfat.temporal"))
-    return false;
-  bool Changed = false;
-  auto Check = [&](Value *Ptr, Value *Size, bool Write) {
+    return;
+  auto Add = [&](Value *Ptr, Value *Length, bool Write, uint64_t Width) {
     SmallPtrSet<Value *, 16> Seen;
     if (isDefinitelyNonFlexFat(Ptr, Seen))
       return;
-    if (auto *C = dyn_cast<ConstantInt>(Size); C && C->isZero())
+    if (auto *C = dyn_cast<ConstantInt>(Length); C && C->isZero())
       return;
-    LLVMContext &Ctx = M.getContext();
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();
-    Value *AccessSize = B.CreateZExtOrTrunc(Size, IntptrTy);
-    Value *Tagged = B.CreatePtrToInt(Ptr, IntptrTy);
-    Value *Raw = B.CreateAnd(Tagged, B.getInt64(0x00ffffffffffffffULL),
-                             "flexfat.temporal.raw");
-    Value *Offset = B.CreateSub(Raw, B.getInt64(RegionBase));
-    Value *Managed = B.CreateICmpULT(
-        Offset, B.getInt64(NumSizeClasses << RegionSizeLog));
-    Value *CheckAccess = Managed;
-    if (!isa<ConstantInt>(AccessSize))
-      CheckAccess = B.CreateAnd(
-          Managed, B.CreateICmpNE(AccessSize, B.getInt64(0)));
-    BasicBlock *Head = I->getParent();
-    BasicBlock *Cont = Head->splitBasicBlock(I, "flexfat.temporal.cont");
-    Head->getTerminator()->eraseFromParent();
-    Function *F = Head->getParent();
-    auto Block = [&](const char *Name) {
-      return BasicBlock::Create(Ctx, Name, F, Cont);
-    };
-    BasicBlock *Geometry = Block("flexfat.temporal.geometry");
-    BasicBlock *Observe = Block("flexfat.temporal.observe");
-    BasicBlock *Failure = Block("flexfat.temporal.failure");
-    B.SetInsertPoint(Head);
-    B.CreateCondBr(CheckAccess, Geometry, Cont);
-    B.SetInsertPoint(Geometry);
-    Value *Class = B.CreateLShr(Offset, RegionSizeLog, "flexfat.temporal.class");
-    Value *Slot;
-#ifdef FLEXFAT_CUSTOM_CONFIG
-    // Fixed tables use the absolute region index, unlike the descriptor array.
-    Value *TableIndex = B.CreateLShr(Raw, RegionSizeLog);
-    Slot = emitDynamicSlotMagic(B, Raw, TableIndex).second;
-#else
-    Slot = B.CreateLShr(Raw, B.CreateAdd(Class, B.getInt64(4)),
-                        "flexfat.temporal.slot");
-#endif
-    auto *DescriptorTy = StructType::get(Ctx, {IntptrTy, IntptrTy, IntptrTy});
-    auto *RegionsTy = ArrayType::get(DescriptorTy, NumSizeClasses);
-    Constant *Regions = M.getOrInsertGlobal("__flexfat_temporal_regions_v2",
-                                            RegionsTy);
-    Value *Descriptor = B.CreateInBoundsGEP(
-        RegionsTy, Regions, {B.getInt64(0), Class});
-    auto Field = [&](unsigned Index) {
-      return B.CreateLoad(IntptrTy,
-                          B.CreateStructGEP(DescriptorTy, Descriptor, Index));
-    };
-    Value *First = Field(0);
-    Value *Count = Field(1);
-    Value *Index = B.CreateSub(Slot, First, "flexfat.temporal.index");
-    Value *Valid = B.CreateICmpULT(Index, Count);
-    MDNode *Likely = MDBuilder(Ctx).createBranchWeights(1048575, 1);
-    B.CreateCondBr(Valid, Observe, Failure, Likely);
-    B.SetInsertPoint(Observe);
-    Value *Base = B.CreateIntToPtr(Field(2), B.getPtrTy());
-    Value *Entry = B.CreateInBoundsGEP(B.getInt8Ty(), Base, Index);
-    auto *Generation = B.CreateLoad(B.getInt8Ty(), Entry, "flexfat.generation");
-    Generation->setAtomic(AtomicOrdering::Acquire);
-    Generation->setAlignment(Align(1));
-    Value *Tag = B.CreateTrunc(B.CreateLShr(Tagged, 56), B.getInt8Ty());
-    Value *Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)),
-                                 B.CreateICmpEQ(Tag, Generation));
-    B.CreateCondBr(Matches, Cont, Failure, Likely);
-    B.SetInsertPoint(Failure);
-    auto *FailureGeneration = B.CreatePHI(B.getInt8Ty(), 2);
-    FailureGeneration->addIncoming(B.getInt8(0), Geometry);
-    FailureGeneration->addIncoming(Generation, Observe);
-    auto *SlotValid = B.CreatePHI(B.getInt32Ty(), 2);
-    SlotValid->addIncoming(B.getInt32(0), Geometry);
-    SlotValid->addIncoming(B.getInt32(1), Observe);
-    Value *Observed = B.CreateZExt(FailureGeneration, B.getInt32Ty());
-    auto Reporter = M.getOrInsertFunction("__flexfat_report_temporal",
-        FunctionType::get(B.getVoidTy(),
-            {IntptrTy, IntptrTy, B.getInt32Ty(), B.getInt32Ty(), B.getInt32Ty()},
-            false));
-    if (auto *RF = dyn_cast<Function>(Reporter.getCallee())) {
-      invalidateTemporalAttributes(*RF);
-      RF->removeFnAttr(Attribute::WillReturn);
-      RF->addFnAttr(Attribute::Cold);
-      RF->addFnAttr(Attribute::NoReturn);
-    }
-    B.CreateCall(Reporter, {Tagged, AccessSize, B.getInt32(Write),
-                            Observed, SlotValid});
-    B.CreateUnreachable();
-    Changed = true;
+    Value *Converted = AccessLengths.lookup(I);
+    if (!Converted)
+      AccessLengths[I] = Converted = B.CreateZExtOrTrunc(Length, IntptrTy);
+    Accesses.push_back(
+        {I, Ptr, Converted, Write, Options.CheckWholeAccess ? Width : 0});
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
@@ -1177,7 +1291,9 @@ bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
       return;
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();
-    Check(Ptr, B.CreateTypeSize(IntptrTy, DL.getTypeStoreSize(Ty)), Write);
+    TypeSize Size = DL.getTypeStoreSize(Ty);
+    Add(Ptr, B.CreateTypeSize(IntptrTy, Size), Write,
+        Size.isScalable() ? 0 : Size.getFixedValue());
   };
   if (auto *L = dyn_cast<LoadInst>(I))
     Scalar(L->getPointerOperand(), L->getType(), false);
@@ -1188,14 +1304,293 @@ bool FlexFatSanitizer::instrumentTemporal(Instruction *I) {
   else if (auto *A = dyn_cast<AtomicCmpXchgInst>(I))
     Scalar(A->getPointerOperand(), A->getNewValOperand()->getType(), true);
   else if (auto *T = dyn_cast<MemTransferInst>(I)) {
-    Check(T->getDest(), T->getLength(), true);
-    Check(T->getSource(), T->getLength(), false);
+    Add(T->getDest(), T->getLength(), true, 0);
+    Add(T->getSource(), T->getLength(), false, 0);
   } else if (auto *S = dyn_cast<MemSetInst>(I))
-    Check(S->getDest(), S->getLength(), true);
-  else
+    Add(S->getDest(), S->getLength(), true, 0);
+}
+
+// Version original scalar loops before provenance or check insertion mutates
+// their CFG. Recompute candidate facts after each clone before selecting the
+// next original loop. Generation observations are never moved.
+bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
+                                   ScalarEvolution &SE) {
+  if (!Options.TemporalTBI)
     return false;
-  I->setMetadata("flexfat.temporal", getInstrumentedMetadata());
-  return Changed;
+  struct RangeAccess {
+    Instruction *Inst;
+    Value *Root;
+    int64_t Offset;
+    int64_t Stride;
+    uint64_t Width;
+  };
+  auto Loops = LI.getLoopsInPreorder();
+  for (Loop *L : Loops) {
+    if (!L->isInnermost() || !L->isLoopSimplifyForm() || !L->getLoopLatch() ||
+        !L->getExitingBlock() || !L->getUniqueExitBlock() ||
+        L->getLoopLatch()->getTerminator()->getMetadata(
+            "flexfat.loop.versioned"))
+      continue;
+    SmallVector<RangeAccess, 8> Accesses;
+    SmallPtrSet<Value *, 4> Roots;
+    bool Eligible = true;
+    unsigned Instructions = 0;
+    for (BasicBlock *BB : L->blocks()) {
+      for (Instruction &I : *BB) {
+        if (isa<DbgInfoIntrinsic>(I))
+          continue;
+        if (++Instructions > 128 || I.getMetadata("flexfat.instrumented") ||
+            I.getMetadata("flexfat.temporal") || I.isEHPad()) {
+          Eligible = false;
+          break;
+        }
+        if (auto *CB = dyn_cast<CallBase>(&I)) {
+          auto *II = dyn_cast<IntrinsicInst>(CB);
+          if (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
+                      II->getIntrinsicID() != Intrinsic::lifetime_end))
+            Eligible = false;
+          continue;
+        }
+        Value *Ptr = nullptr;
+        Type *Ty = nullptr;
+        if (auto *Load = dyn_cast<LoadInst>(&I)) {
+          if (!Load->isSimple()) {
+            Eligible = false;
+            break;
+          }
+          Ptr = Load->getPointerOperand();
+          Ty = Load->getType();
+        } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
+          if (!Store->isSimple()) {
+            Eligible = false;
+            break;
+          }
+          Ptr = Store->getPointerOperand();
+          Ty = Store->getValueOperand()->getType();
+        } else if (I.mayReadOrWriteMemory() || isa<InvokeInst>(I)) {
+          Eligible = false;
+          break;
+        } else {
+          continue;
+        }
+        if ((!Ty->isIntegerTy() && !Ty->isFloatingPointTy()) ||
+            !DT.dominates(BB, L->getLoopLatch()) ||
+            !DT.dominates(BB, L->getExitingBlock())) {
+          Eligible = false;
+          break;
+        }
+        SmallPtrSet<Value *, 16> NonFlexFatSeen;
+        if (isDefinitelyNonFlexFat(Ptr, NonFlexFatSeen))
+          continue;
+        const SCEV *Start = SE.getSCEV(Ptr);
+        int64_t Stride = 0;
+        if (auto *AR = dyn_cast<SCEVAddRecExpr>(Start)) {
+          auto *Step = dyn_cast<SCEVConstant>(AR->getStepRecurrence(SE));
+          if (AR->getLoop() != L || !AR->isAffine() || !Step ||
+              Step->getAPInt().getSignificantBits() > 64) {
+            Eligible = false;
+            break;
+          }
+          Stride = Step->getAPInt().getSExtValue();
+          Start = AR->getStart();
+        } else if (!L->isLoopInvariant(Ptr)) {
+          Eligible = false;
+          break;
+        }
+        auto *RootSCEV = dyn_cast<SCEVUnknown>(SE.getPointerBase(Start));
+        if (!RootSCEV || !RootSCEV->getType()->isPointerTy() ||
+            !L->isLoopInvariant(RootSCEV->getValue())) {
+          Eligible = false;
+          break;
+        }
+        auto *Offset = dyn_cast<SCEVConstant>(SE.getMinusSCEV(Start, RootSCEV));
+        if (!Offset || Offset->getAPInt().getSignificantBits() > 64) {
+          Eligible = false;
+          break;
+        }
+        Value *Root = RootSCEV->getValue();
+        Roots.insert(Root);
+        Accesses.push_back({&I, Root, Offset->getAPInt().getSExtValue(), Stride,
+                            DL.getTypeStoreSize(Ty).getFixedValue()});
+      }
+      if (!Eligible)
+        break;
+    }
+    if (!Eligible || Accesses.empty() || Accesses.size() > 8 ||
+        Roots.size() > 4)
+      continue;
+    SCEVExpander Exp(SE, "flexfat.trip");
+    const SCEV *Backedges = SE.getBackedgeTakenCount(L);
+    if (isa<SCEVCouldNotCompute>(Backedges) ||
+        !SE.isLoopInvariant(Backedges, L) ||
+        SE.getTypeSizeInBits(Backedges->getType()) > 64 ||
+        !Exp.isSafeToExpandAt(Backedges,
+                              L->getLoopPreheader()->getTerminator()))
+      continue;
+
+    // A constant trip count within a known allocation needs neither a range
+    // guard nor a clone. Use wide signed arithmetic for the static proof; even
+    // a 64-bit count times a signed 64-bit stride fits this calculation.
+    if (auto *Count = dyn_cast<SCEVConstant>(Backedges)) {
+      bool Contained = true;
+      for (const RangeAccess &A : Accesses) {
+        auto Bound = getAllocationUpperBound(A.Root);
+        APInt First(128, A.Offset, true);
+        APInt Span =
+            Count->getAPInt().zextOrTrunc(128) * APInt(128, A.Stride, true);
+        APInt Low = A.Stride < 0 ? First + Span : First;
+        APInt High = A.Stride < 0 ? First : First + Span;
+        APInt End = High + APInt(128, A.Width);
+        if (!isAllocationResult(A.Root) || !Bound || Low.isNegative() ||
+            End.ugt(APInt(128, *Bound))) {
+          Contained = false;
+          break;
+        }
+      }
+      if (Contained) {
+        IRBuilder<> B(L->getLoopPreheader()->getTerminator());
+        B.SetNoSanitizeMetadata();
+        DenseMap<Value *, GeometryRecord> RootGeometry;
+        for (Value *Root : Roots)
+          RootGeometry[Root] = emitGeometry(B, Root);
+        for (const RangeAccess &A : Accesses) {
+          FastGeometry[A.Inst] = RootGeometry.find(A.Root)->second;
+          RangeProven.insert(A.Inst);
+        }
+        L->getLoopLatch()->getTerminator()->setMetadata(
+            "flexfat.loop.versioned", getInstrumentedMetadata());
+        return true;
+      }
+    }
+
+    // The preheader is reached only when this loop executes. All covered
+    // accesses dominate both its latch and exiting block, including iteration
+    // 0.
+    BasicBlock *Guard = L->getLoopPreheader();
+    Value *Count = Exp.expandCodeFor(Backedges, Backedges->getType(),
+                                     Guard->getTerminator());
+    for (Instruction *Inserted : Exp.getAllInsertedInstructions())
+      markNoSanitize(Inserted);
+    IRBuilder<> B(Guard->getTerminator());
+    B.SetNoSanitizeMetadata();
+    Count = B.CreateZExtOrTrunc(Count, IntptrTy);
+    Value *Valid = B.CreateICmpULE(Count, B.getInt64(INT64_MAX));
+    auto Checked = [&](Intrinsic::ID ID, Value *A, Value *C) {
+      auto *Fn = Intrinsic::getOrInsertDeclaration(&M, ID, {IntptrTy});
+      Value *Pair = B.CreateCall(Fn, {A, C});
+      Valid = B.CreateAnd(Valid, B.CreateNot(B.CreateExtractValue(Pair, 1)));
+      return B.CreateExtractValue(Pair, 0);
+    };
+    DenseMap<Value *, GeometryRecord> RootGeometry;
+    for (Value *Root : Roots) {
+      GeometryRecord G = emitGeometry(B, Root);
+      RootGeometry[Root] = G;
+      Value *Start = B.CreateShl(G.Index, RegionSizeLog);
+      Value *End = B.CreateAdd(Start, B.getInt64(1ULL << RegionSizeLog));
+      Valid = B.CreateAnd(Valid, G.Managed);
+      Valid = B.CreateAnd(Valid, B.CreateICmpUGE(G.Base, Start));
+      Valid =
+          B.CreateAnd(Valid, B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
+    }
+    for (const RangeAccess &A : Accesses) {
+      const GeometryRecord &G = RootGeometry.find(A.Root)->second;
+      Value *Span =
+          Checked(Intrinsic::smul_with_overflow, Count, B.getInt64(A.Stride));
+      Value *First =
+          Checked(Intrinsic::sadd_with_overflow, G.Raw, B.getInt64(A.Offset));
+      Value *Last = Checked(Intrinsic::sadd_with_overflow, First, Span);
+      Value *Low = A.Stride < 0 ? Last : First;
+      Value *High = A.Stride < 0 ? First : Last;
+      Value *Limit =
+          Checked(Intrinsic::uadd_with_overflow, High, B.getInt64(A.Width));
+      Valid = B.CreateAnd(Valid, B.CreateICmpUGE(Low, G.Base));
+      Valid = B.CreateAnd(Valid,
+                          B.CreateICmpULE(Limit, B.CreateAdd(G.Base, G.Size)));
+    }
+    formLCSSARecursively(*L, DT, &LI, &SE);
+    BasicBlock *PH = SplitBlock(Guard, Guard->getTerminator(), &DT, &LI,
+                                nullptr, "flexfat.fallback.ph");
+    ValueToValueMapTy VMap;
+    SmallVector<BasicBlock *, 8> Blocks;
+    Loop *Fast = cloneLoopWithPreheader(PH, Guard, L, VMap, ".flexfat.fast",
+                                        &LI, &DT, Blocks);
+    remapInstructionsInBlocks(Blocks, VMap);
+    Instruction *OldBranch = Guard->getTerminator();
+    B.SetInsertPoint(OldBranch);
+    B.CreateCondBr(Valid, Fast->getLoopPreheader(), PH);
+    OldBranch->eraseFromParent();
+    BasicBlock *Exit = L->getUniqueExitBlock();
+    for (PHINode &Phi : Exit->phis()) {
+      int Index = Phi.getBasicBlockIndex(L->getExitingBlock());
+      assert(Index >= 0 && "LCSSA exit missing original edge");
+      Value *Incoming = Phi.getIncomingValue(Index);
+      if (Value *Mapped = VMap.lookup(Incoming))
+        Incoming = Mapped;
+      Phi.addIncoming(Incoming, Fast->getExitingBlock());
+    }
+    for (const RangeAccess &A : Accesses) {
+      auto *Clone = cast<Instruction>(VMap.lookup(A.Inst));
+      FastGeometry[Clone] = RootGeometry.find(A.Root)->second;
+      RangeProven.insert(Clone);
+    }
+    for (Loop *Version : {L, Fast}) {
+      Version->getLoopLatch()->getTerminator()->setMetadata(
+          "flexfat.loop.versioned", getInstrumentedMetadata());
+      if (MDNode *ID = Version->getLoopID()) {
+        SmallVector<Metadata *, 8> Ops;
+        Ops.push_back(nullptr);
+        for (unsigned I = 1; I < ID->getNumOperands(); ++I)
+          Ops.push_back(ID->getOperand(I));
+        MDNode *NewID = MDNode::getDistinct(M.getContext(), Ops);
+        NewID->replaceOperandWith(0, NewID);
+        Version->setLoopID(NewID);
+      }
+    }
+    SE.forgetAllLoops();
+    DT.recalculate(F);
+    return true;
+  }
+  return false;
+}
+
+void FlexFatSanitizer::prepareLoopGeometry(ArrayRef<AccessRecord> Accesses,
+                                           DominatorTree &DT, LoopInfo &LI) {
+  DenseMap<std::pair<BasicBlock *, Value *>, GeometryRecord> Shared;
+  for (const AccessRecord &A : Accesses) {
+    Loop *L = LI.getLoopFor(A.Inst->getParent());
+    if (!L || !L->getLoopPreheader())
+      continue;
+    Value *Root = A.Pointer;
+    if (!L->isLoopInvariant(Root)) {
+      // Only statically contained constant offsets into known allocations.
+      // Inbounds alone is not an allocation-slot containment proof.
+      APInt Offset(DL.getIndexTypeSizeInBits(Root->getType()), 0);
+      Root = Root->stripAndAccumulateConstantOffsets(DL, Offset, true);
+      auto Bound = getAllocationUpperBound(Root);
+      auto *Length = dyn_cast<ConstantInt>(A.Length);
+      if (!L->isLoopInvariant(Root) || !isAllocationResult(Root) || !Bound ||
+          !Length || Offset.isNegative() || Offset.getActiveBits() > 64 ||
+          Offset.getZExtValue() > *Bound ||
+          Length->getZExtValue() > *Bound - Offset.getZExtValue())
+        continue;
+    }
+    BasicBlock *PH = L->getLoopPreheader();
+    if (auto *Def = dyn_cast<Instruction>(Root);
+        Def && !DT.dominates(Def, PH->getTerminator()))
+      continue;
+    auto Key = std::make_pair(PH, Root);
+    auto It = Shared.find(Key);
+    if (It == Shared.end()) {
+      IRBuilder<> B(PH->getTerminator());
+      B.SetNoSanitizeMetadata();
+      auto Existing = Geometries.find(Root);
+      GeometryRecord G = Existing != Geometries.end()
+                             ? getTemporalGeometry(Root)
+                             : emitGeometry(B, Root);
+      It = Shared.insert({Key, G}).first;
+    }
+    AccessGeometry[{A.Inst, A.Pointer}] = It->second;
+  }
 }
 
 bool FlexFatSanitizer::instrumentFunction(Function &F) {
@@ -1205,8 +1600,20 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   Bounds.clear();
   RecoveredBases.clear();
   SafeTableIndices.clear();
+  Geometries.clear();
+  BaseSizes.clear();
+  AccessLengths.clear();
+  AccessGeometry.clear();
+  FastGeometry.clear();
+  RangeProven.clear();
   BoundsIRGeneration = 0;
   bool Modified = false;
+  DominatorTree DT(F);
+  LoopInfo LI(DT);
+  AssumptionCache AC(F);
+  ScalarEvolution SE(F, TLI, AC, DT, LI);
+  while (versionLoop(F, DT, LI, SE))
+    Modified = true;
   SmallVector<Instruction *, 16> ToInstrument;
 
   for (auto &BB : F) {
@@ -1229,8 +1636,13 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
     }
   }
 
+  SmallVector<AccessRecord, 16> TemporalAccesses;
   for (Instruction *I : ToInstrument)
-    Modified |= instrumentTemporal(I);
+    discoverAccesses(I, TemporalAccesses);
+  SmallVector<AccessRecord, 16> LoopAccesses;
+  for (const AccessRecord &A : TemporalAccesses)
+    if (LI.getLoopFor(A.Inst->getParent()))
+      LoopAccesses.push_back(A);
   llvm::erase_if(ToInstrument, [this](Instruction *I) {
     return shouldSkipInstruction(I);
   });
@@ -1238,8 +1650,34 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   // LowFat-style phase 2: resolve every provenance root and memoize one
   // recovered allocation base before CFG-changing checks are inserted.
   for (Instruction *I : ToInstrument)
-    if (!I->hasMetadata(LLVMContext::MD_nosanitize))
+    if (!I->hasMetadata(LLVMContext::MD_nosanitize) && !RangeProven.contains(I))
       prepareBounds(I);
+
+  // Invoke provenance can split normal edges. Rebuild CFG analyses and
+  // discard SCEV results before revalidating loop geometry candidates.
+  SE.forgetAllLoops();
+  DT.recalculate(F);
+  LI.releaseMemory();
+  LI.analyze(DT);
+  prepareLoopGeometry(LoopAccesses, DT, LI);
+  // Materialize current-address geometry once at its SSA definition when no
+  // range/loop proof supplied geometry. Keep it separate from the companion
+  // allocation base: a derived address may have crossed a slot or region.
+  for (const AccessRecord &A : TemporalAccesses)
+    if (!FastGeometry.contains(A.Inst) &&
+        !AccessGeometry.count({A.Inst, A.Pointer}) &&
+        (isa<Instruction>(A.Pointer) || isa<Argument>(A.Pointer)))
+      (void)getTemporalGeometry(A.Pointer);
+  // The final preparation step can also split an invoke's normal edge.
+  SE.forgetAllLoops();
+  DT.recalculate(F);
+  LI.releaseMemory();
+  LI.analyze(DT);
+
+  // Temporal discovery is independent of spatial elision. Prepare all
+  // provenance before inserting any check branches (including invoke splits).
+  for (const AccessRecord &Access : TemporalAccesses)
+    Modified |= instrumentTemporal(Access);
 
   // LowFat-style phase 3: insert checks using the cached recovered bases.
   for (Instruction *I : ToInstrument) {
@@ -1345,12 +1783,12 @@ bool FlexFatSanitizer::run() {
                 TemporalFunctions.contains(Callee))
               Modified |= invalidateTemporalAttributes(*CB);
 
-  if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor_v2")) {
+  if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor_v3")) {
     auto &Ctx = M.getContext();
     auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), false);
-    auto ABI = M.getOrInsertFunction("__flexfat_tbi_abi_v2", Ty);
+    auto ABI = M.getOrInsertFunction("__flexfat_tbi_abi_v3", Ty);
     auto *Ctor = Function::Create(Ty, GlobalValue::InternalLinkage,
-                                  "__flexfat_tbi_ctor_v2", &M);
+                                  "__flexfat_tbi_ctor_v3", &M);
     IRBuilder<> B(BasicBlock::Create(Ctx, "entry", Ctor));
     B.SetNoSanitizeMetadata();
     B.CreateCall(ABI);

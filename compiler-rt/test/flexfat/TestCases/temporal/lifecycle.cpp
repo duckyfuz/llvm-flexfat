@@ -30,7 +30,7 @@ extern "C" uintptr_t __flexfat_get_size(uintptr_t);
 extern "C" uintptr_t __flexfat_get_offset(uintptr_t);
 extern "C" uintptr_t __flexfat_get_usable_size(uintptr_t);
 extern "C" void __flexfat_check_temporal(uintptr_t, uintptr_t, int);
-extern "C" void __flexfat_report_temporal(uintptr_t, uintptr_t, unsigned, unsigned, unsigned);
+extern "C" void __flexfat_report_temporal_v3(uintptr_t, uintptr_t, unsigned, unsigned);
 static uintptr_t raw(void *p) { return (uintptr_t)p & 0x00ffffffffffffffULL; }
 static unsigned tag(void *p) { return (uintptr_t)p >> 56; }
 __attribute__((noinline)) static char *opaque(char *p) {
@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
       // Metadata now says the next generation, but report the supplied zero.
       uintptr_t saved = (uintptr_t)p;
       free(p);
-      __flexfat_report_temporal(saved, 1, 0, 0, 1);
+      __flexfat_report_temporal_v3(saved, 1, 0, 0);
       abort();
     }
     if (!strcmp(mode, "never") || !strcmp(mode, "never-zero")) {

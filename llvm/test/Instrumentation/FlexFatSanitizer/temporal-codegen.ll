@@ -13,13 +13,16 @@ define i8 @read_byte(ptr %p) {
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
+; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; CHECK: ldarb
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
+; CHECK: b.ne
+; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; CHECK: ldrb w0, [x0]
 ; CHECK-NEXT: ret
-; CHECK: bl __flexfat_report_temporal
+; CHECK: bl __flexfat_report_temporal_v3
 ; CUSTOM-LABEL: read_byte:
 ; CUSTOM: umulh
 ; CUSTOM: mul
@@ -27,6 +30,9 @@ define i8 @read_byte(ptr %p) {
 ; POW2-LABEL: read_byte:
 ; POW2: lsr x{{[0-9]+}}, x{{[0-9]+}}, x{{[0-9]+}}
 ; POW2: ldarb
+; POW2: b.ne
+; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
+; POW2: ldrb w0, [x0]
   %v = load volatile i8, ptr %p, !flexfat.instrumented !0
   ret i8 %v
 }

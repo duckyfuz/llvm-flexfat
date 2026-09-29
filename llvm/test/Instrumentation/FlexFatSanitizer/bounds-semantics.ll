@@ -49,11 +49,12 @@ define i8 @derived_dereference(ptr %p, i64 %n) {
 ; CHECK: icmp ult i64 %flexfat.root.int, 281474976710656
 ; CHECK: select i1 %flexfat.address.valid, i64 %flexfat.region.raw, i64 0
 ; CHECK-NOT: sub i64 {{.*}}, 17592186044416
+; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
+; CHECK: load i64
 ; CHECK: %flexfat.base = inttoptr
 ; CHECK: %q = getelementptr i8, ptr %p, i64 %n
 ; CHECK: ptrtoint ptr %q to i64
-; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
-; CHECK: load i64
+; CHECK-NOT: load i64
 ; CHECK: call void @__flexfat_report_oob
 ; CHECK: load i8, ptr %q
   %q = getelementptr i8, ptr %p, i64 %n
@@ -117,13 +118,13 @@ define void @zero_memcpy() {
   ret void
 }
 
-; Dynamic ranges retain the length!=0 guard before the metadata-table block.
+; Dynamic ranges guard checks with length!=0; immutable root geometry is shared.
 define void @dynamic_memcpy(ptr %dst, ptr %src, i64 %len) {
 ; CHECK-LABEL: @dynamic_memcpy(
 ; CHECK: icmp ne i64 %len, 0
 ; CHECK-NOT: load i64
 ; CHECK: br i1
-; CHECK: load i64
+; CHECK: icmp ugt i64 %len
   call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %len, i1 false)
   ret void
 }

@@ -38,18 +38,6 @@
 
 using namespace __sanitizer;
 
-#ifdef FLEXFAT_TEMPORAL_TBI
-static_assert(sizeof(FlexFatTemporalRegionV2) == 24);
-static_assert(alignof(FlexFatTemporalRegionV2) == 8);
-static_assert(offsetof(FlexFatTemporalRegionV2, first_slot_number) == 0);
-static_assert(offsetof(FlexFatTemporalRegionV2, slot_count) == 8);
-static_assert(offsetof(FlexFatTemporalRegionV2, metadata_base) == 16);
-extern "C" {
-SANITIZER_INTERFACE_ATTRIBUTE FlexFatTemporalRegionV2
-    __flexfat_temporal_regions_v2[__flexfat::kNumSizeClasses];
-}
-#endif
-
 namespace __flexfat {
 
 // Initialization is published only after mappings and interceptors are ready.
@@ -109,35 +97,52 @@ static StaticSpinMutex region_locks[kMaxSizeClasses];
 // for a freed slot, and stale tags can match again after generation wraparound.
 static_assert(sizeof(atomic_uint8_t) == 1,
               "Temporal metadata must occupy one byte per slot");
+// All unmanaged absolute table indices, including zero for high pointers,
+// address this byte. It is never written after zero initialization.
+static atomic_uint8_t temporal_sentinel;
+static uptr *TemporalBiases() {
+  return reinterpret_cast<uptr *>(kTablesBase + 2 * kTablesOffset);
+}
+static_assert(sizeof(uptr) == 8, "TBI biases are 64-bit integers");
+static_assert((kUserAddressLimit >> kRegionSizeLog) * sizeof(uptr) <=
+                  kTablesOffset,
+              "TBI bias table exceeds reserved capacity");
 static void InitTemporal() {
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    auto &r = __flexfat_temporal_regions_v2[i];
-    uptr size = SizeClassToSize(i);
-    r.first_slot_number = region_next_alloc[i] / size;
-    r.slot_count = (GetRegionStart(i) + kRegionSize - region_next_alloc[i]) / size;
-    bytes += r.slot_count * sizeof(atomic_uint8_t);
+    uptr size = SizeClassToSize(i), start = GetRegionStart(i);
+    bytes += (start + kRegionSize - 1) / size - start / size + 1;
   }
-  // Demand-paged, non-fixed mapping, after every fixed spatial reservation.
-  auto *entries = static_cast<atomic_uint8_t *>(
+  // Include partial boundary slots; zero-filled padding is addressable but
+  // must never acquire a generation through allocator/free operations.
+  uptr storage = reinterpret_cast<uptr>(
       MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
+  auto *biases = TemporalBiases();
+  for (uptr index = 0; index < (kUserAddressLimit >> kRegionSizeLog); ++index)
+    biases[index] = reinterpret_cast<uptr>(&temporal_sentinel);
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    __flexfat_temporal_regions_v2[i].metadata_base = (uptr)entries;
-    entries += __flexfat_temporal_regions_v2[i].slot_count;
+    uptr size = SizeClassToSize(i), start = GetRegionStart(i);
+    uptr first = start / size;
+    uptr count = (start + kRegionSize - 1) / size - first + 1;
+    biases[start >> kRegionSizeLog] = storage - first;
+    storage += count;
   }
 }
 
+// Allocation operations require complete slots, unlike instrumentation's
+// addressable padding bytes. Arithmetic stays unsigned until the final cast.
 static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
   uptr region = GetRegionIndex(raw);
   if (region >= kNumSizeClasses)
     return nullptr;
   uptr size = SizeClassToSize(region);
-  base = raw - raw % size;
-  const auto &r = __flexfat_temporal_regions_v2[region];
-  uptr index = raw / size - r.first_slot_number;
-  if (index >= r.slot_count)
+  uptr slot = raw / size;
+  base = slot * size;
+  uptr start = GetRegionStart(region), end = start + kRegionSize;
+  if (base < start || base > end - size)
     return nullptr;
-  return reinterpret_cast<atomic_uint8_t *>(r.metadata_base) + index;
+  return reinterpret_cast<atomic_uint8_t *>(
+      TemporalBiases()[raw >> kRegionSizeLog] + slot);
 }
 
 struct TemporalState {
@@ -210,6 +215,7 @@ static void EnableTaggedAddresses() {
 //
 //   kTablesBase + 0 * kTablesOffset: Sizes (8 bytes per class)
 //   kTablesBase + 1 * kTablesOffset: Magics (custom mode)
+//   kTablesBase + 2 * kTablesOffset: Temporal biases (TBI ABI v3)
 //   kTablesBase + 3 * kTablesOffset: Masks (POW2 mode)
 // Custom mode generates kTablesBase together with its region geometry.
 static constexpr uptr kTablesMappingSize = 4 * kTablesOffset;
@@ -584,21 +590,19 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_free(void *ptr) { __flexfat::Deallocate(ptr); }
 
 #ifdef FLEXFAT_TEMPORAL_TBI
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1() {
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3() {
   __flexfat_init();
   CHECK(__flexfat::IsReady());
 }
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v2() {
-  __flexfat_tbi_abi_v1();
-}
 SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
-__flexfat_report_temporal(uptr ptr, uptr size, u32 operation,
-                          u32 observed_generation, u32 slot_valid) {
-  // Reconstruct only diagnostic geometry. Never reread mutable generation state.
+__flexfat_report_temporal_v3(uptr ptr, uptr size, u32 operation,
+                             u32 observed_generation) {
+  // Reconstruct only diagnostic geometry; never reread generation state.
   __flexfat::TemporalState state;
-  __flexfat::TemporalEntry(__flexfat::Untag(ptr), state.base);
+  state.entry = __flexfat::TemporalEntry(__flexfat::Untag(ptr), state.base);
   state.generation = observed_generation;
-  __flexfat::ReportTemporal(ptr, size, operation, state, slot_valid != 0);
+  __flexfat::ReportTemporal(ptr, size, operation, state,
+                            state.entry != nullptr);
 }
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_check_temporal(uptr ptr, uptr size, int operation) {

@@ -9,7 +9,7 @@
 // BAD: unsupported option '-fsanitize-flexfat-tbi' for target
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi=false -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=PLAIN
-// PLAIN-NOT: __flexfat_report_temporal
+// PLAIN-NOT: __flexfat_report_temporal_v3
 // PLAIN-NOT: __flexfat_tbi_abi
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -O2 -mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right -emit-llvm -o - %s | FileCheck %s

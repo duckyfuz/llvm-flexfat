@@ -48,8 +48,8 @@ for build in args.builds:
     metadata_bytes = 0
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
-        first = ((start + size - 1) // size) * size
-        metadata_bytes += ((start + (1 << region_log) - first) // size)
+        first = start // size
+        metadata_bytes += (start + (1 << region_log) - 1) // size - first + 1
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
@@ -85,7 +85,14 @@ for build in args.builds:
                     run([exe, mode], 'unavailable (invalid slot geometry)'); checks += 1
             print(build.name, name, 'passed', flush=True)
 
-        # Arithmetic uses the exported descriptors and the actual fixed tables.
+        for flags, name in variants:
+            run([cxx, *common, *flags, '-fno-vectorize', '-fno-slp-vectorize',
+                 '-fno-unroll-loops', root/'TestCases/temporal/loops.cpp', '-o', exe])
+            run([exe]); checks += 1
+            for mode in ['stale', 'overflow', 'write', 'call']:
+                run([exe, mode], 'generation mismatch'); checks += 1
+
+        # Arithmetic exhaustively validates the v3 fixed bias table and padding.
         arithmetic_obj = d/'arithmetic.o'
         config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
         if custom:
@@ -95,25 +102,33 @@ for build in args.builds:
              '-o', arithmetic_obj])
         run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
 
-        # An object following the old ABI still links and checks with v2 runtime.
+        # Old TBI objects must be rebuilt: both old marker versions fail.
         old_obj = d/'v1.o'
         run([cc, '-O2', '-fno-builtin', '-ffunction-sections', '-fdata-sections',
              '-c', root/'Inputs/tbi-v1-object.c', '-o', old_obj])
-        run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe])
-        run([exe]); run([exe, 'stale'], 'generation mismatch'); checks += 2
+        run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe],
+            '__flexfat_tbi_abi_v1'); checks += 1
+        v2 = d/'v2.c'
+        v2.write_text('extern void __flexfat_tbi_abi_v2(void);\n'
+                      '__attribute__((constructor)) static void init(void) {'
+                      '__flexfat_tbi_abi_v2();}\nint main(void) {return 0;}\n')
+        run([cc, '-c', v2, '-o', old_obj])
+        run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe],
+            '__flexfat_tbi_abi_v2'); checks += 1
 
         # Empty object retains the ABI contract even with section GC.
         empty = d/'empty.c'; empty.write_text('int main(void) { return 0; }\n')
         obj = d/'empty.o'
         run([cc, *common, '-O2', '-ffunction-sections', '-fdata-sections', '-c', empty, '-o', obj])
         run([cc, *common, obj, '-Wl,--gc-sections', '-o', exe]); run([exe])
-        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v2')
-        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v2')
-        # A minimal v1-only runtime cannot satisfy even an empty v2 object.
+        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v3')
+        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v3')
+        # Neither old runtime ABI can satisfy an empty v3 object.
         old_runtime = d/'old-runtime.c'
-        old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n')
+        old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n'
+                               'void __flexfat_tbi_abi_v2(void) {}\n')
         run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
-            '__flexfat_tbi_abi_v2')
+            '__flexfat_tbi_abi_v3')
         checks += 4
         launcher = d/'launcher'
         run([cc, root/'Inputs/tbi-init-failure.c', '-o', launcher])

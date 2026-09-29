@@ -1,3 +1,4 @@
+; RUN: opt < %s -mtriple=aarch64-linux-gnu -passes='flexfat<tbi>,flexfat<tbi>,verify' -disable-output
 ; RUN: opt < %s -passes='flexfat,verify' -S | FileCheck %s
 ; RUN: %if flexfat-custom-config %{ opt < %s -passes='flexfat,verify' -S | FileCheck %s --check-prefix=CUSTOM %}
 
@@ -16,13 +17,14 @@ define i8 @argument_gep_chain(ptr %p, i64 %a, i64 %b) {
 ; CHECK: %flexfat.address.valid = icmp ult i64 %flexfat.root.int, 281474976710656
 ; CHECK: %flexfat.region = select i1 %flexfat.address.valid, i64 %flexfat.region.raw, i64 0
 ; CHECK-NOT: 17592186044416
+; CHECK: %[[SIZE:.*]] = load i64, ptr
 ; CHECK: %flexfat.base = inttoptr
 ; CHECK: %q1 = getelementptr i8, ptr %p, i64 %a
-; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
-; CHECK: load i64, ptr
+; CHECK-NOT: load i64
+; CHECK: icmp uge i64 {{.*}}, %[[SIZE]]
 ; CHECK: %q2 = getelementptr i8, ptr %q1, i64 %b
-; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
-; CHECK: load i64, ptr
+; CHECK-NOT: load i64
+; CHECK: icmp uge i64 {{.*}}, %[[SIZE]]
 ; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
 ; CUSTOM-LABEL: @argument_gep_chain(
 ; CUSTOM: %[[MUL128:.*]] = mul i128
