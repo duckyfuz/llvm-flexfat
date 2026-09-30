@@ -29,6 +29,7 @@ define i8 @read_byte(ptr %p) {
 ; CUSTOM: ldarb
 ; POW2-LABEL: read_byte:
 ; POW2: lsr x{{[0-9]+}}, x{{[0-9]+}}, x{{[0-9]+}}
+; POW2-NOT: ldr x
 ; POW2: ldarb
 ; POW2: b.{{ne|lo}}
 ; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}

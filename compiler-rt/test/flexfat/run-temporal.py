@@ -44,6 +44,7 @@ for build in args.builds:
     else:
         sizes = [1 << n for n in range(4, 31)]
         region_log, region_base = 32, 0x100000000000
+    abi = '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v4'
     metadata_bytes = 0
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
@@ -99,7 +100,7 @@ for build in args.builds:
              root/'TestCases/temporal/loops.cpp', '-o', exe])
         run([exe, 'width'], 'out-of-bounds'); checks += 1
 
-        # Arithmetic exhaustively validates the v3 fixed bias table and padding.
+        # Arithmetic validates the bias table and the POW2 fixed shadow.
         arithmetic_obj = d/'arithmetic.o'
         config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
         if custom:
@@ -128,14 +129,15 @@ for build in args.builds:
         obj = d/'empty.o'
         run([cc, *common, '-O2', '-ffunction-sections', '-fdata-sections', '-c', empty, '-o', obj])
         run([cc, *common, obj, '-Wl,--gc-sections', '-o', exe]); run([exe])
-        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v3')
-        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v3')
-        # Neither old runtime ABI can satisfy an empty v3 object.
+        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], abi)
+        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], abi)
+        # Older runtime ABIs cannot satisfy a current instrumented object.
         old_runtime = d/'old-runtime.c'
         old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n'
-                               'void __flexfat_tbi_abi_v2(void) {}\n')
+                               'void __flexfat_tbi_abi_v2(void) {}\n' +
+                               ('' if custom else 'void __flexfat_tbi_abi_v3(void) {}\n'))
         run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
-            '__flexfat_tbi_abi_v3')
+            abi)
         checks += 4
         launcher = d/'launcher'
         run([cc, root/'TestCases/temporal/tbi-init-failure.c', '-o', launcher])
@@ -167,8 +169,9 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
 
         results.append({'build': str(build), 'checks': checks,
                         'metadata_entry_bytes': metadata_bytes,
-                        'metadata_reservation_bytes': ((metadata_bytes + os.sysconf('SC_PAGE_SIZE') - 1)
-                                                       // os.sysconf('SC_PAGE_SIZE')) * os.sysconf('SC_PAGE_SIZE'),
+                        'metadata_reservation_bytes': (((metadata_bytes + os.sysconf('SC_PAGE_SIZE') - 1)
+                                                       // os.sysconf('SC_PAGE_SIZE')) * os.sysconf('SC_PAGE_SIZE')
+                                                       if custom else (len(sizes) + 1) * (1 << (region_log - 4))),
                         'timings': {}})
         print(json.dumps(results[-1], indent=2), flush=True)
 if args.output:

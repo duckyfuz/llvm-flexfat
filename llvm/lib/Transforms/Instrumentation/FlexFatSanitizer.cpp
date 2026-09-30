@@ -655,8 +655,15 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
   Value *Class = B.CreateSub(G.Index, B.getInt64(ManagedTableBegin));
   Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
                                 B.getInt64(0));
-  G.Slot = B.CreateLShr(G.Raw, Shift, "flexfat.slot");
-#endif
+  Value *Local = B.CreateAnd(G.Raw, B.getInt64((1ULL << RegionSizeLog) - 1));
+  G.Slot = B.CreateLShr(Local, Shift, "flexfat.slot");
+  Value *Address =
+      B.CreateAdd(B.CreateShl(G.Index, B.getInt64(RegionSizeLog - 4)), G.Slot);
+  Address = B.CreateSelect(
+      G.Managed, Address,
+      B.getInt64((ManagedTableBegin - 1) * (1ULL << (RegionSizeLog - 4))));
+  G.Entry = B.CreateIntToPtr(Address, B.getPtrTy(), "flexfat.metadata");
+#else
   Value *Slot =
       B.CreateSelect(G.Managed, G.Slot, B.getInt64(0), "flexfat.metadata.slot");
   Value *Bias = loadFromFixedTable(B, TablesBase + 2 * kTablesOffset,
@@ -665,6 +672,7 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
   G.Entry =
       B.CreateIntToPtr(B.CreateAdd(Bias, Slot, "flexfat.metadata.address"),
                        B.getPtrTy(), "flexfat.metadata");
+#endif
 }
 
 Value *FlexFatSanitizer::getMemoizedTableIndex(Value *CompanionBase) const {
@@ -1815,12 +1823,20 @@ bool FlexFatSanitizer::run() {
                 TemporalFunctions.contains(Callee))
               Modified |= invalidateTemporalAttributes(*CB);
 
-  if (Options.TemporalTBI && !M.getFunction("__flexfat_tbi_ctor_v3")) {
+  // POW2 v4 uses a fixed sparse shadow; custom layouts retain v3 biases.
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  constexpr const char *CtorName = "__flexfat_tbi_ctor_v3";
+  constexpr const char *ABIName = "__flexfat_tbi_abi_v3";
+#else
+  constexpr const char *CtorName = "__flexfat_tbi_ctor_v4";
+  constexpr const char *ABIName = "__flexfat_tbi_abi_v4";
+#endif
+  if (Options.TemporalTBI && !M.getFunction(CtorName)) {
     auto &Ctx = M.getContext();
     auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), false);
-    auto ABI = M.getOrInsertFunction("__flexfat_tbi_abi_v3", Ty);
-    auto *Ctor = Function::Create(Ty, GlobalValue::InternalLinkage,
-                                  "__flexfat_tbi_ctor_v3", &M);
+    auto ABI = M.getOrInsertFunction(ABIName, Ty);
+    auto *Ctor =
+        Function::Create(Ty, GlobalValue::InternalLinkage, CtorName, &M);
     IRBuilder<> B(BasicBlock::Create(Ctx, "entry", Ctor));
     B.SetNoSanitizeMetadata();
     B.CreateCall(ABI);

@@ -13,10 +13,7 @@ define i8 @access(ptr %p) {
 ; CHECK: [[RAW:%.*]] = and i64 [[TAGGED]], 72057594037927935
 ; CHECK-NOT: br i1
 ; CHECK: [[MANAGED:%flexfat.managed]] = icmp {{.*}}
-; CHECK: [[SLOT:%flexfat.metadata.slot]] = select i1 [[MANAGED]], i64 {{.*}}, i64 0
-; CHECK: [[BIAS:%.*]] = load i64, ptr {{.*}}, align 8, !invariant.load
-; CHECK: [[ADDRESS:%.*]] = add i64 [[BIAS]], [[SLOT]]
-; CHECK: [[ENTRY:%.*]] = inttoptr i64 [[ADDRESS]] to ptr
+; CHECK: [[ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
 ; CHECK: [[GEN:%.*]] = load atomic i8, ptr [[ENTRY]] acquire, align 1, !nosanitize
 ; CHECK-NOT: !invariant.load
 ; CHECK: lshr i64 [[TAGGED]], 56
@@ -38,6 +35,8 @@ define i8 @access(ptr %p) {
 ; CUSTOM: icmp ugt i64
 ; CUSTOM: %flexfat.slot = sub i64
 ; CUSTOM-NOT: mul i128
+; CUSTOM: %flexfat.metadata.slot = select i1
+; CUSTOM: load i64, ptr {{.*}}, align 8, !invariant.load
 ; CUSTOM: load atomic i8
 ; POW2-LABEL: define i8 @access(
 ; POW2: %flexfat.class = sub i64
@@ -46,7 +45,8 @@ define i8 @access(ptr %p) {
 ; POW2: %flexfat.managed.size = shl i64 1,
 ; POW2: %flexfat.size = select i1 %flexfat.managed, i64 %flexfat.managed.size, i64 -1
 ; POW2: %flexfat.mask = select i1 %flexfat.managed, i64 {{.*}}, i64 0
-; POW2: %flexfat.slot = lshr i64 %flexfat.raw,
+; POW2: %flexfat.slot = lshr i64
+; POW2-NOT: load i64, ptr
 ; POW2: load atomic i8
   %v = load i8, ptr %p, !flexfat.instrumented !0
   ret i8 %v
@@ -83,13 +83,17 @@ define i8 @unmanaged() {
   ret i8 %v
 }
 
-; An incoming old constructor cannot suppress the retained v3 ABI reference.
+; An incoming old constructor cannot suppress the current ABI reference.
 define internal void @__flexfat_tbi_ctor() {
   call void @__flexfat_tbi_abi_v1()
   ret void
 }
 declare void @__flexfat_tbi_abi_v1()
-; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_v3()
-; CHECK: call void @__flexfat_tbi_abi_v3()
+; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_v{{[34]}}()
+; CHECK: call void @__flexfat_tbi_abi_v{{[34]}}()
+; CUSTOM-LABEL: define internal void @__flexfat_tbi_ctor_v3()
+; CUSTOM: call void @__flexfat_tbi_abi_v3()
+; POW2-LABEL: define internal void @__flexfat_tbi_ctor_v4()
+; POW2: call void @__flexfat_tbi_abi_v4()
 ; CHECK-NEXT: ret void
 !0 = !{}

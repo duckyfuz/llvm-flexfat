@@ -108,6 +108,20 @@ static_assert((kUserAddressLimit >> kRegionSizeLog) * sizeof(uptr) <=
                   kTablesOffset,
               "TBI bias table exceeds reserved capacity");
 static void InitTemporal() {
+#ifndef FLEXFAT_CUSTOM_CONFIG
+  // Fixed, sparse POW2 shadow. The preceding window holds the
+  // unmanaged zero sentinel; a managed region's number is its shadow window.
+  constexpr uptr kShadowStride = 1ULL << (kRegionSizeLog - kMinSizeLog);
+  constexpr uptr kShadowBase =
+      ((kRegionBase >> kRegionSizeLog) - 1) * kShadowStride;
+  constexpr uptr kShadowBytes = (kNumSizeClasses + 1) * kShadowStride;
+  if (!MemoryRangeIsAvailable(kShadowBase, kShadowBase + kShadowBytes - 1) ||
+      !MmapFixedNoReserve(kShadowBase, kShadowBytes,
+                          "flexfat_temporal_shadow")) {
+    Printf("FLEXFAT initialization failed: fixed temporal shadow\n");
+    Die();
+  }
+#else
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr size = SizeClassToSize(i), start = GetRegionStart(i);
@@ -117,15 +131,21 @@ static void InitTemporal() {
   // must never acquire a generation through allocator/free operations.
   uptr storage = reinterpret_cast<uptr>(
       MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
+#endif
   auto *biases = TemporalBiases();
   for (uptr index = 0; index < (kUserAddressLimit >> kRegionSizeLog); ++index)
     biases[index] = reinterpret_cast<uptr>(&temporal_sentinel);
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr size = SizeClassToSize(i), start = GetRegionStart(i);
     uptr first = start / size;
+#ifdef FLEXFAT_CUSTOM_CONFIG
     uptr count = (start + kRegionSize - 1) / size - first + 1;
     biases[start >> kRegionSizeLog] = storage - first;
     storage += count;
+#else
+    biases[start >> kRegionSizeLog] =
+        ((start >> kRegionSizeLog) * kShadowStride) - first;
+#endif
   }
 }
 
@@ -594,6 +614,11 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3() {
   __flexfat_init();
   CHECK(__flexfat::IsReady());
 }
+#ifndef FLEXFAT_CUSTOM_CONFIG
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v4() {
+  __flexfat_tbi_abi_v3();
+}
+#endif
 SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
 __flexfat_report_temporal_v3(uptr ptr, uptr size, u32 operation,
                              u32 observed_generation) {

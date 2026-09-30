@@ -115,5 +115,5 @@ join:
   ret ptr %value
 }
 
-; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_v3
-; CHECK: call void @__flexfat_tbi_abi_v3()
+; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_v{{[34]}}
+; CHECK: call void @__flexfat_tbi_abi_v{{[34]}}()

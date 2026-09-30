@@ -18,7 +18,7 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 define i64 @same_pointer(ptr %p) {
 ; CHECK-LABEL: @same_pointer(
 ; CHECK: [[RAW:%.*]] = and i64 {{.*}}, 72057594037927935
-; CHECK: [[ENTRY:%.*]] = inttoptr i64 %flexfat.metadata.address to ptr
+; CHECK: [[ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
 ; CHECK: load atomic i8, ptr [[ENTRY]] acquire
 ; CHECK: load volatile i64, ptr %p
 ; CHECK-NOT: load i64, ptr
@@ -46,7 +46,7 @@ define i64 @same_pointer(ptr %p) {
 define i8 @derived_pointer(ptr %p, i64 %n) {
 ; CHECK-LABEL: @derived_pointer(
 ; CHECK: %q = getelementptr i8, ptr %p, i64 %n
-; CHECK: [[DERIVED:%.*]] = inttoptr i64 %flexfat.metadata.address{{[0-9]*}} to ptr
+; CHECK: [[DERIVED:%flexfat.metadata[0-9]*]] = inttoptr i64 {{.*}} to ptr
 ; CHECK: load atomic i8, ptr [[DERIVED]] acquire
 ; CHECK: %a = load volatile i8, ptr %q
 ; CHECK-NOT: load i64, ptr
