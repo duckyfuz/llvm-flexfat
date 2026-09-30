@@ -109,17 +109,25 @@ static_assert((kUserAddressLimit >> kRegionSizeLog) * sizeof(uptr) <=
               "TBI bias table exceeds reserved capacity");
 static void InitTemporal() {
 #ifndef FLEXFAT_CUSTOM_CONFIG
-  // Fixed, sparse POW2 shadow. The preceding window holds the
-  // unmanaged zero sentinel; a managed region's number is its shadow window.
+  // Fixed POW2 shadow. Each class begins at its region-number window, but
+  // maps only the slots it can address. The preceding window holds one page
+  // for the unmanaged zero sentinel.
   constexpr uptr kShadowStride = 1ULL << (kRegionSizeLog - kMinSizeLog);
   constexpr uptr kShadowBase =
       ((kRegionBase >> kRegionSizeLog) - 1) * kShadowStride;
-  constexpr uptr kShadowBytes = (kNumSizeClasses + 1) * kShadowStride;
-  if (!MemoryRangeIsAvailable(kShadowBase, kShadowBase + kShadowBytes - 1) ||
-      !MmapFixedNoReserve(kShadowBase, kShadowBytes,
-                          "flexfat_temporal_shadow")) {
-    Printf("FLEXFAT initialization failed: fixed temporal shadow\n");
-    Die();
+  const uptr page = GetPageSizeCached();
+  auto map_shadow = [](uptr address, uptr bytes) {
+    if (!MemoryRangeIsAvailable(address, address + bytes - 1) ||
+        !MmapFixedNoReserve(address, bytes, "flexfat_temporal_shadow")) {
+      Printf("FLEXFAT initialization failed: fixed temporal shadow\n");
+      Die();
+    }
+  };
+  map_shadow(kShadowBase, page);
+  for (uptr i = 0; i < kNumSizeClasses; ++i) {
+    uptr slots = kRegionSize / SizeClassToSize(i);
+    uptr bytes = RoundUpTo(slots, page);
+    map_shadow(((kRegionBase >> kRegionSizeLog) + i) * kShadowStride, bytes);
   }
 #else
   uptr bytes = 0;

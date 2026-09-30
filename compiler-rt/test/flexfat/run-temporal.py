@@ -49,7 +49,12 @@ for build in args.builds:
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
         first = start // size
-        metadata_bytes += (start + (1 << region_log) - 1) // size - first + 1
+        metadata_bytes += ((start + (1 << region_log) - 1) // size - first + 1
+                           if custom else (1 << region_log) // size)
+    page = os.sysconf('SC_PAGE_SIZE')
+    reservation_bytes = (((metadata_bytes + page - 1) // page) * page if custom
+                         else page + sum((((1 << region_log) // size + page - 1) // page) * page
+                                         for size in sizes))
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
@@ -169,9 +174,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
 
         results.append({'build': str(build), 'checks': checks,
                         'metadata_entry_bytes': metadata_bytes,
-                        'metadata_reservation_bytes': (((metadata_bytes + os.sysconf('SC_PAGE_SIZE') - 1)
-                                                       // os.sysconf('SC_PAGE_SIZE')) * os.sysconf('SC_PAGE_SIZE')
-                                                       if custom else (len(sizes) + 1) * (1 << (region_log - 4))),
+                        'metadata_reservation_bytes': reservation_bytes,
                         'timings': {}})
         print(json.dumps(results[-1], indent=2), flush=True)
 if args.output:
