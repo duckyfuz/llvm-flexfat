@@ -11,10 +11,8 @@ define i8 @access(ptr %p) {
 ; CHECK-LABEL: define i8 @access(
 ; CHECK: [[TAGGED:%.*]] = ptrtoint ptr %p to i64
 ; CHECK: [[RAW:%.*]] = and i64 [[TAGGED]], 72057594037927935
-; CHECK: icmp ult i64 [[RAW]], 281474976710656
-; CHECK: select i1 {{.*}}, i64 {{.*}}, i64 0
 ; CHECK-NOT: br i1
-; CHECK: [[MANAGED:%flexfat.managed]] = icmp ne i64 {{.*}}, -1
+; CHECK: [[MANAGED:%flexfat.managed]] = icmp {{.*}}
 ; CHECK: [[SLOT:%flexfat.metadata.slot]] = select i1 [[MANAGED]], i64 {{.*}}, i64 0
 ; CHECK: [[BIAS:%.*]] = load i64, ptr {{.*}}, align 8, !invariant.load
 ; CHECK: [[ADDRESS:%.*]] = add i64 [[BIAS]], [[SLOT]]
@@ -35,15 +33,21 @@ define i8 @access(ptr %p) {
 ; CHECK: %v = load i8, ptr %p,
 ; CHECK-NEXT: ret i8 %v
 ; CUSTOM-LABEL: define i8 @access(
+; CUSTOM: icmp ult i64 %flexfat.raw, 281474976710656
 ; CUSTOM: mul i128
 ; CUSTOM: icmp ugt i64
 ; CUSTOM: %flexfat.slot = sub i64
 ; CUSTOM-NOT: mul i128
 ; CUSTOM: load atomic i8
 ; POW2-LABEL: define i8 @access(
-; POW2: add i64 {{.*}}, 4
-; POW2: [[SHIFT:%.*]] = select i1 {{.*}}, i64 {{.*}}, i64 0
-; POW2-NEXT: %flexfat.slot = lshr i64 %flexfat.raw, [[SHIFT]]
+; POW2: %flexfat.class = sub i64
+; POW2: %flexfat.managed = icmp ult i64
+; POW2: %flexfat.region = select i1 %flexfat.managed, i64 %flexfat.region.raw, i64 0
+; POW2: %flexfat.managed.size = shl i64 1,
+; POW2: %flexfat.size = select i1 %flexfat.managed, i64 %flexfat.managed.size, i64 -1
+; POW2: %flexfat.mask = select i1 %flexfat.managed, i64 {{.*}}, i64 0
+; POW2: %flexfat.slot = lshr i64 %flexfat.raw,
+; POW2: load atomic i8
   %v = load i8, ptr %p, !flexfat.instrumented !0
   ret i8 %v
 }

@@ -69,11 +69,10 @@ define i8 @derived_pointer(ptr %p, i64 %n) {
   ret i8 %sum
 }
 
-; Spatial-only uses in a TBI module do not request temporal-only fields.
+; Spatial-only uses in a TBI module do not request temporal metadata.
 define ptr @escape_only(ptr %p, i64 %offset) {
 ; CHECK-LABEL: @escape_only(
 ; CHECK-NOT: flexfat.metadata
-; CHECK-NOT: flexfat.managed
 ; CHECK-NOT: load atomic
 ; CHECK: ret ptr %q
   %q = getelementptr i8, ptr %p, i64 %offset

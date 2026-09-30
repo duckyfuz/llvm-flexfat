@@ -18,7 +18,7 @@ define i8 @read_byte(ptr %p) {
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
-; CHECK: b.ne
+; CHECK: b.{{ne|lo}}
 ; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; CHECK: ldrb w0, [x0]
 ; CHECK-NEXT: ret
@@ -30,7 +30,7 @@ define i8 @read_byte(ptr %p) {
 ; POW2-LABEL: read_byte:
 ; POW2: lsr x{{[0-9]+}}, x{{[0-9]+}}, x{{[0-9]+}}
 ; POW2: ldarb
-; POW2: b.ne
+; POW2: b.{{ne|lo}}
 ; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; POW2: ldrb w0, [x0]
   %v = load volatile i8, ptr %p, !flexfat.instrumented !0

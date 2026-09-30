@@ -596,21 +596,46 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
               ? B.CreateAnd(G.Tagged, B.getInt64(0x00ffffffffffffffULL),
                             "flexfat.raw")
               : G.Tagged;
-  G.Index = getSafeTableIndex(B, G.Raw);
 #ifdef FLEXFAT_CUSTOM_CONFIG
+  G.Index = getSafeTableIndex(B, G.Raw);
   auto [Size, Slot] = emitDynamicSlotMagic(B, G.Raw, G.Index);
   G.Size = Size;
   G.Slot = Slot;
   G.Base = B.CreateMul(Slot, Size, "flexfat.base.int");
 #else
-  G.Size = B.CreateZExtOrTrunc(
-      loadFromFixedTable(B, TablesBase, B.getInt64Ty(), G.Index), IntptrTy);
-  Value *Mask =
-      B.CreateZExtOrTrunc(loadFromFixedTable(B, TablesBase + 3 * kTablesOffset,
-                                             B.getInt64Ty(), G.Index),
-                          IntptrTy);
-  Mask->setName("flexfat.mask");
-  G.Base = B.CreateAnd(G.Raw, Mask, "flexfat.base.int");
+  if (Options.TemporalTBI) {
+    // Pow2 classes have size 2^(class+4). Derive immutable geometry from the
+    // region instead of reading the size and mask tables on each root. All
+    // foreign regions use the zero-index bias sentinel, including high ones.
+    Value *Region = B.CreateLShr(G.Raw, B.getInt64(RegionSizeLog),
+                                 "flexfat.region.raw");
+    Value *Class = B.CreateSub(Region, B.getInt64(ManagedTableBegin),
+                               "flexfat.class");
+    G.Managed = B.CreateICmpULT(Class, B.getInt64(NumSizeClasses),
+                                "flexfat.managed");
+    G.Index = B.CreateSelect(G.Managed, Region, B.getInt64(0),
+                              "flexfat.region");
+    Value *Shift = B.CreateSelect(
+        G.Managed, B.CreateAdd(Class, B.getInt64(4)), B.getInt64(0),
+        "flexfat.size.shift");
+    Value *ManagedSize = B.CreateShl(B.getInt64(1), Shift,
+                                    "flexfat.managed.size");
+    G.Size = B.CreateSelect(G.Managed, ManagedSize, B.getInt64(-1),
+                            "flexfat.size");
+    Value *Mask = B.CreateSelect(G.Managed, B.CreateNeg(ManagedSize),
+                                 B.getInt64(0), "flexfat.mask");
+    G.Base = B.CreateAnd(G.Raw, Mask, "flexfat.base.int");
+  } else {
+    G.Index = getSafeTableIndex(B, G.Raw);
+    G.Size = B.CreateZExtOrTrunc(
+        loadFromFixedTable(B, TablesBase, B.getInt64Ty(), G.Index), IntptrTy);
+    Value *Mask = B.CreateZExtOrTrunc(
+        loadFromFixedTable(B, TablesBase + 3 * kTablesOffset, B.getInt64Ty(),
+                           G.Index),
+        IntptrTy);
+    Mask->setName("flexfat.mask");
+    G.Base = B.CreateAnd(G.Raw, Mask, "flexfat.base.int");
+  }
 #endif
   if (Options.TemporalTBI && Temporal)
     materializeTemporalGeometry(B, G);
@@ -623,8 +648,9 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
                                                    GeometryRecord &G) {
   if (G.Entry)
     return;
-  G.Managed = B.CreateICmpNE(G.Size, ConstantInt::getSigned(IntptrTy, -1),
-                             "flexfat.managed");
+  if (!G.Managed)
+    G.Managed = B.CreateICmpNE(G.Size, ConstantInt::getSigned(IntptrTy, -1),
+                               "flexfat.managed");
 #ifndef FLEXFAT_CUSTOM_CONFIG
   Value *Class = B.CreateSub(G.Index, B.getInt64(ManagedTableBegin));
   Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
