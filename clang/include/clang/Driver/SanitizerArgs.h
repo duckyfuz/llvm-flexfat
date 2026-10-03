@@ -123,6 +123,14 @@ public:
   }
   bool needsRtsanRt() const { return Sanitizers.has(SanitizerKind::Realtime); }
   bool TemporalTBI = false;
+  enum class TBIStorage { Shadow, LastByte, PriorByte };
+  TBIStorage Storage = TBIStorage::Shadow;
+  bool needsFlexFatTBILastByteRt() const {
+    return TemporalTBI && Storage == TBIStorage::LastByte;
+  }
+  bool needsFlexFatTBIPriorByteRt() const {
+    return TemporalTBI && Storage == TBIStorage::PriorByte;
+  }
   bool needsFlexFatTBIRt() const { return TemporalTBI; }
   bool needsFlexFatRt() const { return Sanitizers.has(SanitizerKind::FlexFat); }
 

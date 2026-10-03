@@ -35,6 +35,7 @@
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ModRef.h"
@@ -57,12 +58,27 @@ using namespace llvm;
 
 #define DEBUG_TYPE "flexfat"
 
+static cl::opt<bool> ClShareContainedGeometry(
+    "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
+    cl::desc("Share temporal geometry for accesses proven within an allocation"));
+static cl::opt<bool> ClVersionTBILoops(
+    "flexfat-version-tbi-loops", cl::Hidden, cl::init(false),
+    cl::desc("Extend TBI loop versioning with grouped access ranges"));
+
 STATISTIC(NumInstrumentedLoads, "Number of loads instrumented");
 STATISTIC(NumInstrumentedStores, "Number of stores instrumented");
 STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
 STATISTIC(NumInstrumentedMemIntrinsics,
           "Number of mem intrinsics instrumented");
 STATISTIC(NumInstrumentedEscapes, "Number of pointer escapes instrumented");
+STATISTIC(NumTBILoopCandidates, "Number of TBI loop candidates");
+STATISTIC(NumTBILoopEligibleAccesses, "TBI affine accesses collected");
+STATISTIC(NumTBILoopRejectedSize, "TBI loops rejected by size limits");
+STATISTIC(NumTBILoopRejectedFew, "TBI loops with too few affine accesses");
+STATISTIC(NumTBILoopRejectedTrip, "TBI loops without expandable trip counts");
+STATISTIC(NumTBILoopRejectedControl, "TBI loops with unsupported control flow");
+STATISTIC(NumTBILoopHoistedGeometry, "TBI root geometry records hoisted");
+STATISTIC(NumTBILoopRemovedSpatial, "TBI loop spatial checks removed");
 
 namespace {
 
@@ -169,6 +185,9 @@ private:
   TargetLibraryInfo TLI;
   Type *IntptrTy;
   const uint64_t TablesBase;
+  bool usesInSlotTags() const {
+    return Options.Storage != FlexFatSanitizerOptions::TBIStorage::Shadow;
+  }
   DenseMap<Value *, BoundsRecord> Bounds;
   DenseMap<Value *, Value *> RecoveredBases;
   DenseMap<Value *, Value *> SafeTableIndices;
@@ -178,10 +197,14 @@ private:
   DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> AccessGeometry;
   DenseMap<Instruction *, GeometryRecord> FastGeometry;
   SmallPtrSet<Instruction *, 16> RangeProven;
+  SmallPtrSet<BasicBlock *, 16> CountedLoopHeaders;
   bool versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                    ScalarEvolution &SE);
   void prepareLoopGeometry(ArrayRef<AccessRecord> Accesses, DominatorTree &DT,
                            LoopInfo &LI);
+  void prepareContainedGeometry(ArrayRef<AccessRecord> Accesses,
+                                DominatorTree &DT);
+  Value *getContainedAllocationRoot(const AccessRecord &Access);
   GeometryRecord &getGeometry(IRBuilder<> &B, Value *Ptr);
   GeometryRecord emitGeometry(IRBuilder<> &B, Value *Ptr, bool Temporal = true);
   void materializeTemporalGeometry(IRBuilder<> &B, GeometryRecord &G);
@@ -238,7 +261,9 @@ private:
   void emitOobCheck(IRBuilder<> &IRB, Value *PtrInt, Value *Base,
                     Value *AllocSize, uint64_t FixedAccessSize,
                     Value *DynAccessSize, Instruction *InsertBefore,
-                    CheckKind Kind);
+                    CheckKind Kind, Value *MetadataBase = nullptr,
+                    Value *MetadataSize = nullptr,
+                    Value *MetadataManaged = nullptr);
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
   // Build the IR to compute (AllocSize, Base) using runtime table lookups when
@@ -395,23 +420,49 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     Value *Base, Value *AllocSize,
                                     uint64_t FixedAccessSize,
                                     Value *DynAccessSize,
-                                    Instruction *InsertBefore, CheckKind Kind) {
+                                    Instruction *InsertBefore, CheckKind Kind,
+                                    Value *MetadataBase, Value *MetadataSize,
+                                    Value *MetadataManaged) {
+  Value *AccessBound = usesInSlotTags() && !isEscapeCheck(Kind)
+                           ? IRB.CreateSub(AllocSize, IRB.getInt64(1))
+                           : AllocSize;
   Value *IsOOB = nullptr;
   if (!FixedAccessSize && !DynAccessSize) {
     // The allocator reserves a trailing byte, so legal requested-object
     // one-past pointers remain strictly inside the slot. Reject slot-boundary
     // escapes before storing/reloading them can recover a neighbouring base.
     Value *Diff = IRB.CreateSub(PtrInt, Base);
-    IsOOB = IRB.CreateICmpUGE(Diff, AllocSize);
+    IsOOB = IRB.CreateICmpUGE(Diff, AccessBound);
   } else {
     Value *AccessSize = DynAccessSize;
     if (!AccessSize)
       AccessSize = ConstantInt::get(IntptrTy, FixedAccessSize);
     Value *Diff = IRB.CreateSub(PtrInt, Base);
-    Value *TooWide = IRB.CreateICmpUGT(AccessSize, AllocSize);
-    Value *Limit = IRB.CreateSub(AllocSize, AccessSize);
+    Value *TooWide = IRB.CreateICmpUGT(AccessSize, AccessBound);
+    Value *Limit = IRB.CreateSub(AccessBound, AccessSize);
     Value *PastEnd = IRB.CreateICmpUGT(Diff, Limit);
     IsOOB = IRB.CreateOr(TooWide, PastEnd);
+  }
+
+  if (usesInSlotTags() && !isEscapeCheck(Kind)) {
+    Value *Diff = IRB.CreateSub(PtrInt, MetadataBase);
+    Value *Width = DynAccessSize ? DynAccessSize
+                                 : ConstantInt::get(IntptrTy, FixedAccessSize);
+    Value *WithinSlot = IRB.CreateAnd(
+        MetadataManaged, IRB.CreateICmpULT(Diff, MetadataSize));
+    Value *MetadataOffset = IRB.CreateSub(MetadataSize, IRB.getInt64(1));
+    Value *TouchesMetadata = IRB.CreateAnd(
+        WithinSlot,
+        IRB.CreateICmpUGT(Width, IRB.CreateSub(MetadataOffset, Diff)));
+    Instruction *Failure = SplitBlockAndInsertIfThen(
+        TouchesMetadata, InsertBefore, /*Unreachable=*/true);
+    markNoSanitize(Failure);
+    IRBuilder<> Fatal(Failure);
+    Fatal.SetNoSanitizeMetadata();
+    Fatal.CreateCall(getReportOobFn(),
+                     {PtrInt, MetadataBase, MetadataOffset,
+                      Fatal.getInt8(isWriteCheck(Kind))});
+    IRB.SetInsertPoint(InsertBefore);
   }
 
   Instruction *OobTerm =
@@ -422,7 +473,7 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
   FunctionCallee OobFn = Options.Recover ? getWarnOobFn() : getReportOobFn();
   Type *I8Ty = Type::getInt8Ty(M.getContext());
   Value *IsWriteVal = ConstantInt::get(I8Ty, isWriteCheck(Kind) ? 1 : 0);
-  OobIRB.CreateCall(OobFn, {PtrInt, Base, AllocSize, IsWriteVal});
+  OobIRB.CreateCall(OobFn, {PtrInt, Base, AccessBound, IsWriteVal});
 }
 
 bool FlexFatSanitizer::shouldSkipInstruction(const Instruction *I) const {
@@ -651,6 +702,28 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
   if (!G.Managed)
     G.Managed = B.CreateICmpNE(G.Size, ConstantInt::getSigned(IntptrTy, -1),
                                "flexfat.managed");
+  if (usesInSlotTags()) {
+    Value *Valid = G.Managed;
+#ifdef FLEXFAT_CUSTOM_CONFIG
+    Value *Start = B.CreateShl(G.Index, B.getInt64(RegionSizeLog));
+    Value *End = B.CreateAdd(Start, B.getInt64(1ULL << RegionSizeLog));
+    Valid = B.CreateAnd(Valid, B.CreateICmpUGE(G.Base, Start));
+    Valid = B.CreateAnd(Valid,
+                        B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
+#endif
+    Value *Address = Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte
+                         ? B.CreateSub(G.Base, B.getInt64(1),
+                                       "flexfat.metadata.address")
+                         : B.CreateAdd(G.Base,
+                                       B.CreateSub(G.Size, B.getInt64(1)),
+                                       "flexfat.metadata.address");
+    Value *Sentinel = B.CreatePtrToInt(
+        M.getOrInsertGlobal("__flexfat_tbi_zero_sentinel", B.getInt8Ty()),
+        IntptrTy);
+    G.Entry = B.CreateIntToPtr(B.CreateSelect(Valid, Address, Sentinel),
+                               B.getPtrTy(), "flexfat.metadata");
+    return;
+  }
 #ifndef FLEXFAT_CUSTOM_CONFIG
   Value *Class = B.CreateSub(G.Index, B.getInt64(ManagedTableBegin));
   Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
@@ -1096,7 +1169,8 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
     bool IsStaticallyValid =
         isEscapeCheck(Kind) ? FixedAccessSize <= *PtrBounds.StaticUpperBound
                             : FixedAccessSize < *PtrBounds.StaticUpperBound;
-    if (FixedAccessSize && FixedAccessSize == *PtrBounds.StaticUpperBound)
+    if (!usesInSlotTags() && FixedAccessSize &&
+        FixedAccessSize == *PtrBounds.StaticUpperBound)
       IsStaticallyValid = true;
     if (IsStaticallyValid)
       return false;
@@ -1139,8 +1213,23 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
                                      I64Ty, RegionIndex);
   Value *AllocSize = CheckIRB->CreateZExtOrTrunc(AllocSize64, IntptrTy);
 
+  Value *MetadataBase = nullptr, *MetadataSize = nullptr;
+  Value *MetadataManaged = nullptr;
+  if (usesInSlotTags() && !isEscapeCheck(Kind)) {
+    auto Cached = Geometries.find(Ptr);
+    GeometryRecord Actual = Cached != Geometries.end() && Cached->second.Raw
+                                ? Cached->second
+                                : emitGeometry(*CheckIRB, Ptr, false);
+    MetadataBase = Actual.Base;
+    MetadataSize = Actual.Size;
+    MetadataManaged = Actual.Managed
+                          ? Actual.Managed
+                          : CheckIRB->CreateICmpNE(
+                                Actual.Size, ConstantInt::getSigned(IntptrTy, -1));
+  }
   emitOobCheck(*CheckIRB, PtrInt, BasePtrInt, AllocSize, FixedAccessSize,
-               SizeInt, CheckInsertBefore, Kind);
+               SizeInt, CheckInsertBefore, Kind, MetadataBase, MetadataSize,
+               MetadataManaged);
   return true;
 }
 
@@ -1151,12 +1240,21 @@ bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
     return false;
   }
   TypeSize AccessSize = DL.getTypeStoreSize(AccessTy);
-  if (AccessSize.isScalable())
-    return false;
   bool IsWrite =
       isa<StoreInst>(I) || isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I);
+  if (AccessSize.isScalable()) {
+    if (!usesInSlotTags())
+      return false;
+    IRBuilder<> B(I);
+    B.SetNoSanitizeMetadata();
+    return instrumentPointerCheck(I, Ptr, 0,
+                                  B.CreateTypeSize(IntptrTy, AccessSize),
+                                  IsWrite ? CheckKind::Write : CheckKind::Read);
+  }
   uint64_t CheckedSize =
-      Options.CheckWholeAccess ? AccessSize.getFixedValue() : 0;
+      (Options.CheckWholeAccess || usesInSlotTags())
+          ? AccessSize.getFixedValue()
+          : 0;
   CheckKind Kind = IsWrite ? CheckKind::Write : CheckKind::Read;
   if (!instrumentPointerCheck(I, Ptr, CheckedSize, nullptr, Kind))
     return false;
@@ -1320,7 +1418,8 @@ void FlexFatSanitizer::discoverAccesses(
     if (!Converted)
       AccessLengths[I] = Converted = B.CreateZExtOrTrunc(Length, IntptrTy);
     Accesses.push_back(
-        {I, Ptr, Converted, Write, Options.CheckWholeAccess ? Width : 0});
+        {I, Ptr, Converted, Write,
+         (Options.CheckWholeAccess || usesInSlotTags()) ? Width : 0});
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
@@ -1354,12 +1453,19 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                                    ScalarEvolution &SE) {
   if (!Options.TemporalTBI)
     return false;
+  const bool Extended = ClVersionTBILoops;
   struct RangeAccess {
     Instruction *Inst;
     Value *Root;
     int64_t Offset;
     int64_t Stride;
     uint64_t Width;
+  };
+  struct RangeGroup {
+    Value *Root;
+    int64_t Stride;
+    int64_t LowOffset;
+    int64_t HighEnd;
   };
   auto Loops = LI.getLoopsInPreorder();
   for (Loop *L : Loops) {
@@ -1368,16 +1474,34 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
         L->getLoopLatch()->getTerminator()->getMetadata(
             "flexfat.loop.versioned"))
       continue;
-    SmallVector<RangeAccess, 8> Accesses;
-    SmallPtrSet<Value *, 4> Roots;
+    bool CountStats = CountedLoopHeaders.insert(L->getHeader()).second;
+    if (CountStats)
+      ++NumTBILoopCandidates;
+    SmallVector<RangeAccess, 128> Accesses;
+    SmallVector<RangeGroup, 16> Groups;
+    SmallPtrSet<Value *, 8> Roots;
     bool Eligible = true;
+    // Keep the default small-loop path when the extended policy is enabled.
+    // Its one-access threshold is profitable for loops such as
+    // quantum_sigma_x, provided all of its stricter legality rules hold.
+    bool DefaultEligible = true;
     unsigned Instructions = 0;
     for (BasicBlock *BB : L->blocks()) {
       for (Instruction &I : *BB) {
         if (isa<DbgInfoIntrinsic>(I))
           continue;
-        if (++Instructions > 128 || I.getMetadata("flexfat.instrumented") ||
-            I.getMetadata("flexfat.temporal") || I.isEHPad()) {
+        if (++Instructions > (Extended ? 1024U : 128U)) {
+          if (CountStats)
+            ++NumTBILoopRejectedSize;
+          Eligible = false;
+          break;
+        }
+        if (Instructions > 128)
+          DefaultEligible = false;
+        if (I.getMetadata("flexfat.instrumented") ||
+            I.getMetadata("flexfat.temporal") || I.isEHPad() ||
+            isa<ResumeInst, CatchReturnInst, CleanupReturnInst,
+                IndirectBrInst>(I)) {
           Eligible = false;
           break;
         }
@@ -1385,6 +1509,14 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           auto *II = dyn_cast<IntrinsicInst>(CB);
           if (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
                       II->getIntrinsicID() != Intrinsic::lifetime_end))
+            DefaultEligible = false;
+          if ((!Extended &&
+               (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
+                        II->getIntrinsicID() != Intrinsic::lifetime_end))) ||
+              (Extended && (!isa<CallInst>(CB) || CB->cannotDuplicate() ||
+                            CB->isConvergent() ||
+                            CB->hasFnAttr(Attribute::ReturnsTwice) ||
+                            cast<CallInst>(CB)->isMustTailCall())))
             Eligible = false;
           continue;
         }
@@ -1392,30 +1524,43 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
         Type *Ty = nullptr;
         if (auto *Load = dyn_cast<LoadInst>(&I)) {
           if (Load->isAtomic()) {
-            Eligible = false;
-            break;
+            DefaultEligible = false;
+            if (!Extended)
+              Eligible = false;
+            continue;
           }
           Ptr = Load->getPointerOperand();
           Ty = Load->getType();
         } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
           if (Store->isAtomic()) {
-            Eligible = false;
-            break;
+            DefaultEligible = false;
+            if (!Extended)
+              Eligible = false;
+            continue;
           }
           Ptr = Store->getPointerOperand();
           Ty = Store->getValueOperand()->getType();
-        } else if (I.mayReadOrWriteMemory() || isa<InvokeInst>(I)) {
-          Eligible = false;
-          break;
+        } else if (I.mayReadOrWriteMemory()) {
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
         } else {
           continue;
         }
         if ((!Ty->isIntegerTy() && !Ty->isFloatingPointTy()) ||
-            !DT.dominates(BB, L->getLoopLatch()) ||
-            !DT.dominates(BB, L->getExitingBlock())) {
-          Eligible = false;
-          break;
+            DL.getTypeStoreSize(Ty).isScalable() ||
+            (!Extended &&
+             (!DT.dominates(BB, L->getLoopLatch()) ||
+              !DT.dominates(BB, L->getExitingBlock())))) {
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
         }
+        if (!DT.dominates(BB, L->getLoopLatch()) ||
+            !DT.dominates(BB, L->getExitingBlock()))
+          DefaultEligible = false;
         SmallPtrSet<Value *, 16> NonFlexFatSeen;
         if (isDefinitelyNonFlexFat(Ptr, NonFlexFatSeen))
           continue;
@@ -1425,45 +1570,109 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           auto *Step = dyn_cast<SCEVConstant>(AR->getStepRecurrence(SE));
           if (AR->getLoop() != L || !AR->isAffine() || !Step ||
               Step->getAPInt().getSignificantBits() > 64) {
-            Eligible = false;
-            break;
+            DefaultEligible = false;
+            if (!Extended)
+              Eligible = false;
+            continue;
           }
           Stride = Step->getAPInt().getSExtValue();
           Start = AR->getStart();
         } else if (!SE.isLoopInvariant(Start, L)) {
-          Eligible = false;
-          break;
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
         }
         auto *RootSCEV = dyn_cast<SCEVUnknown>(SE.getPointerBase(Start));
         if (!RootSCEV || !RootSCEV->getType()->isPointerTy() ||
             !L->isLoopInvariant(RootSCEV->getValue())) {
-          Eligible = false;
-          break;
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
         }
         auto *Offset = dyn_cast<SCEVConstant>(SE.getMinusSCEV(Start, RootSCEV));
         if (!Offset || Offset->getAPInt().getSignificantBits() > 64) {
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
+        }
+        Value *Root = RootSCEV->getValue();
+        if (auto *Def = dyn_cast<Instruction>(Root);
+            Def && !DT.dominates(Def, L->getLoopPreheader()->getTerminator())) {
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
+        }
+        int64_t OffsetValue = Offset->getAPInt().getSExtValue();
+        uint64_t Width = DL.getTypeStoreSize(Ty).getFixedValue();
+        if (Width > INT64_MAX || OffsetValue > INT64_MAX - int64_t(Width)) {
+          DefaultEligible = false;
+          if (!Extended)
+            Eligible = false;
+          continue;
+        }
+        Roots.insert(Root);
+        Accesses.push_back({&I, Root, OffsetValue, Stride, Width});
+        if (CountStats)
+          ++NumTBILoopEligibleAccesses;
+        int64_t End = OffsetValue + int64_t(Width);
+        auto Group = llvm::find_if(Groups, [&](const RangeGroup &G) {
+          return G.Root == Root && G.Stride == Stride;
+        });
+        if (!Extended || Group == Groups.end())
+          Groups.push_back({Root, Stride, OffsetValue, End});
+        else {
+          Group->LowOffset = std::min(Group->LowOffset, OffsetValue);
+          Group->HighEnd = std::max(Group->HighEnd, End);
+        }
+        if (Accesses.size() > (Extended ? 128U : 8U) ||
+            Roots.size() > (Extended ? 8U : 4U) ||
+            Groups.size() > (Extended ? 16U : 8U)) {
+          if (CountStats)
+            ++NumTBILoopRejectedSize;
           Eligible = false;
           break;
         }
-        Value *Root = RootSCEV->getValue();
-        Roots.insert(Root);
-        Accesses.push_back({&I, Root, Offset->getAPInt().getSExtValue(), Stride,
-                            DL.getTypeStoreSize(Ty).getFixedValue()});
       }
       if (!Eligible)
         break;
     }
-    if (!Eligible || Accesses.empty() || Accesses.size() > 8 ||
-        Roots.size() > 4)
+    if (!Eligible) {
+      if (CountStats && Instructions <= (Extended ? 1024U : 128U) &&
+          Accesses.size() <= (Extended ? 128U : 8U) &&
+          Roots.size() <= (Extended ? 8U : 4U) &&
+          Groups.size() <= (Extended ? 16U : 8U))
+        ++NumTBILoopRejectedControl;
       continue;
+    }
+    if (Instructions > (Extended ? 1024U : 128U) ||
+        Accesses.size() > (Extended ? 128U : 8U) ||
+        Roots.size() > (Extended ? 8U : 4U) ||
+        Groups.size() > (Extended ? 16U : 8U)) {
+      if (CountStats)
+        ++NumTBILoopRejectedSize;
+      continue;
+    }
+    if (Accesses.empty() ||
+        (Extended && Accesses.size() < 4 && !DefaultEligible)) {
+      if (CountStats)
+        ++NumTBILoopRejectedFew;
+      continue;
+    }
     SCEVExpander Exp(SE, "flexfat.trip");
     const SCEV *Backedges = SE.getBackedgeTakenCount(L);
     if (isa<SCEVCouldNotCompute>(Backedges) ||
         !SE.isLoopInvariant(Backedges, L) ||
         SE.getTypeSizeInBits(Backedges->getType()) > 64 ||
         !Exp.isSafeToExpandAt(Backedges,
-                              L->getLoopPreheader()->getTerminator()))
+                              L->getLoopPreheader()->getTerminator())) {
+      if (CountStats)
+        ++NumTBILoopRejectedTrip;
       continue;
+    }
 
     // A constant trip count within a known allocation needs neither a range
     // guard nor a clone. Use wide signed arithmetic for the static proof; even
@@ -1490,19 +1699,20 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
         DenseMap<Value *, GeometryRecord> RootGeometry;
         for (Value *Root : Roots)
           RootGeometry[Root] = emitGeometry(B, Root);
+        NumTBILoopHoistedGeometry += Roots.size();
         for (const RangeAccess &A : Accesses) {
           FastGeometry[A.Inst] = RootGeometry.find(A.Root)->second;
           RangeProven.insert(A.Inst);
         }
+        NumTBILoopRemovedSpatial += Accesses.size();
         L->getLoopLatch()->getTerminator()->setMetadata(
             "flexfat.loop.versioned", getInstrumentedMetadata());
         return true;
       }
     }
 
-    // The preheader is reached only when this loop executes. All covered
-    // accesses dominate both its latch and exiting block, including iteration
-    // 0.
+    // Check the entire affine range before entering either loop version.
+    // Conditional accesses are covered even on iterations that skip them.
     BasicBlock *Guard = L->getLoopPreheader();
     Value *Count = Exp.expandCodeFor(Backedges, Backedges->getType(),
                                      Guard->getTerminator());
@@ -1526,23 +1736,35 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
       Value *End = B.CreateAdd(Start, B.getInt64(1ULL << RegionSizeLog));
       Valid = B.CreateAnd(Valid, G.Managed);
       Valid = B.CreateAnd(Valid, B.CreateICmpUGE(G.Base, Start));
+      if (Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte)
+        Valid = B.CreateAnd(
+            Valid, B.CreateICmpUGE(G.Base, B.CreateAdd(Start, G.Size)));
       Valid =
           B.CreateAnd(Valid, B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
     }
-    for (const RangeAccess &A : Accesses) {
-      const GeometryRecord &G = RootGeometry.find(A.Root)->second;
-      Value *Span =
-          Checked(Intrinsic::smul_with_overflow, Count, B.getInt64(A.Stride));
-      Value *First =
-          Checked(Intrinsic::sadd_with_overflow, G.Raw, B.getInt64(A.Offset));
-      Value *Last = Checked(Intrinsic::sadd_with_overflow, First, Span);
-      Value *Low = A.Stride < 0 ? Last : First;
-      Value *High = A.Stride < 0 ? First : Last;
-      Value *Limit =
-          Checked(Intrinsic::uadd_with_overflow, High, B.getInt64(A.Width));
+    NumTBILoopHoistedGeometry += Roots.size();
+    for (const RangeGroup &Group : Groups) {
+      const GeometryRecord &G = RootGeometry.find(Group.Root)->second;
+      Value *Span = Checked(Intrinsic::smul_with_overflow, Count,
+                            B.getInt64(Group.Stride));
+      Value *First = Checked(Intrinsic::sadd_with_overflow, G.Raw,
+                             B.getInt64(Group.LowOffset));
+      Value *Low = Group.Stride < 0
+                       ? Checked(Intrinsic::sadd_with_overflow, First, Span)
+                       : First;
+      Value *High = Checked(Intrinsic::sadd_with_overflow, G.Raw,
+                            B.getInt64(Group.HighEnd));
+      Value *Limit = Group.Stride < 0
+                         ? High
+                         : Checked(Intrinsic::sadd_with_overflow, High, Span);
       Valid = B.CreateAnd(Valid, B.CreateICmpUGE(Low, G.Base));
       Valid = B.CreateAnd(Valid,
-                          B.CreateICmpULE(Limit, B.CreateAdd(G.Base, G.Size)));
+                          B.CreateICmpULE(
+                              Limit,
+                              B.CreateAdd(G.Base,
+                                          usesInSlotTags()
+                                              ? B.CreateSub(G.Size, B.getInt64(1))
+                                              : G.Size)));
     }
     formLCSSARecursively(*L, DT, &LI, &SE);
     BasicBlock *PH = SplitBlock(Guard, Guard->getTerminator(), &DT, &LI,
@@ -1573,6 +1795,7 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
       FastGeometry[Clone].Managed = B.getTrue();
       RangeProven.insert(Clone);
     }
+    NumTBILoopRemovedSpatial += Accesses.size();
     for (Loop *Version : {L, Fast}) {
       Version->getLoopLatch()->getTerminator()->setMetadata(
           "flexfat.loop.versioned", getInstrumentedMetadata());
@@ -1602,16 +1825,8 @@ void FlexFatSanitizer::prepareLoopGeometry(ArrayRef<AccessRecord> Accesses,
       continue;
     Value *Root = A.Pointer;
     if (!L->isLoopInvariant(Root)) {
-      // Only statically contained constant offsets into known allocations.
-      // Inbounds alone is not an allocation-slot containment proof.
-      APInt Offset(DL.getIndexTypeSizeInBits(Root->getType()), 0);
-      Root = Root->stripAndAccumulateConstantOffsets(DL, Offset, true);
-      auto Bound = getAllocationUpperBound(Root);
-      auto *Length = dyn_cast<ConstantInt>(A.Length);
-      if (!L->isLoopInvariant(Root) || !isAllocationResult(Root) || !Bound ||
-          !Length || Offset.isNegative() || Offset.getActiveBits() > 64 ||
-          Offset.getZExtValue() > *Bound ||
-          Length->getZExtValue() > *Bound - Offset.getZExtValue())
+      Root = getContainedAllocationRoot(A);
+      if (!Root || !L->isLoopInvariant(Root))
         continue;
     }
     BasicBlock *PH = L->getLoopPreheader();
@@ -1633,6 +1848,46 @@ void FlexFatSanitizer::prepareLoopGeometry(ArrayRef<AccessRecord> Accesses,
   }
 }
 
+// A constant-offset access within the requested allocation remains in the
+// root's slot. Share immutable metadata geometry, but continue to observe the
+// generation at every access and use the actual pointer's tag for comparison.
+Value *FlexFatSanitizer::getContainedAllocationRoot(
+    const AccessRecord &Access) {
+  Value *Root = Access.Pointer;
+  APInt Offset(DL.getIndexTypeSizeInBits(Root->getType()), 0);
+  Root = Root->stripAndAccumulateConstantOffsets(DL, Offset, true);
+  if (!isAllocationResult(Root) || Offset.isNegative() ||
+      Offset.getActiveBits() > 64)
+    return nullptr;
+  auto Bound = getAllocationUpperBound(Root);
+  auto *Length = dyn_cast<ConstantInt>(Access.Length);
+  if (!Bound || !Length || Length->getValue().getActiveBits() > 64 ||
+      Offset.getZExtValue() > *Bound ||
+      Length->getZExtValue() > *Bound - Offset.getZExtValue())
+    return nullptr;
+  return Root;
+}
+
+void FlexFatSanitizer::prepareContainedGeometry(
+    ArrayRef<AccessRecord> Accesses, DominatorTree &DT) {
+  if (!ClShareContainedGeometry)
+    return;
+  for (const AccessRecord &Access : Accesses) {
+    if (FastGeometry.contains(Access.Inst) ||
+        AccessGeometry.count({Access.Inst, Access.Pointer}))
+      continue;
+    Value *Root = getContainedAllocationRoot(Access);
+    // Materializing geometry after an invoke can split its normal edge and
+    // invalidate the dominator tree used for the remaining accesses.
+    if (!Root || Root == Access.Pointer || isa<InvokeInst>(Root))
+      continue;
+    if (auto *Def = dyn_cast<Instruction>(Root);
+        Def && !DT.dominates(Def, Access.Inst))
+      continue;
+    AccessGeometry[{Access.Inst, Access.Pointer}] = getTemporalGeometry(Root);
+  }
+}
+
 bool FlexFatSanitizer::instrumentFunction(Function &F) {
   if (!shouldInstrumentFunction(F))
     return false;
@@ -1646,6 +1901,7 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   AccessGeometry.clear();
   FastGeometry.clear();
   RangeProven.clear();
+  CountedLoopHeaders.clear();
   BoundsIRGeneration = 0;
   bool Modified = false;
   DominatorTree DT(F);
@@ -1700,6 +1956,7 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   LI.releaseMemory();
   LI.analyze(DT);
   prepareLoopGeometry(LoopAccesses, DT, LI);
+  prepareContainedGeometry(TemporalAccesses, DT);
   // Materialize current-address geometry once at its SSA definition when no
   // range/loop proof supplied geometry. Keep it separate from the companion
   // allocation base: a derived address may have crossed a slot or region.
@@ -1823,13 +2080,31 @@ bool FlexFatSanitizer::run() {
                 TemporalFunctions.contains(Callee))
               Modified |= invalidateTemporalAttributes(*CB);
 
-  // POW2 v4 uses a fixed sparse shadow; custom layouts retain v3 biases.
+  // In-slot layouts have distinct link ABIs from shadow and each other.
+  using TBIStorage = FlexFatSanitizerOptions::TBIStorage;
+  const auto Storage = Options.Storage;
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  constexpr const char *CtorName = "__flexfat_tbi_ctor_v3";
-  constexpr const char *ABIName = "__flexfat_tbi_abi_v3";
+  const char *CtorName = Storage == TBIStorage::PriorByte
+                             ? "__flexfat_tbi_ctor_prior_byte_custom_v2"
+                         : Storage == TBIStorage::LastByte
+                             ? "__flexfat_tbi_ctor_last_byte_custom_v1"
+                             : "__flexfat_tbi_ctor_v3";
+  const char *ABIName = Storage == TBIStorage::PriorByte
+                            ? "__flexfat_tbi_abi_prior_byte_custom_v2"
+                        : Storage == TBIStorage::LastByte
+                            ? "__flexfat_tbi_abi_last_byte_custom_v1"
+                            : "__flexfat_tbi_abi_v3";
 #else
-  constexpr const char *CtorName = "__flexfat_tbi_ctor_v4";
-  constexpr const char *ABIName = "__flexfat_tbi_abi_v4";
+  const char *CtorName = Storage == TBIStorage::PriorByte
+                             ? "__flexfat_tbi_ctor_prior_byte_pow2_v2"
+                         : Storage == TBIStorage::LastByte
+                             ? "__flexfat_tbi_ctor_last_byte_pow2_v1"
+                             : "__flexfat_tbi_ctor_v4";
+  const char *ABIName = Storage == TBIStorage::PriorByte
+                            ? "__flexfat_tbi_abi_prior_byte_pow2_v2"
+                        : Storage == TBIStorage::LastByte
+                            ? "__flexfat_tbi_abi_last_byte_pow2_v1"
+                            : "__flexfat_tbi_abi_v4";
 #endif
   if (Options.TemporalTBI && !M.getFunction(CtorName)) {
     auto &Ctx = M.getContext();

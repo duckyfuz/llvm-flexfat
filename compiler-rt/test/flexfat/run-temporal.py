@@ -14,6 +14,8 @@ parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
 parser.add_argument('--skip-timings', action='store_true',
                     help='retained for compatibility; this harness now runs correctness checks only')
+parser.add_argument('--storage', choices=['shadow', 'last-byte', 'prior-byte'],
+                    default='shadow')
 args = parser.parse_args()
 results = []
 
@@ -31,7 +33,8 @@ for build in args.builds:
     build = build.resolve()
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
-    common = ['-fsanitize=flexfat', '-mllvm', '-flexfat-tbi=true']
+    common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
+              '-fsanitize-flexfat-tbi-storage=' + args.storage]
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
@@ -44,7 +47,11 @@ for build in args.builds:
     else:
         sizes = [1 << n for n in range(4, 31)]
         region_log, region_base = 32, 0x100000000000
-    abi = '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v4'
+    abi = (('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
+            '__flexfat_tbi_abi_prior_byte_pow2_v2') if args.storage == 'prior-byte' else
+           ('__flexfat_tbi_abi_last_byte_custom_v1' if custom else
+            '__flexfat_tbi_abi_last_byte_pow2_v1') if args.storage == 'last-byte' else
+           '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v4')
     metadata_bytes = 0
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
@@ -52,9 +59,12 @@ for build in args.builds:
         metadata_bytes += ((start + (1 << region_log) - 1) // size - first + 1
                            if custom else (1 << region_log) // size)
     page = os.sysconf('SC_PAGE_SIZE')
-    reservation_bytes = (((metadata_bytes + page - 1) // page) * page if custom
+    reservation_bytes = (0 if args.storage != 'shadow' else
+                         ((metadata_bytes + page - 1) // page) * page if custom
                          else page + sum((((1 << region_log) // size + page - 1) // page) * page
                                          for size in sizes))
+    if args.storage != 'shadow':
+        metadata_bytes = 0
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
@@ -105,15 +115,16 @@ for build in args.builds:
              root/'TestCases/temporal/loops.cpp', '-o', exe])
         run([exe, 'width'], 'out-of-bounds'); checks += 1
 
-        # Arithmetic validates the bias table and the POW2 fixed shadow.
-        arithmetic_obj = d/'arithmetic.o'
-        config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
-        if custom:
-            config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
-                             '-I'+str(build/'lib/Transforms/Instrumentation')]
-        run([cxx, '-O2', *config_flags, '-c', root/'TestCases/temporal/tbi-slot-arithmetic.cpp',
-             '-o', arithmetic_obj])
-        run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
+        if args.storage == 'shadow':
+            # Arithmetic validates the bias table and the POW2 fixed shadow.
+            arithmetic_obj = d/'arithmetic.o'
+            config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
+            if custom:
+                config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
+                                 '-I'+str(build/'lib/Transforms/Instrumentation')]
+            run([cxx, '-O2', *config_flags, '-c', root/'TestCases/temporal/tbi-slot-arithmetic.cpp',
+                 '-o', arithmetic_obj])
+            run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
 
         # Old TBI objects must be rebuilt: both old marker versions fail.
         old_obj = d/'v1.o'
@@ -140,7 +151,10 @@ for build in args.builds:
         old_runtime = d/'old-runtime.c'
         old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n'
                                'void __flexfat_tbi_abi_v2(void) {}\n' +
-                               ('' if custom else 'void __flexfat_tbi_abi_v3(void) {}\n'))
+                               ('' if custom else 'void __flexfat_tbi_abi_v3(void) {}\n') +
+                               ('void __flexfat_tbi_abi_prior_byte_' +
+                                ('custom' if custom else 'pow2') + '_v1(void) {}\n'
+                                if args.storage == 'prior-byte' else ''))
         run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
             abi)
         checks += 4
@@ -152,7 +166,9 @@ for build in args.builds:
         # forces allocations/memory operations through initialization guards.
         startup = d/'startup.o'
         run([cc, '-fno-builtin', '-c', root/'TestCases/temporal/tbi-startup.c', '-o', startup])
-        runtime = run([cc, '-print-file-name=libclang_rt.flexfat_tbi.a']).strip()
+        runtime_name = ('flexfat_tbi_' + args.storage.replace('-', '_')
+                        if args.storage != 'shadow' else 'flexfat_tbi')
+        runtime = run([cc, '-print-file-name=libclang_rt.' + runtime_name + '.a']).strip()
         # The driver normally puts its runtime first. Explicit ordering places
         # this test hook ahead of the runtime's preinit entry.
         run([cc, startup, '-Wl,--whole-archive', runtime,
@@ -172,7 +188,51 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
         run([cc, *common, '-O2', main, '-L'+str(d), '-ltest', '-Wl,-rpath,'+str(d), '-o', exe])
         run([exe]); run([exe, 'stale'], 'operation = read'); checks += 2
 
-        results.append({'build': str(build), 'checks': checks,
+        if args.storage == 'last-byte':
+            case = root/'TestCases/temporal/last_byte.cpp'
+            config_flags = ['-I'+str(root.parent.parent/'lib')]
+            if custom:
+                config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
+                                 '-I'+str(build/'lib/Transforms/Instrumentation')]
+            for flags, name in [(['-O0'], 'O0'), (['-O2'], 'O2'),
+                                (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right')]:
+                run([cxx, *common, *flags, *config_flags, '-fno-builtin', case, '-o', exe])
+                run([exe]); run([exe, 'onepast']); run([exe, 'maps']); checks += 3
+                for mode in ['byte', 'wide', 'memset', 'adjacent-tag']:
+                    run([exe, mode], 'out-of-bounds'); checks += 1
+                print(build.name, 'last-byte', name, 'passed', flush=True)
+            run([cxx, *common, '-O2', '-fsanitize-recover=flexfat',
+                 *config_flags, '-fno-builtin', case, '-o', exe])
+            for mode in ['byte', 'wide', 'memset', 'adjacent-tag']:
+                run([exe, mode], 'out-of-bounds'); checks += 1
+            p = subprocess.run([str(exe), 'recover-other'], text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=90)
+            assert p.returncode == 0 and 'FLEXFAT WARNING' in p.stderr, (p.returncode, p.stderr)
+            checks += 1
+
+        if args.storage == 'prior-byte':
+            case = root/'TestCases/temporal/prior_byte.cpp'
+            config_flags = ['-I'+str(root.parent.parent/'lib')]
+            if custom:
+                config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
+                                 '-I'+str(build/'lib/Transforms/Instrumentation')]
+            for flags, name in [(['-O0'], 'O0'), (['-O2'], 'O2')]:
+                run([cxx, *common, *flags, *config_flags, '-fno-builtin',
+                     case, '-o', exe])
+                run([exe]); checks += 1
+                for mode in ['tag-byte', 'adjacent-tag', 'memset']:
+                    run([exe, mode], 'out-of-bounds'); checks += 1
+                print(build.name, 'prior-byte', name, 'passed', flush=True)
+        if args.storage != 'shadow':
+            mixed = d/'mixed.o'
+            run([cc, '-fsanitize=flexfat', '-fsanitize-flexfat-tbi', '-c',
+                 empty, '-o', mixed])
+            run([cc, *common, mixed, '-o', d/'mixed'],
+                '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v4')
+            checks += 1
+
+        results.append({'build': str(build), 'storage': args.storage, 'checks': checks,
                         'metadata_entry_bytes': metadata_bytes,
                         'metadata_reservation_bytes': reservation_bytes,
                         'timings': {}})

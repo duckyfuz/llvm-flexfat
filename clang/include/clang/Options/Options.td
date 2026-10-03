@@ -2539,6 +2539,9 @@ defm sanitize_flexfat_tbi : BoolOption<"f", "sanitize-flexfat-tbi",
   NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
   BothFlags<[], [ClangOption], " Linux AArch64 FlexFat temporal checking">>,
   Group<f_clang_Group>;
+def fsanitize_flexfat_tbi_storage_EQ : Joined<["-"], "fsanitize-flexfat-tbi-storage=">,
+  Group<f_clang_Group>, Visibility<[ClangOption]>,
+  HelpText<"Select FlexFat TBI tag storage: shadow, last-byte, or prior-byte">;
 defm sanitize_memory_use_after_dtor : BoolOption<"f", "sanitize-memory-use-after-dtor",
   CodeGenOpts<"SanitizeMemoryUseAfterDtor">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,

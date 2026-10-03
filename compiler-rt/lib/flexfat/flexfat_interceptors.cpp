@@ -166,7 +166,7 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     uptr old_class_size = __flexfat::GetSize((uptr)ptr);
     uptr old_base = __flexfat::GetBase((uptr)ptr);
     uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
-    uptr old_usable = old_class_size - old_offset;
+    uptr old_usable = __flexfat::UsableClassSize(old_class_size) - old_offset;
     if (old_usable < copy_size)
       copy_size = old_usable;
     internal_memcpy(new_ptr, ptr, copy_size);
@@ -183,7 +183,7 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     uptr old_class_size = __flexfat::GetSize((uptr)ptr);
     uptr old_base = __flexfat::GetBase((uptr)ptr);
     uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
-    uptr old_usable = old_class_size - old_offset;
+    uptr old_usable = __flexfat::UsableClassSize(old_class_size) - old_offset;
     uptr copy_size = old_usable < size ? old_usable : size;
     internal_memcpy(new_ptr, ptr, copy_size);
     __flexfat::Deallocate(ptr);
@@ -273,7 +273,8 @@ static char *DuplicateString(const char *src, uptr requested_limit,
   bool managed = __flexfat::IsFlexFatPointer((uptr)src);
   if (managed) {
     uptr base = __flexfat::GetBase((uptr)src);
-    uptr available = __flexfat::GetSize((uptr)src) - (__flexfat::Untag((uptr)src) - base);
+    uptr available = __flexfat::UsableClassSize(__flexfat::GetSize((uptr)src)) -
+                     (__flexfat::Untag((uptr)src) - base);
     if (!bounded || scan_limit > available)
       scan_limit = available;
   }
@@ -315,6 +316,7 @@ static inline void check_bounds(const void *ptr, uptr access_size,
   if (!__flexfat::CheckBounds((uptr)ptr, access_size)) {
     uptr start = __flexfat::Untag((uptr)ptr);
     uptr size = __flexfat::GetSize(start);
+    uptr bound = __flexfat::UsableClassSize(size);
     uptr base = __flexfat::GetBase(start);
     uptr report_ptr;
     if (access_size <= ~(uptr)0 - start) {
@@ -323,8 +325,8 @@ static inline void check_bounds(const void *ptr, uptr access_size,
       // The end of the access cannot be represented.  Report just beyond the
       // allocation instead of UINTPTR_MAX, which is printed as -1 by the
       // signed overflow diagnostic.
-      if (size <= ~(uptr)0 - base) {
-        report_ptr = base + size;
+      if (bound <= ~(uptr)0 - base) {
+        report_ptr = base + bound;
         if (report_ptr != ~(uptr)0)
           ++report_ptr;
       } else {
@@ -333,10 +335,16 @@ static inline void check_bounds(const void *ptr, uptr access_size,
         report_ptr = start;
       }
     }
-    if (__flexfat::flexfat_recover)
-      __flexfat_warn_oob(report_ptr, base, size, is_write);
+    bool metadata_access = false;
+#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+    uptr offset = start - base;
+    metadata_access = offset < size &&
+                      access_size > (size - 1) - offset;
+#endif
+    if (__flexfat::flexfat_recover && !metadata_access)
+      __flexfat_warn_oob(report_ptr, base, bound, is_write);
     else
-      __flexfat_report_oob(report_ptr, base, size, is_write);
+      __flexfat_report_oob(report_ptr, base, bound, is_write);
   }
 }
 
@@ -364,6 +372,18 @@ INTERCEPTOR(void *, memmove, void *dst, const void *src, uptr size) {
     return internal_memmove(dst, src, size);
   return REAL(memmove)(dst, src, size);
 }
+
+#if SANITIZER_INTERCEPT_MALLOC_USABLE_SIZE
+INTERCEPTOR(uptr, malloc_usable_size, void *ptr) {
+  if (!ptr)
+    return 0;
+  if (DlsymAlloc::PointerIsMine(ptr))
+    return DlsymAlloc::GetSize(ptr);
+  if (__flexfat::IsFlexFatPointer((uptr)ptr))
+    return __flexfat_get_usable_size((uptr)ptr);
+  return REAL(malloc_usable_size)(ptr);
+}
+#endif
 
 #if SANITIZER_APPLE
 INTERCEPTOR(uptr, malloc_size, void *ptr) {
@@ -402,6 +422,9 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(memset);
   INTERCEPT_FUNCTION(memcpy);
   INTERCEPT_FUNCTION(memmove);
+#if SANITIZER_INTERCEPT_MALLOC_USABLE_SIZE
+  INTERCEPT_FUNCTION(malloc_usable_size);
+#endif
 #if SANITIZER_APPLE
   INTERCEPT_FUNCTION(malloc_size);
 #endif

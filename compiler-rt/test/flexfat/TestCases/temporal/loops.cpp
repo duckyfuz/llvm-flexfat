@@ -1,9 +1,13 @@
 // REQUIRES: flexfat-tbi
-// RUN: %clangxx_flexfat_tbi -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops %s -o %t && %t
+// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-version-tbi-loops=true -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops %s -o %t && %t
 // RUN: not %t stale 2>&1 | FileCheck %s
 // RUN: not %t overflow 2>&1 | FileCheck %s
+// RUN: not %t quad-call 2>&1 | FileCheck %s
+// RUN: not %t quad-cross 2>&1 | FileCheck %s --check-prefix=CROSS
+// RUN: not %t quad-overflow 2>&1 | FileCheck %s --check-prefix=CROSS
 // CHECK: temporal violation
 // CHECK: generation mismatch
+// CROSS: out-of-bounds error detected
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -49,6 +53,29 @@ __attribute__((noinline)) uint64_t ordinary(uint64_t *p, size_t n) {
   for (size_t i = 0; i < n; ++i) sum += p[i];
   return sum;
 }
+__attribute__((noinline)) uint64_t four_offsets(volatile uint64_t *p, size_t n) {
+  uint64_t sum = 0;
+  for (size_t i = 0; i < n; ++i) {
+    if (i & 1) sum += p[i];
+    sum += p[i+1] + p[i+2] + p[i+3] + p[i+4];
+  }
+  return sum;
+}
+__attribute__((noinline)) uint64_t four_reverse(volatile uint64_t *p, size_t n) {
+  uint64_t sum = 0;
+  for (size_t i = 0; i < n; ++i)
+    sum += p[-(intptr_t)i] + p[1-(intptr_t)i] +
+           p[2-(intptr_t)i] + p[3-(intptr_t)i];
+  return sum;
+}
+__attribute__((noinline)) uint64_t four_after_free(uint64_t *p, size_t n) {
+  uint64_t sum = 0;
+  for (size_t i = 0; i < n; ++i) {
+    if (i == 1) free(p);
+    sum += p[i] + p[i+1] + p[i+2] + p[i+3];
+  }
+  return sum;
+}
 int main(int argc, char **argv) {
   uint64_t *a = (uint64_t *)malloc(32*sizeof(uint64_t));
   uint64_t *b = (uint64_t *)malloc(32*sizeof(uint64_t));
@@ -75,6 +102,14 @@ int main(int argc, char **argv) {
       abort();
     }
     if (!strcmp(argv[1], "call")) return after_free(a, 3);
+    if (!strcmp(argv[1], "quad-call")) return four_after_free(a, 3);
+    if (!strcmp(argv[1], "quad-cross")) {
+      uintptr_t base = __flexfat_get_base((uintptr_t)a);
+      uintptr_t size = __flexfat_get_size((uintptr_t)a);
+      return four_offsets((uint64_t *)(base + size - 32), 5);
+    }
+    if (!strcmp(argv[1], "quad-overflow"))
+      return four_offsets(a, UINT64_C(1)<<62);
     free(a);
     if (!strcmp(argv[1], "reuse")) {
       volatile uint64_t *replacement = (uint64_t *)malloc(32*sizeof(uint64_t));
@@ -89,10 +124,14 @@ int main(int argc, char **argv) {
     return scan(a, 8);
   }
   assert(scan((uint64_t *)UINT64_MAX, 0) == 0);
+  assert(four_offsets((uint64_t *)UINT64_MAX, 0) == 0);
   assert(fixed(a, 8) == 8);
   assert(fixed((uint64_t *)UINT64_MAX, 0) == 0);
   assert(ordinary(a, 32) == 528);
   assert(scan(a, 32) == 528);
+  assert(four_offsets(a, 28) == 2114);
+  assert(four_reverse(a+28, 26) == 1872);
+  assert(four_offsets(foreign, 28) == 2114);
   assert(scan(a+4, 8) == 68);
   assert(backwards(a+11, 8) == 68);
   assert(scan(foreign, 32) == 528); // Guard fails normally for unmanaged root.

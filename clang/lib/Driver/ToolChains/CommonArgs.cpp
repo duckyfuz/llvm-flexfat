@@ -1729,7 +1729,12 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
       StaticRuntimes.push_back("scudo_standalone_cxx");
   }
   if (SanArgs.needsFlexFatRt())
-    StaticRuntimes.push_back(SanArgs.needsFlexFatTBIRt() ? "flexfat_tbi" : "flexfat");
+    StaticRuntimes.push_back(SanArgs.needsFlexFatTBIPriorByteRt()
+                                 ? "flexfat_tbi_prior_byte"
+                             : SanArgs.needsFlexFatTBILastByteRt()
+                                 ? "flexfat_tbi_last_byte"
+                                 : SanArgs.needsFlexFatTBIRt() ? "flexfat_tbi"
+                                                                : "flexfat");
   if (SanArgs.needsUbsanLoopDetectRt())
     NonWholeStaticRuntimes.push_back("ubsan_loop_detect");
 }

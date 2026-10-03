@@ -133,6 +133,22 @@ static cl::opt<bool> FlexFatCheckWholeAccess(
 static cl::opt<bool> FlexFatTBI(
     "flexfat-tbi", cl::init(false),
     cl::desc("Enable FlexFat TBI temporal checking"));
+static cl::opt<FlexFatSanitizerOptions::TBIStorage> FlexFatTBIStorage(
+    "flexfat-tbi-storage",
+    cl::init(FlexFatSanitizerOptions::TBIStorage::Shadow),
+    cl::desc("Select FlexFat TBI generation storage"),
+    cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow,
+                          "shadow", "Shadow storage"),
+               clEnumValN(FlexFatSanitizerOptions::TBIStorage::LastByte,
+                          "last-byte", "Final byte of each slot"),
+               clEnumValN(FlexFatSanitizerOptions::TBIStorage::PriorByte,
+                          "prior-byte", "Byte before each slot base")));
+static cl::opt<bool> FlexFatTBILastByte(
+    "flexfat-tbi-last-byte", cl::init(false),
+    cl::desc("Store FlexFat TBI generations in the final byte of each slot"));
+static cl::opt<bool> FlexFatTBIPriorByte(
+    "flexfat-tbi-prior-byte", cl::init(false),
+    cl::desc("Store FlexFat TBI generations just before each slot base"));
 
 static cl::opt<bool> FlexFatRecover(
     "flexfat-recover", cl::init(false),
@@ -825,6 +841,21 @@ static void addSanitizers(const Triple &TargetTriple,
     FlexFatOpts.TemporalTBI = FlexFatTBI.getNumOccurrences()
                                  ? FlexFatTBI
                                  : CodeGenOpts.SanitizeFlexFatTBI;
+    // Each spelling is an assignment. The final command-line assignment wins.
+    unsigned StoragePosition = FlexFatTBIStorage.getPosition();
+    FlexFatOpts.Storage = FlexFatTBIStorage;
+    if (FlexFatTBILastByte.getPosition() > StoragePosition) {
+      StoragePosition = FlexFatTBILastByte.getPosition();
+      FlexFatOpts.Storage = FlexFatTBILastByte
+                                ? FlexFatSanitizerOptions::TBIStorage::LastByte
+                                : FlexFatSanitizerOptions::TBIStorage::Shadow;
+    }
+    if (FlexFatTBIPriorByte.getPosition() > StoragePosition)
+      FlexFatOpts.Storage = FlexFatTBIPriorByte
+                                ? FlexFatSanitizerOptions::TBIStorage::PriorByte
+                                : FlexFatSanitizerOptions::TBIStorage::Shadow;
+    if (!FlexFatOpts.TemporalTBI)
+      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::Shadow;
     FlexFatOpts.Mode = FlexFatMode;
     FlexFatOpts.AllocationAlignment = FlexFatAlignment;
     FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
