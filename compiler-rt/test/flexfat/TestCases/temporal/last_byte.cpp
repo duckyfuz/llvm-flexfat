@@ -3,8 +3,8 @@
 // RUN: %run %t
 // RUN: %run %t onepast
 // RUN: %run %t maps
+// RUN: %run %t wide
 // RUN: not %run %t byte 2>&1 | FileCheck %s
-// RUN: not %run %t wide 2>&1 | FileCheck %s
 // RUN: not %run %t memset 2>&1 | FileCheck %s
 // CHECK: out-of-bounds
 #include <assert.h>
@@ -36,8 +36,12 @@ int main(int argc, char **argv) {
   char *last = opaque((char *)((uintptr_t)p + size - 1));
   if (argc > 1 && !strcmp(argv[1], "byte"))
     return *(volatile char *)last;
-  if (argc > 1 && !strcmp(argv[1], "wide"))
-    return *(volatile int *)(last - 3);
+  if (argc > 1 && !strcmp(argv[1], "wide")) {
+    // Default scalar checks test the starting byte. The wide read overlaps
+    // the reserved generation byte without starting at it.
+    (void)*(volatile int *)(last - 3);
+    return 0;
+  }
   if (argc > 1 && !strcmp(argv[1], "memset")) {
     __interceptor_memset(p, 0, size);
     return 0;

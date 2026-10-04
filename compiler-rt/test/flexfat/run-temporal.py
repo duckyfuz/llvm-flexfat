@@ -197,13 +197,15 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
             for flags, name in [(['-O0'], 'O0'), (['-O2'], 'O2'),
                                 (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right')]:
                 run([cxx, *common, *flags, *config_flags, '-fno-builtin', case, '-o', exe])
-                run([exe]); run([exe, 'onepast']); run([exe, 'maps']); checks += 3
-                for mode in ['byte', 'wide', 'memset', 'adjacent-tag']:
+                run([exe]); run([exe, 'onepast']); run([exe, 'maps'])
+                run([exe, 'wide']); checks += 4
+                for mode in ['byte', 'memset', 'adjacent-tag']:
                     run([exe, mode], 'out-of-bounds'); checks += 1
                 print(build.name, 'last-byte', name, 'passed', flush=True)
             run([cxx, *common, '-O2', '-fsanitize-recover=flexfat',
                  *config_flags, '-fno-builtin', case, '-o', exe])
-            for mode in ['byte', 'wide', 'memset', 'adjacent-tag']:
+            run([exe, 'wide']); checks += 1
+            for mode in ['byte', 'memset', 'adjacent-tag']:
                 run([exe, mode], 'out-of-bounds'); checks += 1
             p = subprocess.run([str(exe), 'recover-other'], text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -22,7 +22,6 @@ define i64 @same_pointer(ptr %p) {
 ; CHECK: load atomic i8, ptr [[ENTRY]] acquire
 ; CHECK: load volatile i64, ptr %p
 ; CHECK-NOT: load i64, ptr
-; CHECK-NOT: and i64 {{.*}}, 72057594037927935
 ; CHECK: load atomic i8, ptr [[ENTRY]] acquire
 ; CHECK: load volatile i64, ptr %p
 ; CUSTOM-LABEL: @same_pointer(
@@ -41,12 +40,13 @@ define i64 @same_pointer(ptr %p) {
   ret i64 %sum
 }
 
-; An arbitrary GEP may cross a slot, so it needs its own current-address
-; geometry. Both uses share that geometry while retaining separate acquires.
+; A fatal spatial check proves that an arbitrary GEP is in its companion
+; slot. Both uses share that slot's geometry and retain separate acquires.
 define i8 @derived_pointer(ptr %p, i64 %n) {
 ; CHECK-LABEL: @derived_pointer(
-; CHECK: %q = getelementptr i8, ptr %p, i64 %n
 ; CHECK: [[DERIVED:%flexfat.metadata[0-9]*]] = inttoptr i64 {{.*}} to ptr
+; CHECK: %q = getelementptr i8, ptr %p, i64 %n
+; CHECK: call void @__flexfat_report_oob
 ; CHECK: load atomic i8, ptr [[DERIVED]] acquire
 ; CHECK: %a = load volatile i8, ptr %q
 ; CHECK-NOT: load i64, ptr
@@ -55,8 +55,9 @@ define i8 @derived_pointer(ptr %p, i64 %n) {
 ; CHECK: %b = load volatile i8, ptr %q
 ; CUSTOM-LABEL: @derived_pointer(
 ; CUSTOM: mul i128
+; CUSTOM: %flexfat.metadata = inttoptr
 ; CUSTOM: %q = getelementptr i8, ptr %p, i64 %n
-; CUSTOM: mul i128
+; CUSTOM: call void @__flexfat_report_oob
 ; CUSTOM: load atomic i8
 ; CUSTOM-NOT: mul i128
 ; CUSTOM: load atomic i8
@@ -69,6 +70,20 @@ define i8 @derived_pointer(ptr %p, i64 %n) {
   ret i8 %sum
 }
 
+; A premarked spatial access has no local proof that its derived pointer
+; stayed in the companion slot, so temporal geometry follows that pointer.
+define i8 @marked_derived(ptr %p, i64 %n) {
+; CHECK-LABEL: @marked_derived(
+; CHECK: %q = getelementptr i8, ptr %p, i64 %n
+; CHECK: %flexfat.metadata{{[0-9]*}} = inttoptr
+; CHECK-NOT: call void @__flexfat_report_oob
+; CHECK: load atomic i8
+; CHECK: %v = load i8, ptr %q
+  %q = getelementptr i8, ptr %p, i64 %n
+  %v = load i8, ptr %q, !flexfat.instrumented !0
+  ret i8 %v
+}
+
 ; Spatial-only uses in a TBI module do not request temporal metadata.
 define ptr @escape_only(ptr %p, i64 %offset) {
 ; CHECK-LABEL: @escape_only(
@@ -78,3 +93,20 @@ define ptr @escape_only(ptr %p, i64 %offset) {
   %q = getelementptr i8, ptr %p, i64 %offset
   ret ptr %q
 }
+
+; A constant address has a constant companion base. Temporal metadata must
+; come from the access pointer without trying to recover that constant base.
+define i8 @constant_address() {
+; CHECK-LABEL: @constant_address(
+; CHECK: [[CONST_ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
+; CHECK: load atomic i8, ptr [[CONST_ENTRY]] acquire
+; CHECK: load volatile i8, ptr inttoptr (i64 17592186044428 to ptr)
+; CUSTOM-LABEL: @constant_address(
+; CUSTOM: [[CONST_ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
+; CUSTOM: load atomic i8, ptr [[CONST_ENTRY]] acquire
+; CUSTOM: load volatile i8, ptr inttoptr (i64 17592186044428 to ptr)
+  %v = load volatile i8, ptr inttoptr (i64 17592186044428 to ptr)
+  ret i8 %v
+}
+
+!0 = !{}

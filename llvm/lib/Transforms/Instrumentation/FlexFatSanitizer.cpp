@@ -190,6 +190,7 @@ private:
   }
   DenseMap<Value *, BoundsRecord> Bounds;
   DenseMap<Value *, Value *> RecoveredBases;
+  DenseMap<Value *, Value *> RecoveredBaseOrigins;
   DenseMap<Value *, Value *> SafeTableIndices;
   DenseMap<Value *, GeometryRecord> Geometries;
   DenseMap<Value *, Value *> BaseSizes;
@@ -197,6 +198,7 @@ private:
   DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> AccessGeometry;
   DenseMap<Instruction *, GeometryRecord> FastGeometry;
   SmallPtrSet<Instruction *, 16> RangeProven;
+  DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> SpatialGeometry;
   SmallPtrSet<BasicBlock *, 16> CountedLoopHeaders;
   bool versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                    ScalarEvolution &SE);
@@ -261,9 +263,7 @@ private:
   void emitOobCheck(IRBuilder<> &IRB, Value *PtrInt, Value *Base,
                     Value *AllocSize, uint64_t FixedAccessSize,
                     Value *DynAccessSize, Instruction *InsertBefore,
-                    CheckKind Kind, Value *MetadataBase = nullptr,
-                    Value *MetadataSize = nullptr,
-                    Value *MetadataManaged = nullptr);
+                    CheckKind Kind);
 
 #ifdef FLEXFAT_CUSTOM_CONFIG
   // Build the IR to compute (AllocSize, Base) using runtime table lookups when
@@ -420,9 +420,7 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     Value *Base, Value *AllocSize,
                                     uint64_t FixedAccessSize,
                                     Value *DynAccessSize,
-                                    Instruction *InsertBefore, CheckKind Kind,
-                                    Value *MetadataBase, Value *MetadataSize,
-                                    Value *MetadataManaged) {
+                                    Instruction *InsertBefore, CheckKind Kind) {
   Value *AccessBound = usesInSlotTags() && !isEscapeCheck(Kind)
                            ? IRB.CreateSub(AllocSize, IRB.getInt64(1))
                            : AllocSize;
@@ -442,27 +440,6 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
     Value *Limit = IRB.CreateSub(AccessBound, AccessSize);
     Value *PastEnd = IRB.CreateICmpUGT(Diff, Limit);
     IsOOB = IRB.CreateOr(TooWide, PastEnd);
-  }
-
-  if (usesInSlotTags() && !isEscapeCheck(Kind)) {
-    Value *Diff = IRB.CreateSub(PtrInt, MetadataBase);
-    Value *Width = DynAccessSize ? DynAccessSize
-                                 : ConstantInt::get(IntptrTy, FixedAccessSize);
-    Value *WithinSlot = IRB.CreateAnd(
-        MetadataManaged, IRB.CreateICmpULT(Diff, MetadataSize));
-    Value *MetadataOffset = IRB.CreateSub(MetadataSize, IRB.getInt64(1));
-    Value *TouchesMetadata = IRB.CreateAnd(
-        WithinSlot,
-        IRB.CreateICmpUGT(Width, IRB.CreateSub(MetadataOffset, Diff)));
-    Instruction *Failure = SplitBlockAndInsertIfThen(
-        TouchesMetadata, InsertBefore, /*Unreachable=*/true);
-    markNoSanitize(Failure);
-    IRBuilder<> Fatal(Failure);
-    Fatal.SetNoSanitizeMetadata();
-    Fatal.CreateCall(getReportOobFn(),
-                     {PtrInt, MetadataBase, MetadataOffset,
-                      Fatal.getInt8(isWriteCheck(Kind))});
-    IRB.SetInsertPoint(InsertBefore);
   }
 
   Instruction *OobTerm =
@@ -613,6 +590,7 @@ Value *FlexFatSanitizer::getRecoveredBase(Value *CompanionBase) {
   Value *Base =
       IRB.CreateIntToPtr(G.Base, CompanionBase->getType(), "flexfat.base");
   RecoveredBases[CompanionBase] = Base;
+  RecoveredBaseOrigins[Base] = CompanionBase;
   SafeTableIndices[Base] = G.Index;
   BaseSizes[Base] = G.Size;
   ++BoundsIRGeneration;
@@ -1213,23 +1191,8 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
                                      I64Ty, RegionIndex);
   Value *AllocSize = CheckIRB->CreateZExtOrTrunc(AllocSize64, IntptrTy);
 
-  Value *MetadataBase = nullptr, *MetadataSize = nullptr;
-  Value *MetadataManaged = nullptr;
-  if (usesInSlotTags() && !isEscapeCheck(Kind)) {
-    auto Cached = Geometries.find(Ptr);
-    GeometryRecord Actual = Cached != Geometries.end() && Cached->second.Raw
-                                ? Cached->second
-                                : emitGeometry(*CheckIRB, Ptr, false);
-    MetadataBase = Actual.Base;
-    MetadataSize = Actual.Size;
-    MetadataManaged = Actual.Managed
-                          ? Actual.Managed
-                          : CheckIRB->CreateICmpNE(
-                                Actual.Size, ConstantInt::getSigned(IntptrTy, -1));
-  }
   emitOobCheck(*CheckIRB, PtrInt, BasePtrInt, AllocSize, FixedAccessSize,
-               SizeInt, CheckInsertBefore, Kind, MetadataBase, MetadataSize,
-               MetadataManaged);
+               SizeInt, CheckInsertBefore, Kind);
   return true;
 }
 
@@ -1252,9 +1215,7 @@ bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
                                   IsWrite ? CheckKind::Write : CheckKind::Read);
   }
   uint64_t CheckedSize =
-      (Options.CheckWholeAccess || usesInSlotTags())
-          ? AccessSize.getFixedValue()
-          : 0;
+      Options.CheckWholeAccess ? AccessSize.getFixedValue() : 0;
   CheckKind Kind = IsWrite ? CheckKind::Write : CheckKind::Read;
   if (!instrumentPointerCheck(I, Ptr, CheckedSize, nullptr, Kind))
     return false;
@@ -1357,14 +1318,20 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   auto Existing = Geometries.find(Access.Pointer);
   auto Shared = AccessGeometry.find({I, Access.Pointer});
   auto Fast = FastGeometry.find(I);
+  auto Spatial = SpatialGeometry.find({I, Access.Pointer});
   GeometryRecord G = Fast != FastGeometry.end()       ? Fast->second
                      : Shared != AccessGeometry.end() ? Shared->second
+                     : Spatial != SpatialGeometry.end() ? Spatial->second
                      : Existing != Geometries.end()
                          ? Existing->second
-                         : emitGeometry(B, Access.Pointer);
+                         : emitGeometry(B, Access.Pointer, true);
   // A proven same-slot root shares geometry, never the actual pointer tag.
-  if (Fast != FastGeometry.end() || Shared != AccessGeometry.end())
-    G.Tagged = B.CreatePtrToInt(Access.Pointer, IntptrTy);
+  if (Fast != FastGeometry.end() || Shared != AccessGeometry.end() ||
+      Spatial != SpatialGeometry.end()) {
+    auto *Tagged = dyn_cast<PtrToIntInst>(G.Tagged);
+    if (!Tagged || Tagged->getPointerOperand() != Access.Pointer)
+      G.Tagged = B.CreatePtrToInt(Access.Pointer, IntptrTy);
+  }
   auto *Generation = B.CreateLoad(B.getInt8Ty(), G.Entry, "flexfat.generation");
   Generation->setAtomic(AtomicOrdering::Acquire);
   Generation->setAlignment(Align(1));
@@ -1419,7 +1386,7 @@ void FlexFatSanitizer::discoverAccesses(
       AccessLengths[I] = Converted = B.CreateZExtOrTrunc(Length, IntptrTy);
     Accesses.push_back(
         {I, Ptr, Converted, Write,
-         (Options.CheckWholeAccess || usesInSlotTags()) ? Width : 0});
+         Options.CheckWholeAccess ? Width : 0});
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
@@ -1894,6 +1861,7 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
 
   Bounds.clear();
   RecoveredBases.clear();
+  RecoveredBaseOrigins.clear();
   SafeTableIndices.clear();
   Geometries.clear();
   BaseSizes.clear();
@@ -1901,6 +1869,7 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   AccessGeometry.clear();
   FastGeometry.clear();
   RangeProven.clear();
+  SpatialGeometry.clear();
   CountedLoopHeaders.clear();
   BoundsIRGeneration = 0;
   bool Modified = false;
@@ -1957,12 +1926,26 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   LI.analyze(DT);
   prepareLoopGeometry(LoopAccesses, DT, LI);
   prepareContainedGeometry(TemporalAccesses, DT);
-  // Materialize current-address geometry once at its SSA definition when no
-  // range/loop proof supplied geometry. Keep it separate from the companion
-  // allocation base: a derived address may have crossed a slot or region.
+  if (!Options.Recover)
+    for (const AccessRecord &A : TemporalAccesses)
+      if (!FastGeometry.contains(A.Inst) &&
+          !AccessGeometry.count({A.Inst, A.Pointer}) &&
+          !shouldSkipInstruction(A.Inst)) {
+        BoundsRecord B = getBounds(A.Pointer);
+        if (B.Kind != BaseKind::NonFlexFat) {
+          Value *Root = RecoveredBaseOrigins.lookup(B.CompanionBase);
+          Value *GeometryRoot = Root ? Root : B.CompanionBase;
+          if (isa<Instruction>(GeometryRoot) || isa<Argument>(GeometryRoot))
+            SpatialGeometry[{A.Inst, A.Pointer}] =
+                getTemporalGeometry(GeometryRoot);
+        }
+      }
+  // Without a retained spatial check or an independent same-slot proof,
+  // derive temporal metadata from the actual access pointer.
   for (const AccessRecord &A : TemporalAccesses)
     if (!FastGeometry.contains(A.Inst) &&
         !AccessGeometry.count({A.Inst, A.Pointer}) &&
+        !SpatialGeometry.count({A.Inst, A.Pointer}) &&
         (isa<Instruction>(A.Pointer) || isa<Argument>(A.Pointer)))
       (void)getTemporalGeometry(A.Pointer);
   // The final preparation step can also split an invoke's normal edge.
@@ -1973,8 +1956,9 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
 
   // Temporal discovery is independent of spatial elision. Prepare all
   // provenance before inserting any check branches (including invoke splits).
-  for (const AccessRecord &Access : TemporalAccesses)
-    Modified |= instrumentTemporal(Access);
+  if (Options.Recover)
+    for (const AccessRecord &Access : TemporalAccesses)
+      Modified |= instrumentTemporal(Access);
 
   // LowFat-style phase 3: insert checks using the cached recovered bases.
   for (Instruction *I : ToInstrument) {
@@ -2037,6 +2021,11 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
       }
     }
   }
+  // A fatal spatial failure cannot continue into the temporal observation.
+  // Its successful edge also proves that the companion base names this slot.
+  if (!Options.Recover)
+    for (const AccessRecord &Access : TemporalAccesses)
+      Modified |= instrumentTemporal(Access);
   if (Modified && Options.TemporalTBI)
     invalidateTemporalAttributes(F);
   return Modified || BoundsIRGeneration != 0;

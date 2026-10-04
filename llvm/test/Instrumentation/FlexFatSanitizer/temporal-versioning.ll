@@ -12,7 +12,7 @@ define i64 @scan(ptr %p, i64 %n) {
 ; CHECK: ph:
 ; CHECK: call { i64, i1 } @llvm.smul.with.overflow.i64
 ; CHECK: call { i64, i1 } @llvm.sadd.with.overflow.i64
-; CHECK: call { i64, i1 } @llvm.uadd.with.overflow.i64
+; CHECK: icmp ule i64
 ; CHECK: br i1 {{.*}}, label %flexfat.fallback.ph.flexfat.fast, label %flexfat.fallback.ph
 ; CHECK: body.flexfat.fast:
 ; CHECK-NOT: load i64, ptr {{.*}}!invariant.load
@@ -21,8 +21,8 @@ define i64 @scan(ptr %p, i64 %n) {
 ; CHECK-NOT: __flexfat_report_oob
 ; CHECK: flexfat.fallback.ph:
 ; CHECK: body:
-; CHECK: load atomic i8
 ; CHECK: call void @__flexfat_report_oob
+; CHECK: load atomic i8
 ; CHECK: %v = load i64, ptr %q
 ; CHECK: exit:
 ; CHECK: phi i64 {{.*}}%sum.next.flexfat.fast
@@ -148,7 +148,7 @@ define i64 @volatile_scan(ptr %p, i64 %n) {
 ; CHECK: ph:
 ; CHECK: call { i64, i1 } @llvm.smul.with.overflow.i64
 ; CHECK: call { i64, i1 } @llvm.sadd.with.overflow.i64
-; CHECK: call { i64, i1 } @llvm.uadd.with.overflow.i64
+; CHECK: icmp ule i64
 ; CHECK: br i1 {{.*}}, label %flexfat.fallback.ph.flexfat.fast, label %flexfat.fallback.ph
 ; CHECK: body.flexfat.fast:
 ; CHECK-NOT: load i64, ptr {{.*}}!invariant.load
@@ -159,8 +159,8 @@ define i64 @volatile_scan(ptr %p, i64 %n) {
 ; CHECK-NOT: __flexfat_report_oob
 ; CHECK: flexfat.fallback.ph:
 ; CHECK: body:
-; CHECK: load atomic i8
 ; CHECK: call void @__flexfat_report_oob
+; CHECK: load atomic i8
 ; CHECK: %v = load volatile i64, ptr %q
 ; CHECK: exit:
 ; CHECK: phi i64 {{.*}}%sum.next.flexfat.fast
@@ -201,8 +201,8 @@ define i64 @fixed(ptr %p, i64 %n) {
 ; CHECK-NOT: __flexfat_report_oob
 ; CHECK: flexfat.fallback.ph:
 ; CHECK: body:
-; CHECK: load atomic i8
 ; CHECK: call void @__flexfat_report_oob
+; CHECK: load atomic i8
 ; CHECK: %v = load volatile i64, ptr %q
 ; CHECK: exit:
 ; CHECK: phi i64 {{.*}}%sum.next.flexfat.fast
