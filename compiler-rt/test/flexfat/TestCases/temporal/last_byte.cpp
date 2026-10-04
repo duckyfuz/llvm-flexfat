@@ -1,4 +1,12 @@
-// Last-byte-specific checks are run by run-temporal.py in both layouts.
+// REQUIRES: flexfat-tbi
+// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=last-byte %flexfat_config_flags -fno-builtin %s -o %t
+// RUN: %run %t
+// RUN: %run %t onepast
+// RUN: %run %t maps
+// RUN: not %run %t byte 2>&1 | FileCheck %s
+// RUN: not %run %t wide 2>&1 | FileCheck %s
+// RUN: not %run %t memset 2>&1 | FileCheck %s
+// CHECK: out-of-bounds
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>

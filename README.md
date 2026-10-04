@@ -57,9 +57,34 @@ Use `-fsanitize=flexfat` to instrument an application. Controls:
 | `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-recover=` | `true`, `false` | `false` |
+| `-mllvm -flexfat-tbi-storage=` | `shadow`, `last-byte`, `prior-byte` | `shadow` |
 
 The existing Clang TBI and sanitizer recovery flags remain supported. Explicit
 `-flexfat-tbi` and `-flexfat-recover` settings override them.
+
+The storage option requires `-fsanitize-flexfat-tbi`. The older
+`-mllvm -flexfat-tbi-last-byte` and `-mllvm -flexfat-tbi-prior-byte`
+spellings remain supported. Each storage assignment replaces the previous
+one; either compatibility flag set to `false` selects `shadow`.
+In `last-byte` mode,
+the generation occupies the final byte of each size-class slot. That byte is
+excluded from usable capacity, copies, and instrumented memory accesses.
+One-past pointers may point to it, but dereferencing it terminates even with
+FlexFat recovery enabled. Last-byte and shadow objects have different link
+ABIs and must be built with the same storage choice. Uninstrumented code can
+overwrite an in-slot generation byte; use shadow storage when such writes are
+possible. Compare the layouts with
+`compiler-rt/test/flexfat/compare-temporal-storage.py BUILD_DIR`.
+
+In `prior-byte` mode, each slot's generation occupies the byte immediately
+before its base. The first aligned slot in every region is reserved so this
+byte is mapped for the first allocation. The final byte of an allocated slot
+may hold the following slot's generation and is excluded from usable capacity
+and instrumented accesses. A zero-filled guard page precedes the first region;
+the reserved final byte of each later region provides a safe zero tag for its
+unallocated first slot. Once a slot base is recovered, the tag address is
+`base - 1`; recovering a base from an interior pointer still requires the
+size-class geometry. This mode has its own link ABI.
 
 Fast mode instruments at ScalarOptimizerLateEP. Safe mode additionally
 instruments at PipelineStartEP. Placement is internal and has no command-line

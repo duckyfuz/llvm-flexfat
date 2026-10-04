@@ -1,7 +1,7 @@
 // REQUIRES: flexfat-tbi
 // RUN: %clangxx_flexfat_tbi -O2 -fno-builtin %s -o %t && %t
 // RUN: not %t stale 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_tbi -O2 -fno-builtin -fsanitize-flexfat-tbi-storage=prior-byte %s -o %t.prior && %t.prior
+// RUN: %clangxx_flexfat_tbi -O2 -fno-builtin -mllvm -flexfat-tbi-storage=prior-byte %s -o %t.prior && %t.prior
 // RUN: not %t.prior stale 2>&1 | FileCheck %s
 // CHECK: operation = read
 // CHECK: reason = generation mismatch

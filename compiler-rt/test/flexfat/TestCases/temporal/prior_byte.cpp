@@ -1,3 +1,10 @@
+// REQUIRES: flexfat-tbi
+// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=prior-byte %flexfat_config_flags -fno-builtin %s -o %t
+// RUN: %run %t
+// RUN: not %run %t tag-byte 2>&1 | FileCheck %s
+// RUN: not %run %t adjacent-tag 2>&1 | FileCheck %s
+// RUN: not %run %t memset 2>&1 | FileCheck %s
+// CHECK: out-of-bounds
 // A slot's generation lives at base - 1, in the reserved final byte of the
 // preceding slot. The first aligned slot of each region is never allocated.
 #include <assert.h>

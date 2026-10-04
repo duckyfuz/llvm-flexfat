@@ -34,7 +34,7 @@ for build in args.builds:
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
     common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
-              '-fsanitize-flexfat-tbi-storage=' + args.storage]
+              '-mllvm', '-flexfat-tbi-storage=' + args.storage]
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())

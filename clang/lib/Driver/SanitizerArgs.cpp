@@ -691,25 +691,10 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
   Kinds |= Default;
   TemporalTBI = Args.hasFlag(options::OPT_fsanitize_flexfat_tbi,
                             options::OPT_fno_sanitize_flexfat_tbi, false);
-  // Resolve all storage assignments in driver command-line order so the
-  // selected runtime and the backend's ABI always agree.
+  // Resolve LLVM storage assignments in command-line order so the selected
+  // runtime and the backend's ABI always agree.
   const Arg *LLVMStorageArg = nullptr;
-  for (const Arg *A : Args) {
-    if (A->getOption().matches(options::OPT_fsanitize_flexfat_tbi_storage_EQ)) {
-      StringRef Value = A->getValue();
-      if (Value == "shadow")
-        Storage = TBIStorage::Shadow;
-      else if (Value == "last-byte")
-        Storage = TBIStorage::LastByte;
-      else if (Value == "prior-byte")
-        Storage = TBIStorage::PriorByte;
-      else if (DiagnoseErrors)
-        D.Diag(diag::err_drv_unsupported_option_argument)
-            << A->getOption().getPrefixedName() << Value;
-      continue;
-    }
-    if (!A->getOption().matches(options::OPT_mllvm))
-      continue;
+  for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
     // Match LLVM's option parser, which accepts one or two leading dashes.
     StringRef Value = A->getValue();
     if (!Value.consume_front("-"))
@@ -759,12 +744,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       D.Diag(diag::err_drv_unsupported_opt_for_target)
           << "-fsanitize-flexfat-tbi" << Triple.str();
   }
-  if (Args.hasArg(options::OPT_fsanitize_flexfat_tbi_storage_EQ) &&
-      !TemporalTBI && DiagnoseErrors)
-    D.Diag(diag::err_drv_argument_only_allowed_with)
-        << "-fsanitize-flexfat-tbi-storage=" << "-fsanitize-flexfat-tbi";
-  if (Storage != TBIStorage::Shadow && !TemporalTBI && DiagnoseErrors &&
-      !Args.hasArg(options::OPT_fsanitize_flexfat_tbi_storage_EQ))
+  if (Storage != TBIStorage::Shadow && !TemporalTBI && DiagnoseErrors)
     D.Diag(diag::err_drv_argument_only_allowed_with)
         << LLVMStorageArg->getAsString(Args)
         << "-fsanitize-flexfat-tbi";
