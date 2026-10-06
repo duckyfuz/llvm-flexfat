@@ -123,25 +123,24 @@ static cl::opt<FlexFatSanitizerOptions::FlexFatMode> FlexFatMode(
 static cl::opt<FlexFatSanitizerOptions::Alignment> FlexFatAlignment(
     "flexfat-alignment", cl::init(FlexFatSanitizerOptions::Alignment::Left),
     cl::desc("Controls allocation alignment within FlexFat class slots"),
-    cl::values(
-        clEnumValN(FlexFatSanitizerOptions::Alignment::Left, "left",
-                   "Left-align allocations"),
-        clEnumValN(FlexFatSanitizerOptions::Alignment::Right, "right",
-                   "Right-align allocations")));
+    cl::values(clEnumValN(FlexFatSanitizerOptions::Alignment::Left, "left",
+                          "Left-align allocations"),
+               clEnumValN(FlexFatSanitizerOptions::Alignment::Right, "right",
+                          "Right-align allocations")));
 
 static cl::opt<bool> FlexFatCheckWholeAccess(
     "flexfat-check-whole-access", cl::init(false),
     cl::desc("Check the complete width of FlexFat scalar accesses"));
 
-static cl::opt<bool> FlexFatTBI(
-    "flexfat-tbi", cl::init(false),
-    cl::desc("Enable FlexFat TBI temporal checking"));
+static cl::opt<bool>
+    FlexFatTBI("flexfat-tbi", cl::init(false),
+               cl::desc("Enable FlexFat TBI temporal checking"));
 static cl::opt<FlexFatSanitizerOptions::TBIStorage> FlexFatTBIStorage(
     "flexfat-tbi-storage",
     cl::init(FlexFatSanitizerOptions::TBIStorage::LastByte),
     cl::desc("Select FlexFat TBI generation storage"),
-    cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow,
-                          "shadow", "Shadow storage"),
+    cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow, "shadow",
+                          "Shadow storage"),
                clEnumValN(FlexFatSanitizerOptions::TBIStorage::LastByte,
                           "last-byte", "Final byte of each slot"),
                clEnumValN(FlexFatSanitizerOptions::TBIStorage::PriorByte,
@@ -153,9 +152,8 @@ static cl::opt<bool> FlexFatTBIPriorByte(
     "flexfat-tbi-prior-byte", cl::init(false),
     cl::desc("Store FlexFat TBI generations just before each slot base"));
 
-static cl::opt<bool> FlexFatRecover(
-    "flexfat-recover", cl::init(false),
-    cl::desc("Continue after a FlexFat error"));
+static cl::opt<bool> FlexFatRecover("flexfat-recover", cl::init(false),
+                                    cl::desc("Continue after a FlexFat error"));
 
 // Experiment to mark cold functions as optsize/minsize/optnone.
 // TODO: remove once this is exposed as a proper driver flag.
@@ -224,7 +222,7 @@ class EmitAssemblyHelper {
   std::unique_ptr<llvm::ToolOutputFile> openOutputFile(StringRef Path) {
     std::error_code EC;
     auto F = std::make_unique<llvm::ToolOutputFile>(Path, EC,
-                                                     llvm::sys::fs::OF_None);
+                                                    llvm::sys::fs::OF_None);
     if (EC) {
       Diags.Report(diag::err_fe_unable_to_open_output) << Path << EC.message();
       F.reset();
@@ -842,8 +840,8 @@ static void addSanitizers(const Triple &TargetTriple,
     if (FlexFatRecover.getNumOccurrences())
       FlexFatOpts.Recover = FlexFatRecover;
     FlexFatOpts.TemporalTBI = FlexFatTBI.getNumOccurrences()
-                                 ? FlexFatTBI
-                                 : CodeGenOpts.SanitizeFlexFatTBI;
+                                  ? FlexFatTBI
+                                  : CodeGenOpts.SanitizeFlexFatTBI;
     // Each spelling is an assignment. The final command-line assignment wins.
     unsigned StoragePosition = FlexFatTBIStorage.getPosition();
     FlexFatOpts.Storage = FlexFatTBIStorage;
@@ -921,18 +919,18 @@ void addLowerAllowCheckPass(const CodeGenOptions &CodeGenOpts,
       CodeGenOpts.AllowRuntimeCheckSkipHotCutoff.has_value() ||
       LowerAllowSanitize) {
     // We want to call it after inline, which is about OptimizerEarlyEPCallback.
-    PB.registerOptimizerEarlyEPCallback(
-        [ScaledCutoffs, AllowRuntimeCheckSkipHotCutoff](
-            ModulePassManager &MPM, OptimizationLevel Level,
-            ThinOrFullLTOPhase Phase) {
-          LowerAllowCheckPass::Options Opts;
-          // TODO: after removing IsRequested(), make this unconditional
-          if (ScaledCutoffs.has_value())
-            Opts.cutoffs = ScaledCutoffs.value();
-          Opts.runtime_check = AllowRuntimeCheckSkipHotCutoff;
-          MPM.addPass(
-              createModuleToFunctionPassAdaptor(LowerAllowCheckPass(Opts)));
-        });
+    PB.registerOptimizerEarlyEPCallback([ScaledCutoffs,
+                                         AllowRuntimeCheckSkipHotCutoff](
+                                            ModulePassManager &MPM,
+                                            OptimizationLevel Level,
+                                            ThinOrFullLTOPhase Phase) {
+      LowerAllowCheckPass::Options Opts;
+      // TODO: after removing IsRequested(), make this unconditional
+      if (ScaledCutoffs.has_value())
+        Opts.cutoffs = ScaledCutoffs.value();
+      Opts.runtime_check = AllowRuntimeCheckSkipHotCutoff;
+      MPM.addPass(createModuleToFunctionPassAdaptor(LowerAllowCheckPass(Opts)));
+    });
   }
 }
 
@@ -1123,12 +1121,11 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
     const bool PrepareForLTO = CodeGenOpts.PrepareForLTO;
 
     if (LangOpts.ObjCAutoRefCount) {
-      PB.registerPipelineStartEPCallback(
-          [](ModulePassManager &MPM, OptimizationLevel Level) {
-            if (Level != OptimizationLevel::O0)
-              MPM.addPass(
-                  createModuleToFunctionPassAdaptor(ObjCARCExpandPass()));
-          });
+      PB.registerPipelineStartEPCallback([](ModulePassManager &MPM,
+                                            OptimizationLevel Level) {
+        if (Level != OptimizationLevel::O0)
+          MPM.addPass(createModuleToFunctionPassAdaptor(ObjCARCExpandPass()));
+      });
       PB.registerScalarOptimizerLateEPCallback(
           [](FunctionPassManager &FPM, OptimizationLevel Level) {
             if (Level != OptimizationLevel::O0)
@@ -1267,8 +1264,8 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
           if (!ThinLinkOS)
             return;
         }
-        MPM.addPass(ThinLTOBitcodeWriterPass(
-            *OS, ThinLinkOS ? &ThinLinkOS->os() : nullptr));
+        MPM.addPass(ThinLTOBitcodeWriterPass(*OS, ThinLinkOS ? &ThinLinkOS->os()
+                                                             : nullptr));
       } else if (Action == Backend_EmitLL) {
         MPM.addPass(PrintModulePass(*OS, "", CodeGenOpts.EmitLLVMUseLists,
                                     /*EmitLTOSummary=*/true));
@@ -1557,7 +1554,7 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
                       .moveInto(CombinedIndex)) {
       logAllUnhandledErrors(std::move(E), errs(),
                             "Error loading index file '" +
-                            CGOpts.ThinLTOIndexFile + "': ");
+                                CGOpts.ThinLTOIndexFile + "': ");
       return;
     }
 

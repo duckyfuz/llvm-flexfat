@@ -65,7 +65,8 @@ using namespace llvm;
 
 static cl::opt<bool> ClShareContainedGeometry(
     "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
-    cl::desc("Share temporal geometry for accesses proven within an allocation"));
+    cl::desc(
+        "Share temporal geometry for accesses proven within an allocation"));
 static cl::opt<bool> ClVersionTBILoops(
     "flexfat-version-tbi-loops", cl::Hidden, cl::init(false),
     cl::desc("Extend TBI loop versioning with grouped access ranges"));
@@ -264,8 +265,10 @@ private:
       return It->second.Raw;
     Value *Int = IRB.CreatePtrToInt(Ptr, IntptrTy, Name);
     return Options.TemporalTBI
-        ? IRB.CreateAnd(Int, ConstantInt::get(IntptrTy, 0x00ffffffffffffffULL),
-                        "flexfat.raw") : Int;
+               ? IRB.CreateAnd(
+                     Int, ConstantInt::get(IntptrTy, 0x00ffffffffffffffULL),
+                     "flexfat.raw")
+               : Int;
   }
   bool instrumentMemoryAccess(Instruction *I, Value *Ptr, Type *AccessTy);
   bool instrumentMemoryRange(Instruction *I, Value *Ptr, Value *Size,
@@ -422,7 +425,7 @@ FunctionCallee FlexFatSanitizer::getWarnOobFn() {
 // ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
 FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
-                                     Value *RegionIndex) {
+                                       Value *RegionIndex) {
   LLVMContext &Ctx = M.getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
   Type *I128Ty = Type::getInt128Ty(Ctx);
@@ -678,21 +681,20 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
     // Pow2 classes have size 2^(class+4). Derive immutable geometry from the
     // region instead of reading the size and mask tables on each root. All
     // foreign regions use the zero-index bias sentinel, including high ones.
-    Value *Region = B.CreateLShr(G.Raw, B.getInt64(RegionSizeLog),
-                                 "flexfat.region.raw");
-    Value *Class = B.CreateSub(Region, B.getInt64(ManagedTableBegin),
-                               "flexfat.class");
-    G.Managed = B.CreateICmpULT(Class, B.getInt64(NumSizeClasses),
-                                "flexfat.managed");
-    G.Index = B.CreateSelect(G.Managed, Region, B.getInt64(0),
-                              "flexfat.region");
-    Value *Shift = B.CreateSelect(
-        G.Managed, B.CreateAdd(Class, B.getInt64(4)), B.getInt64(0),
-        "flexfat.size.shift");
-    Value *ManagedSize = B.CreateShl(B.getInt64(1), Shift,
-                                    "flexfat.managed.size");
-    G.Size = B.CreateSelect(G.Managed, ManagedSize, B.getInt64(-1),
-                            "flexfat.size");
+    Value *Region =
+        B.CreateLShr(G.Raw, B.getInt64(RegionSizeLog), "flexfat.region.raw");
+    Value *Class =
+        B.CreateSub(Region, B.getInt64(ManagedTableBegin), "flexfat.class");
+    G.Managed =
+        B.CreateICmpULT(Class, B.getInt64(NumSizeClasses), "flexfat.managed");
+    G.Index =
+        B.CreateSelect(G.Managed, Region, B.getInt64(0), "flexfat.region");
+    Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
+                                  B.getInt64(0), "flexfat.size.shift");
+    Value *ManagedSize =
+        B.CreateShl(B.getInt64(1), Shift, "flexfat.managed.size");
+    G.Size =
+        B.CreateSelect(G.Managed, ManagedSize, B.getInt64(-1), "flexfat.size");
     Value *Mask = B.CreateSelect(G.Managed, B.CreateNeg(ManagedSize),
                                  B.getInt64(0), "flexfat.mask");
     G.Base = B.CreateAnd(G.Raw, Mask, "flexfat.base.int");
@@ -728,15 +730,14 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
     Value *Start = B.CreateShl(G.Index, B.getInt64(RegionSizeLog));
     Value *End = B.CreateAdd(Start, B.getInt64(1ULL << RegionSizeLog));
     Valid = B.CreateAnd(Valid, B.CreateICmpUGE(G.Base, Start));
-    Valid = B.CreateAnd(Valid,
-                        B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
+    Valid =
+        B.CreateAnd(Valid, B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
 #endif
-    Value *Address = Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte
-                         ? B.CreateSub(G.Base, B.getInt64(1),
-                                       "flexfat.metadata.address")
-                         : B.CreateAdd(G.Base,
-                                       B.CreateSub(G.Size, B.getInt64(1)),
-                                       "flexfat.metadata.address");
+    Value *Address =
+        Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte
+            ? B.CreateSub(G.Base, B.getInt64(1), "flexfat.metadata.address")
+            : B.CreateAdd(G.Base, B.CreateSub(G.Size, B.getInt64(1)),
+                          "flexfat.metadata.address");
     Value *Sentinel = B.CreatePtrToInt(
         M.getOrInsertGlobal("__flexfat_tbi_zero_sentinel", B.getInt8Ty()),
         IntptrTy);
@@ -1084,9 +1085,9 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
           RegionIndex = 0;
         }
 
-        Constant *Base = ConstantExpr::getIntToPtr(
-            ConstantInt::get(IntptrTy, BaseAddress),
-            cast<PointerType>(Ptr->getType()));
+        Constant *Base =
+            ConstantExpr::getIntToPtr(ConstantInt::get(IntptrTy, BaseAddress),
+                                      cast<PointerType>(Ptr->getType()));
         SafeTableIndices[Base] = ConstantInt::get(IntptrTy, RegionIndex);
         Result = makeRecord(Base, BaseKind::Dynamic, std::nullopt);
       }
@@ -1474,8 +1475,8 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   auto Shared = AccessGeometry.find({I, Access.Pointer});
   auto Fast = FastGeometry.find(I);
   auto Spatial = SpatialGeometry.find({I, Access.Pointer});
-  GeometryRecord G = Fast != FastGeometry.end()       ? Fast->second
-                     : Shared != AccessGeometry.end() ? Shared->second
+  GeometryRecord G = Fast != FastGeometry.end()         ? Fast->second
+                     : Shared != AccessGeometry.end()   ? Shared->second
                      : Spatial != SpatialGeometry.end() ? Spatial->second
                      : Existing != Geometries.end()
                          ? Existing->second
@@ -1549,8 +1550,7 @@ void FlexFatSanitizer::discoverAccesses(
     if (!Converted)
       AccessLengths[I] = Converted = B.CreateZExtOrTrunc(Length, IntptrTy);
     Accesses.push_back(
-        {I, Ptr, Converted, Write,
-         Options.CheckWholeAccess ? Width : 0});
+        {I, Ptr, Converted, Write, Options.CheckWholeAccess ? Width : 0});
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
@@ -1632,8 +1632,8 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           DefaultEligible = false;
         if (I.getMetadata("flexfat.instrumented") ||
             I.getMetadata("flexfat.temporal") || I.isEHPad() ||
-            isa<ResumeInst, CatchReturnInst, CleanupReturnInst,
-                IndirectBrInst>(I)) {
+            isa<ResumeInst, CatchReturnInst, CleanupReturnInst, IndirectBrInst>(
+                I)) {
           Eligible = false;
           break;
         }
@@ -1645,10 +1645,10 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           if ((!Extended &&
                (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
                         II->getIntrinsicID() != Intrinsic::lifetime_end))) ||
-              (Extended && (!isa<CallInst>(CB) || CB->cannotDuplicate() ||
-                            CB->isConvergent() ||
-                            CB->hasFnAttr(Attribute::ReturnsTwice) ||
-                            cast<CallInst>(CB)->isMustTailCall())))
+              (Extended &&
+               (!isa<CallInst>(CB) || CB->cannotDuplicate() ||
+                CB->isConvergent() || CB->hasFnAttr(Attribute::ReturnsTwice) ||
+                cast<CallInst>(CB)->isMustTailCall())))
             Eligible = false;
           continue;
         }
@@ -1682,9 +1682,8 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
         }
         if ((!Ty->isIntegerTy() && !Ty->isFloatingPointTy()) ||
             DL.getTypeStoreSize(Ty).isScalable() ||
-            (!Extended &&
-             (!DT.dominates(BB, L->getLoopLatch()) ||
-              !DT.dominates(BB, L->getExitingBlock())))) {
+            (!Extended && (!DT.dominates(BB, L->getLoopLatch()) ||
+                           !DT.dominates(BB, L->getExitingBlock())))) {
           DefaultEligible = false;
           if (!Extended)
             Eligible = false;
@@ -1903,13 +1902,12 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                          ? High
                          : Checked(Intrinsic::sadd_with_overflow, High, Span);
       Valid = B.CreateAnd(Valid, B.CreateICmpUGE(Low, G.Base));
-      Valid = B.CreateAnd(Valid,
-                          B.CreateICmpULE(
-                              Limit,
-                              B.CreateAdd(G.Base,
-                                          usesInSlotTags()
-                                              ? B.CreateSub(G.Size, B.getInt64(1))
-                                              : G.Size)));
+      Valid = B.CreateAnd(
+          Valid, B.CreateICmpULE(
+                     Limit, B.CreateAdd(G.Base,
+                                        usesInSlotTags()
+                                            ? B.CreateSub(G.Size, B.getInt64(1))
+                                            : G.Size)));
     }
     formLCSSARecursively(*L, DT, &LI, &SE);
     BasicBlock *PH = SplitBlock(Guard, Guard->getTerminator(), &DT, &LI,
@@ -2091,9 +2089,8 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   for (const AccessRecord &A : TemporalAccesses)
     if (LI.getLoopFor(A.Inst->getParent()))
       LoopAccesses.push_back(A);
-  llvm::erase_if(ToInstrument, [this](Instruction *I) {
-    return shouldSkipInstruction(I);
-  });
+  llvm::erase_if(ToInstrument,
+                 [this](Instruction *I) { return shouldSkipInstruction(I); });
 
   // LowFat-style phase 2: resolve every provenance root and memoize one
   // recovered allocation base before CFG-changing checks are inserted.
@@ -2319,7 +2316,8 @@ bool FlexFatSanitizer::run() {
   // Right-aligning places the object's right edge at the slot boundary,
   // making off-by-one overflows detectable at the cost of a left-side
   // blind spot of (class_size - requested_size) bytes.
-  if (Options.AllocationAlignment == FlexFatSanitizerOptions::Alignment::Right &&
+  if (Options.AllocationAlignment ==
+          FlexFatSanitizerOptions::Alignment::Right &&
       !M.getFunction("__flexfat_set_right_align_ctor")) {
     LLVMContext &Ctx = M.getContext();
     FunctionType *SetRightAlignTy =
