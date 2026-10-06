@@ -14,13 +14,13 @@ int wide(volatile int *p) {
 // POINT: sub i64 {{.*}}, 1
 // POINT: icmp uge i64
 // POINT: call void @__flexfat_report_oob
-// POINT: load atomic i8, ptr %flexfat.metadata acquire
+// POINT: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 // POINT: call void @__flexfat_report_temporal_v3
 // POINT: load volatile i32
 // WHOLE-LABEL: define{{.*}} @wide(
 // WHOLE: icmp ugt i64 4,
 // RECOVER-LABEL: define{{.*}} @wide(
-// RECOVER: load atomic i8, ptr %flexfat.metadata acquire
+// RECOVER: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 // RECOVER: call void @__flexfat_warn_oob
 // RECOVER: load volatile i32
   return *p;
@@ -34,7 +34,7 @@ unsigned char indexed(unsigned long n) {
 // LOOP: for.body:
 // LOOP-NOT: flexfat.metadata.address
 // LOOP: call void @__flexfat_report_oob
-// LOOP: load atomic i8, ptr %flexfat.metadata acquire
+// LOOP: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 // LOOP: load volatile i8
   unsigned char *p = malloc(64);
   unsigned char value = 0;

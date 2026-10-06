@@ -1,22 +1,30 @@
 ; RUN: opt -passes='function(loop-simplify,lcssa),flexfat<tbi>,verify' -S %s | FileCheck %s
 ; RUN: opt -passes='function(loop-simplify,lcssa),flexfat<tbi>,flexfat<tbi>,verify' -S %s | FileCheck %s
+; RUN: %if !flexfat-custom-config %{ opt -passes='function(loop-simplify,lcssa),flexfat<tbi>' -S %s | FileCheck %s --check-prefix=POW2-GUARD --implicit-check-not='icmp ne i8' %}
+; RUN: %if flexfat-custom-config %{ opt -passes='function(loop-simplify,lcssa),flexfat<tbi>' -S %s | FileCheck %s --check-prefix=CUSTOM-GUARD %}
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
 define i64 @scan(ptr %p, i64 %n) {
+; POW2-GUARD-LABEL: @scan(
+; POW2-GUARD: body.flexfat.fast:
+; CUSTOM-GUARD-LABEL: @scan(
+; CUSTOM-GUARD: icmp ne i8 {{.*}}, 0
+; CUSTOM-GUARD: body.flexfat.fast:
 ; CHECK-LABEL: @scan(
 ; CHECK-NOT: load atomic i8
 ; CHECK: %empty = icmp eq i64 %n, 0
 ; CHECK: br i1 %empty, label %zero, label %ph
 ; CHECK: ph:
+; CHECK: icmp ule i64
 ; CHECK: call { i64, i1 } @llvm.smul.with.overflow.i64
 ; CHECK: call { i64, i1 } @llvm.sadd.with.overflow.i64
-; CHECK: icmp ule i64
 ; CHECK: br i1 {{.*}}, label %flexfat.fallback.ph.flexfat.fast, label %flexfat.fallback.ph
 ; CHECK: body.flexfat.fast:
 ; CHECK-NOT: load i64, ptr {{.*}}!invariant.load
-; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} {{acquire|monotonic}}
+; CHECK-NOT: icmp ne i8 {{.*}}, 0
 ; CHECK: %v.flexfat.fast = load i64, ptr %q.flexfat.fast
 ; CHECK-NOT: __flexfat_report_oob
 ; CHECK: flexfat.fallback.ph:
@@ -102,8 +110,7 @@ define i64 @static_containment() {
 ; CHECK-NOT: with.overflow
 ; CHECK-NOT: flexfat.fast
 ; CHECK: body:
-; CHECK: load atomic i8, ptr %flexfat.metadata acquire
-; CHECK: = or i1
+; CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 ; CHECK-NOT: __flexfat_report_oob
 ; CHECK: %v = load i64, ptr %q
 ; CHECK-NOT: flexfat.fast
@@ -152,7 +159,7 @@ define i64 @volatile_scan(ptr %p, i64 %n) {
 ; CHECK: br i1 {{.*}}, label %flexfat.fallback.ph.flexfat.fast, label %flexfat.fallback.ph
 ; CHECK: body.flexfat.fast:
 ; CHECK-NOT: load i64, ptr {{.*}}!invariant.load
-; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} {{acquire|monotonic}}
 ; CHECK-NOT: load atomic i8
 ; CHECK-NOT: = or i1
 ; CHECK: %v.flexfat.fast = load volatile i64, ptr %q.flexfat.fast
@@ -194,7 +201,7 @@ define i64 @fixed(ptr %p, i64 %n) {
 ; CHECK: br i1 {{.*}}, label %flexfat.fallback.ph.flexfat.fast, label %flexfat.fallback.ph
 ; CHECK: body.flexfat.fast:
 ; CHECK-NOT: load i64, ptr {{.*}}!invariant.load
-; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} {{acquire|monotonic}}
 ; CHECK-NOT: load atomic i8
 ; CHECK-NOT: = or i1
 ; CHECK: %v.flexfat.fast = load volatile i64, ptr %q.flexfat.fast
@@ -297,12 +304,12 @@ define void @two_roots(ptr %p, ptr %r, i64 %n) {
 ; CHECK: %flexfat.metadata{{[0-9]+}} = inttoptr
 ; CHECK: body.flexfat.fast:
 ; CHECK: ptrtoint ptr %q.flexfat.fast to i64
-; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} {{acquire|monotonic}}
 ; CHECK-NOT: load atomic i8
 ; CHECK-NOT: = or i1
 ; CHECK: load volatile i64, ptr %q.flexfat.fast
 ; CHECK: ptrtoint ptr %s.flexfat.fast to i64
-; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]*}} {{acquire|monotonic}}
 ; CHECK-NOT: load atomic i8
 ; CHECK-NOT: = or i1
 ; CHECK: store volatile i64 %v.flexfat.fast, ptr %s.flexfat.fast

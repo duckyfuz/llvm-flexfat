@@ -1,6 +1,6 @@
 // REQUIRES: flexfat-tbi
 // RUN: %clang -O2 %flexfat_config_flags -c %s -o %t.o
-// RUN: %clangxx_flexfat_tbi %t.o -o %t && %run %t
+// RUN: %if !flexfat-custom-config %{ %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=shadow %t.o -o %t && %run %t %}
 
 // Compiled without instrumentation, with the matching generated configuration.
 #include "flexfat/flexfat_config.h"
@@ -18,9 +18,9 @@ static void check(uptr r, uptr raw) {
   const uptr size = SizeClassToSize(r);
   const uptr index = raw >> kRegionSizeLog;
   const auto *sizes = reinterpret_cast<const uptr *>(kTablesBase);
-  const auto *biases = reinterpret_cast<const uptr *>(kTablesBase + 2*kTablesOffset);
   assert(sizes[index] == size);
 #ifdef FLEXFAT_CUSTOM_CONFIG
+  const auto *biases = reinterpret_cast<const uptr *>(kTablesBase + 2*kTablesOffset);
   const auto *magics = reinterpret_cast<const uptr *>(kTablesBase + kTablesOffset);
   uptr q = corrected(raw, size, magics[index]);
 #else
@@ -29,12 +29,16 @@ static void check(uptr r, uptr raw) {
   assert(q == raw / size);
   uptr start = GetRegionStart(r), end = start + kRegionSize;
   uptr first = start / size, last = (end - 1) / size;
+#ifdef FLEXFAT_CUSTOM_CONFIG
   uptr begin = biases[index] + first, limit = biases[index] + last + 1;
   uptr address = biases[index] + q;
   assert(address >= begin && address < limit);
-#ifndef FLEXFAT_CUSTOM_CONFIG
-  assert(address == (index << (kRegionSizeLog - kMinSizeLog)) +
-                        ((raw & (kRegionSize - 1)) >> (r + kMinSizeLog)));
+#else
+  const uptr shadow_offset = 0x200000000000ULL;
+  uptr base = raw & ~(size - 1);
+  uptr address = shadow_offset + (base >> kMinSizeLog);
+  assert(address >= shadow_offset + (start >> kMinSizeLog));
+  assert(address < shadow_offset + (end >> kMinSizeLog));
 #endif
   // Runtime/CRT startup may allocate low slots before main. Partial slots
   // and the distant upper half have never been allocated by this test.
@@ -45,27 +49,44 @@ int main() {
 #ifdef FLEXFAT_CUSTOM_CONFIG
   __flexfat_tbi_abi_v3();
 #else
-  __flexfat_tbi_abi_v4();
+  __flexfat_tbi_abi_v7();
 #endif
+#ifdef FLEXFAT_CUSTOM_CONFIG
   const auto *biases = reinterpret_cast<const uptr *>(kTablesBase + 2*kTablesOffset);
   const uptr managed = kRegionBase >> kRegionSizeLog;
   assert(biases[0] && *reinterpret_cast<const unsigned char *>(biases[0]) == 0);
   for (uptr index = 0; index < (kUserAddressLimit >> kRegionSizeLog); ++index)
     if (index < managed || index >= managed + kNumSizeClasses)
       assert(biases[index] == biases[0]);
-#ifdef FLEXFAT_CUSTOM_CONFIG
   uptr previous_end = 0;
+#else
+  const uptr shadow_offset = 0x200000000000ULL;
+  assert(*reinterpret_cast<const unsigned char *>(shadow_offset) == 0);
+  const uptr sample_sizes[] = {32, 256, 8192};
+  for (uptr size : sample_sizes) {
+    void *p = __flexfat_malloc(size);
+    assert(p);
+    uptr tagged = reinterpret_cast<uptr>(p);
+    uptr raw = Untag(tagged);
+    const auto *generation = reinterpret_cast<const unsigned char *>(
+        shadow_offset + (raw >> kMinSizeLog));
+    assert(*generation == PointerTag(tagged));
+    assert(generation[1] == 0);
+    __flexfat_free(p);
+    assert(*generation == static_cast<unsigned char>(PointerTag(tagged) + 1));
+    assert(generation[1] == 0);
+  }
 #endif
   for (uptr r = 0; r < kNumSizeClasses; ++r) {
     uptr start = GetRegionStart(r), end = start + kRegionSize;
     uptr size = SizeClassToSize(r), first = start / size, last = (end-1)/size;
-    uptr begin = biases[start >> kRegionSizeLog] + first;
 #ifdef FLEXFAT_CUSTOM_CONFIG
+    uptr begin = biases[start >> kRegionSizeLog] + first;
     if (r) assert(begin == previous_end);
     previous_end = biases[start >> kRegionSizeLog] + last + 1;
 #else
-    assert(begin ==
-           ((start >> kRegionSizeLog) << (kRegionSizeLog - kMinSizeLog)));
+    assert(shadow_offset + (start >> kMinSizeLog) <
+           shadow_offset + (end >> kMinSizeLog));
 #endif
     // Exhaust every byte near each region edge, including both paddings.
     for (uptr delta = 0; delta < 4096; ++delta) {

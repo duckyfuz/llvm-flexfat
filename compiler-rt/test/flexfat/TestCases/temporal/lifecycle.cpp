@@ -31,6 +31,16 @@ extern "C" uintptr_t __flexfat_get_offset(uintptr_t);
 extern "C" uintptr_t __flexfat_get_usable_size(uintptr_t);
 extern "C" void __flexfat_check_temporal(uintptr_t, uintptr_t, int);
 extern "C" void __flexfat_report_temporal_v3(uintptr_t, uintptr_t, unsigned, unsigned);
+extern "C" void __flexfat_tbi_abi_v7() __attribute__((weak));
+extern "C" void __flexfat_tbi_abi_last_byte_pow2_v2() __attribute__((weak));
+extern "C" void __flexfat_tbi_abi_prior_byte_pow2_v3() __attribute__((weak));
+static bool pow2() {
+  return __flexfat_tbi_abi_v7 || __flexfat_tbi_abi_last_byte_pow2_v2 ||
+         __flexfat_tbi_abi_prior_byte_pow2_v3;
+}
+static unsigned next_tag(unsigned current) {
+  return pow2() ? (current + 1) & 255 : (current == 255 ? 1 : current + 1);
+}
 static uintptr_t raw(void *p) { return (uintptr_t)p & 0x00ffffffffffffffULL; }
 static unsigned tag(void *p) { return (uintptr_t)p >> 56; }
 __attribute__((noinline)) static char *opaque(char *p) {
@@ -49,8 +59,8 @@ __attribute__((constructor)) static void startup() {
 }
 static void *release(void *p) { free(p); return nullptr; }
 int main(int argc, char **argv) {
-  assert(tag(before_main)); assert(read_byte(before_main) == 9); free(before_main);
-  char *p = opaque((char *)malloc(23)); assert(p && tag(p));
+  assert(pow2() || tag(before_main)); assert(read_byte(before_main) == 9); free(before_main);
+  char *p = opaque((char *)malloc(23)); assert(p && (pow2() || tag(p)));
   write_byte(p); assert(read_byte(p) == 9);
   uintptr_t base = __flexfat_get_base((uintptr_t)(p + 2));
   assert((base >> 56) == tag(p));
@@ -58,7 +68,10 @@ int main(int argc, char **argv) {
   assert(__flexfat_get_usable_size((uintptr_t)p) <= __flexfat_get_size((uintptr_t)p));
   if (argc > 1) {
     const char *mode = argv[1];
-    if (!strcmp(mode, "zero-tag")) return read_byte((char *)raw(p));
+    if (!strcmp(mode, "zero-tag")) {
+      if (!tag(p)) { free(p); p = opaque((char *)malloc(23)); assert(tag(p)); }
+      return read_byte((char *)raw(p));
+    }
     if (!strncmp(mode, "geometry", 8)) {
       bool tail = strstr(mode, "tail");
       bool legacy = strstr(mode, "legacy");
@@ -118,12 +131,12 @@ int main(int argc, char **argv) {
       free(p);
       if (!strcmp(mode, "wrap-free")) return read_byte(p);
       char *q = opaque((char *)malloc(23));
-      assert(raw(q) == slot && tag(q) == 1);
+      assert(raw(q) == slot && tag(q) == next_tag(255));
       write_byte(q); assert(read_byte(q) == 9); free(q); return 0;
     }
     free(p);
     if (!strcmp(mode, "next-generation")) {
-      unsigned next = tag(p) == 255 ? 1 : tag(p) + 1;
+      unsigned next = next_tag(tag(p));
       // Generation matching has no independent liveness check. Only call the
       // checker: never dereference or free this deliberately forged pointer.
       __flexfat_check_temporal(raw(p) | (uintptr_t(next) << 56), 1, 0);
@@ -132,7 +145,7 @@ int main(int argc, char **argv) {
       write_byte(q); assert(read_byte(q) == 9); free(q); return 0;
     }
     if (!strcmp(mode, "reuse") || !strcmp(mode, "stale-free") || !strcmp(mode, "stale-realloc")) {
-      char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) == (tag(p) == 255 ? 1 : tag(p) + 1));
+      char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) == next_tag(tag(p)));
       write_byte(q); assert(read_byte(q) == 9);
     }
     if (!strcmp(mode, "write")) write_byte(p);
@@ -160,8 +173,8 @@ int main(int argc, char **argv) {
   assert(memcpy(p, "abc", 3) == p);
   assert(memmove(p + 1, p, 2) == p + 1);
   write_byte(p);
-  char *dup = strdup("abc"); assert(tag(dup) && !strcmp(dup, "abc")); free(dup);
-  dup = strndup("abc", 2); assert(tag(dup) && !strcmp(dup, "ab")); free(dup);
+  char *dup = strdup("abc"); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "abc")); free(dup);
+  dup = strndup("abc", 2); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "ab")); free(dup);
   // Both layouts have enough slack here to shift the user pointer in
   // right-align mode. Realloc must copy from that interior user address.
   char *shifted = (char *)malloc(257);
@@ -174,16 +187,16 @@ int main(int argc, char **argv) {
   free(grown);
   char *q = (char *)realloc(p, 100); assert(q && read_byte(q) == 9); free(q);
   p = (char *)malloc(23); assert(!realloc(p, 0));
-  p = (char *)calloc(16, 1); assert(p && tag(p));
+  p = (char *)calloc(16, 1); assert(p && (pow2() || tag(p)));
   for (unsigned i = 0; i < 16; ++i) assert(p[i] == 0);
   free(p);
   void *aligned = nullptr; assert(!posix_memalign(&aligned, 256, 50));
-  assert(!(raw(aligned) % 256)); assert(tag(aligned));
+  assert(!(raw(aligned) % 256)); assert(pow2() || tag(aligned));
   write_byte((char *)aligned); free(aligned);
   p = (char *)malloc(23); unsigned first = tag(p); uintptr_t slot = raw(p);
-  for (unsigned i = 0; i < 255; ++i) {
+  for (unsigned i = 0; i < (pow2() ? 256U : 255U); ++i) {
     free(p); p = opaque((char *)malloc(23)); assert(raw(p) == slot);
-    assert(tag(p) == (first + i) % 255 + 1); write_byte(p);
+    assert(tag(p) == (pow2() ? (first + i + 1) % 256 : (first + i) % 255 + 1)); write_byte(p);
   }
   assert(tag(p) == first);
   int fd = open("/dev/null", O_WRONLY); assert(fd >= 0);

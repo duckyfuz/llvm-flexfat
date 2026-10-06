@@ -5,6 +5,8 @@
 // RUN: not %t quad-call 2>&1 | FileCheck %s
 // RUN: not %t quad-cross 2>&1 | FileCheck %s --check-prefix=CROSS
 // RUN: not %t quad-overflow 2>&1 | FileCheck %s --check-prefix=CROSS
+// RUN: %if !flexfat-custom-config %{ not %t tagged-foreign 2>&1 | FileCheck %s %}
+// RUN: %if flexfat-custom-config %{ %t tagged-foreign %}
 // CHECK: temporal violation
 // CHECK: generation mismatch
 // CROSS: out-of-bounds error detected
@@ -89,6 +91,10 @@ int main(int argc, char **argv) {
       uintptr_t size = __flexfat_get_size((uintptr_t)a);
       return scan((uint64_t *)(base + size - 4), 1);
     }
+    if (!strcmp(argv[1], "tagged-foreign")) {
+      auto *tagged = (uint64_t *)((uintptr_t)foreign | (UINT64_C(0xab)<<56));
+      return scan(tagged, 32) == 528 ? 0 : 1;
+    }
     if (!strncmp(argv[1], "geometry", 8)) {
       for (unsigned n = 33; n < 1000; n += 16) {
         void *q = malloc(n);
@@ -135,8 +141,6 @@ int main(int argc, char **argv) {
   assert(scan(a+4, 8) == 68);
   assert(backwards(a+11, 8) == 68);
   assert(scan(foreign, 32) == 528); // Guard fails normally for unmanaged root.
-  auto *tagged = (uint64_t *)((uintptr_t)foreign | (UINT64_C(0xab)<<56));
-  assert(scan(tagged, 32) == 528); // Branchless unmanaged sentinel bypass.
   update(a, b, 32);              // Successful multiple-root guard.
   assert(scan(a, 32) == 1056);
   update(a, foreign, 32);        // Mixed roots force ordinary fallback.

@@ -15,14 +15,17 @@ parser.add_argument('--output', type=Path)
 parser.add_argument('--skip-timings', action='store_true',
                     help='retained for compatibility; this harness now runs correctness checks only')
 parser.add_argument('--storage', choices=['shadow', 'last-byte', 'prior-byte'],
-                    default='shadow')
+                    default='last-byte')
 args = parser.parse_args()
 results = []
 
-def run(cmd, failure=None):
+def run(cmd, failure=None, warning=None):
     p = subprocess.run([str(c) for c in cmd], text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, timeout=90)
-    if failure is None:
+    if warning:
+        assert p.returncode >= 0 and warning in p.stderr and 'FLEXFAT ERROR' not in p.stderr, (
+            cmd, p.returncode, p.stderr)
+    elif failure is None:
         assert p.returncode == 0, (cmd, p.returncode, p.stdout, p.stderr)
     else:
         expected = [failure] if isinstance(failure, str) else failure
@@ -38,6 +41,8 @@ for build in args.builds:
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
+    if custom and args.storage == 'shadow':
+        raise SystemExit('shadow TBI storage requires a POW2 build')
     if custom:
         header = (build/'lib/Transforms/Instrumentation/flexfat_config_generated.h').read_text()
         table = header.split('kFlexFatGenSizes[', 1)[1].split('};', 1)[0]
@@ -48,10 +53,10 @@ for build in args.builds:
         sizes = [1 << n for n in range(4, 31)]
         region_log, region_base = 32, 0x100000000000
     abi = (('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
-            '__flexfat_tbi_abi_prior_byte_pow2_v2') if args.storage == 'prior-byte' else
+            '__flexfat_tbi_abi_prior_byte_pow2_v3') if args.storage == 'prior-byte' else
            ('__flexfat_tbi_abi_last_byte_custom_v1' if custom else
-            '__flexfat_tbi_abi_last_byte_pow2_v1') if args.storage == 'last-byte' else
-           '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v4')
+            '__flexfat_tbi_abi_last_byte_pow2_v2') if args.storage == 'last-byte' else
+           '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v7')
     metadata_bytes = 0
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
@@ -61,8 +66,7 @@ for build in args.builds:
     page = os.sysconf('SC_PAGE_SIZE')
     reservation_bytes = (0 if args.storage != 'shadow' else
                          ((metadata_bytes + page - 1) // page) * page if custom
-                         else page + sum((((1 << region_log) // size + page - 1) // page) * page
-                                         for size in sizes))
+                         else 1 << 44)
     if args.storage != 'shadow':
         metadata_bytes = 0
     checks = 0
@@ -78,7 +82,7 @@ for build in args.builds:
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
             'stale-realloc': 'realloc', 'realloc-zero': 'realloc',
-            'zero-tag': 'read', 'never': 'read', 'never-zero': 'read',
+            'zero-tag': 'read', 'never': 'read',
             'report-observation': 'read', 'thread': 'read',
             'memset': 'write', 'memcpy-src': 'read', 'memcpy-dst': 'write',
             'memmove': 'write', 'strdup': 'read', 'strndup': 'read', 'posix': 'write'}
@@ -88,11 +92,17 @@ for build in args.builds:
             for mode in ['', 'zero-length', 'realloc-failure', 'fallback',
                          'next-generation', 'wrap-reuse']:
                 run([exe, *([mode] if mode else [])]); checks += 1
+            if custom:
+                failures['never-zero'] = 'read'
+            else:
+                run([exe, 'never-zero']); checks += 1
             for mode, operation in failures.items():
                 reason = {'zero-tag': 'zero managed tag', 'never': 'never allocated',
                           'never-zero': 'never allocated',
                           'report-observation': 'never allocated'}.get(
                     mode, 'generation mismatch')
+                if not custom:
+                    reason = 'generation mismatch'
                 run([exe, mode], ['operation = ' + operation, 'reason = ' + reason]); checks += 1
             if custom:
                 for mode in ['geometry', 'geometry-tail', 'geometry-zero', 'geometry-tail-zero',
@@ -104,6 +114,10 @@ for build in args.builds:
             run([cxx, *common, *flags, '-fno-vectorize', '-fno-slp-vectorize',
                  '-fno-unroll-loops', root/'TestCases/temporal/loops.cpp', '-o', exe])
             run([exe]); checks += 1
+            if custom:
+                run([exe, 'tagged-foreign']); checks += 1
+            else:
+                run([exe, 'tagged-foreign'], 'generation mismatch'); checks += 1
             for mode in ['stale', 'overflow', 'write', 'call', 'reuse', 'fixed']:
                 run([exe, mode], 'generation mismatch'); checks += 1
 
@@ -139,6 +153,20 @@ for build in args.builds:
         run([cc, '-c', v2, '-o', old_obj])
         run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe],
             '__flexfat_tbi_abi_v2'); checks += 1
+        if not custom:
+            old_abis = ({'last-byte': ['__flexfat_tbi_abi_last_byte_pow2_v1'],
+                         'prior-byte': ['__flexfat_tbi_abi_prior_byte_pow2_v2'],
+                         'shadow': ['__flexfat_tbi_abi_v3', '__flexfat_tbi_abi_v4',
+                                    '__flexfat_tbi_abi_v6']}
+                        [args.storage])
+            for old_abi in old_abis:
+                old_source = d/'old-abi.c'
+                old_source.write_text(f'extern void {old_abi}(void);\n'
+                                      '__attribute__((constructor)) static void init(void) {'
+                                      f'{old_abi}();}}\nint main(void) {{return 0;}}\n')
+                run([cc, '-c', old_source, '-o', old_obj])
+                run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe],
+                    old_abi); checks += 1
 
         # Empty object retains the ABI contract even with section GC.
         empty = d/'empty.c'; empty.write_text('int main(void) { return 0; }\n')
@@ -174,6 +202,24 @@ for build in args.builds:
         run([cc, startup, '-Wl,--whole-archive', runtime,
              '-Wl,--no-whole-archive', '-lpthread', '-ldl', '-lrt', '-lm', '-o', exe])
         run([exe]); checks += 1
+        if args.storage == 'shadow':
+            occupied = d/'occupied-shadow.c'
+            occupied.write_text('''#include <sys/mman.h>
+#include <unistd.h>
+static void occupy(void) {
+  void *address = (void *)0x200000000000ULL;
+  if (mmap(address, 4096, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) != address)
+    _exit(2);
+}
+__attribute__((section(".preinit_array"), used))
+static void (*hook)(void) = occupy;
+int main(void) { return 0; }
+''')
+            run([cc, '-c', occupied, '-o', startup])
+            run([cc, startup, '-Wl,--whole-archive', runtime,
+                 '-Wl,--no-whole-archive', '-lpthread', '-ldl', '-lrt', '-lm', '-o', exe])
+            run([exe], 'initialization failed: fixed temporal shadow'); checks += 1
         run([cc, root/'TestCases/temporal/tbi-reentrant.c', '-fno-builtin', '-c', '-o', startup])
         run([cc, startup, *common, '-Wl,--wrap=dlsym', '-o', exe])
         run([exe]); checks += 1
@@ -205,8 +251,9 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
             run([cxx, *common, '-O2', '-fsanitize-recover=flexfat',
                  *config_flags, '-fno-builtin', case, '-o', exe])
             run([exe, 'wide']); checks += 1
-            for mode in ['byte', 'memset', 'adjacent-tag']:
-                run([exe, mode], 'out-of-bounds'); checks += 1
+            for mode in ['byte', 'adjacent-tag']:
+                run([exe, mode], warning='FLEXFAT WARNING'); checks += 1
+            run([exe, 'memset'], 'out-of-bounds'); checks += 1
             p = subprocess.run([str(exe), 'recover-other'], text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=90)
@@ -228,10 +275,15 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
                 print(build.name, 'prior-byte', name, 'passed', flush=True)
         if args.storage != 'shadow':
             mixed = d/'mixed.o'
-            run([cc, '-fsanitize=flexfat', '-fsanitize-flexfat-tbi', '-c',
+            other = 'prior-byte' if args.storage == 'last-byte' else 'last-byte'
+            run([cc, '-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
+                 '-mllvm', '-flexfat-tbi-storage=' + other, '-c',
                  empty, '-o', mixed])
             run([cc, *common, mixed, '-o', d/'mixed'],
-                '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v4')
+                ('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
+                 '__flexfat_tbi_abi_prior_byte_pow2_v3') if other == 'prior-byte' else
+                ('__flexfat_tbi_abi_last_byte_custom_v1' if custom else
+                 '__flexfat_tbi_abi_last_byte_pow2_v2'))
             checks += 1
 
         results.append({'build': str(build), 'storage': args.storage, 'checks': checks,

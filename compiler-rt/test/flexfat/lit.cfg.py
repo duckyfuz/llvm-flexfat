@@ -101,4 +101,4 @@ if "flexfat-tbi" in config.available_features:
         ("%flexfat_config_flags", " ".join(shlex.quote(flag) for flag in config_flags)))
     config.substitutions.append(
         ("%flexfat_tbi_runtime", shlex.quote(os.path.join(
-            config.compiler_rt_libdir, "libclang_rt.flexfat_tbi.a"))))
+            config.compiler_rt_libdir, "libclang_rt.flexfat_tbi_last_byte.a"))))

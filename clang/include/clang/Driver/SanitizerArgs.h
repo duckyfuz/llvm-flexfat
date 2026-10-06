@@ -124,7 +124,7 @@ public:
   bool needsRtsanRt() const { return Sanitizers.has(SanitizerKind::Realtime); }
   bool TemporalTBI = false;
   enum class TBIStorage { Shadow, LastByte, PriorByte };
-  TBIStorage Storage = TBIStorage::Shadow;
+  TBIStorage Storage = TBIStorage::LastByte;
   bool needsFlexFatTBILastByteRt() const {
     return TemporalTBI && Storage == TBIStorage::LastByte;
   }

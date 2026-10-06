@@ -9,14 +9,14 @@ int contained(void) {
 }
 
 // SHARED-LABEL: define {{.*}} @contained(
-// SHARED: %[[META:flexfat.metadata.*]] = inttoptr i64 {{.*}} to ptr
-// SHARED: load atomic i8, ptr %[[META]] acquire
+// SHARED: %[[META:flexfat.metadata.*]] = {{inttoptr|select}}
+// SHARED: load atomic i8, ptr %[[META]] {{acquire|monotonic}}
 // SHARED: load volatile i32
-// SHARED: load atomic i8, ptr %[[META]] acquire
+// SHARED: load atomic i8, ptr %[[META]] {{acquire|monotonic}}
 // SHARED: load volatile i32
 
 // SEPARATE-LABEL: define {{.*}} @contained(
-// SEPARATE: %flexfat.metadata = inttoptr i64 {{.*}} to ptr
-// SEPARATE: load atomic i8, ptr %flexfat.metadata acquire
-// SEPARATE: %flexfat.metadata{{[0-9]+}} = inttoptr i64 {{.*}} to ptr
-// SEPARATE: load atomic i8, ptr %flexfat.metadata{{[0-9]+}} acquire
+// SEPARATE: %flexfat.generation = load atomic i8, ptr {{.*}} {{acquire|monotonic}}
+// SEPARATE: load volatile i32
+// SEPARATE: %flexfat.generation{{[0-9]+}} = load atomic i8, ptr {{.*}} {{acquire|monotonic}}
+// SEPARATE: load volatile i32

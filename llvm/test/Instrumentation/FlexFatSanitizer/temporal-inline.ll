@@ -6,7 +6,7 @@ target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
 ; The spatial marker must not suppress temporal coverage. There is one failure
-; branch and no managed/unmanaged or descriptor-slot-count branch.
+; branch and no managed/unmanaged shadow-address branch.
 define i8 @access(ptr %p) {
 ; CHECK-LABEL: define i8 @access(
 ; CHECK: [[TAGGED:%.*]] = ptrtoint ptr %p to i64
@@ -14,13 +14,10 @@ define i8 @access(ptr %p) {
 ; CHECK-NOT: br i1
 ; CHECK: [[MANAGED:%flexfat.managed]] = icmp {{.*}}
 ; CHECK: [[ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
-; CHECK: [[GEN:%.*]] = load atomic i8, ptr [[ENTRY]] acquire, align 1, !nosanitize
+; CHECK: [[GEN:%.*]] = load atomic i8, ptr [[ENTRY]] {{acquire|monotonic}}, align 1, !nosanitize
 ; CHECK-NOT: !invariant.load
 ; CHECK: lshr i64 [[TAGGED]], 56
-; CHECK: icmp ne i8 {{.*}}, 0
 ; CHECK: icmp eq i8 {{.*}}, [[GEN]]
-; CHECK: xor i1 [[MANAGED]], true
-; CHECK: or i1
 ; CHECK: br i1
 ; CHECK: [[OBS:%.*]] = zext i8 [[GEN]] to i32
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 [[TAGGED]], i64 1, i32 0, i32 [[OBS]])
@@ -35,9 +32,14 @@ define i8 @access(ptr %p) {
 ; CUSTOM: icmp ugt i64
 ; CUSTOM: %flexfat.slot = sub i64
 ; CUSTOM-NOT: mul i128
-; CUSTOM: %flexfat.metadata.slot = select i1
-; CUSTOM: load i64, ptr {{.*}}, align 8, !invariant.load
-; CUSTOM: load atomic i8
+; CUSTOM: icmp uge i64 %flexfat.base.int
+; CUSTOM: icmp ule i64 %flexfat.base.int
+; CUSTOM: %flexfat.metadata.address = add i64
+; CUSTOM: select i1 {{.*}}@__flexfat_tbi_zero_sentinel
+; CUSTOM: load atomic i8, ptr {{.*}} acquire
+; CUSTOM: icmp ne i8 {{.*}}, 0
+; CUSTOM: xor i1 %flexfat.managed, true
+; CUSTOM: or i1
 ; POW2-LABEL: define i8 @access(
 ; POW2: %flexfat.class = sub i64
 ; POW2: %flexfat.managed = icmp ult i64
@@ -45,8 +47,8 @@ define i8 @access(ptr %p) {
 ; POW2: %flexfat.managed.size = shl i64 1,
 ; POW2: %flexfat.size = select i1 %flexfat.managed, i64 %flexfat.managed.size, i64 -1
 ; POW2: %flexfat.mask = select i1 %flexfat.managed, i64 {{.*}}, i64 0
-; POW2: %flexfat.slot = lshr i64
-; POW2-NOT: load i64, ptr
+; POW2: %flexfat.metadata.address = add i64
+; POW2-NOT: load i64, ptr {{.*}}, align 8, !invariant.load
 ; POW2: load atomic i8
   %v = load i8, ptr %p, !flexfat.instrumented !0
   ret i8 %v
@@ -89,11 +91,11 @@ define internal void @__flexfat_tbi_ctor() {
   ret void
 }
 declare void @__flexfat_tbi_abi_v1()
-; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_v{{[34]}}()
-; CHECK: call void @__flexfat_tbi_abi_v{{[34]}}()
-; CUSTOM-LABEL: define internal void @__flexfat_tbi_ctor_v3()
-; CUSTOM: call void @__flexfat_tbi_abi_v3()
-; POW2-LABEL: define internal void @__flexfat_tbi_ctor_v4()
-; POW2: call void @__flexfat_tbi_abi_v4()
+; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_
+; CHECK: call void @__flexfat_tbi_abi_last_byte_
+; CUSTOM-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_custom_v1()
+; CUSTOM: call void @__flexfat_tbi_abi_last_byte_custom_v1()
+; POW2-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_pow2_v2()
+; POW2: call void @__flexfat_tbi_abi_last_byte_pow2_v2()
 ; CHECK-NEXT: ret void
 !0 = !{}

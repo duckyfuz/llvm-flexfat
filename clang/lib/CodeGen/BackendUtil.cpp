@@ -135,7 +135,7 @@ static cl::opt<bool> FlexFatTBI(
     cl::desc("Enable FlexFat TBI temporal checking"));
 static cl::opt<FlexFatSanitizerOptions::TBIStorage> FlexFatTBIStorage(
     "flexfat-tbi-storage",
-    cl::init(FlexFatSanitizerOptions::TBIStorage::Shadow),
+    cl::init(FlexFatSanitizerOptions::TBIStorage::LastByte),
     cl::desc("Select FlexFat TBI generation storage"),
     cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow,
                           "shadow", "Shadow storage"),
@@ -846,16 +846,14 @@ static void addSanitizers(const Triple &TargetTriple,
     FlexFatOpts.Storage = FlexFatTBIStorage;
     if (FlexFatTBILastByte.getPosition() > StoragePosition) {
       StoragePosition = FlexFatTBILastByte.getPosition();
-      FlexFatOpts.Storage = FlexFatTBILastByte
-                                ? FlexFatSanitizerOptions::TBIStorage::LastByte
-                                : FlexFatSanitizerOptions::TBIStorage::Shadow;
+      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
     }
     if (FlexFatTBIPriorByte.getPosition() > StoragePosition)
       FlexFatOpts.Storage = FlexFatTBIPriorByte
                                 ? FlexFatSanitizerOptions::TBIStorage::PriorByte
-                                : FlexFatSanitizerOptions::TBIStorage::Shadow;
+                                : FlexFatSanitizerOptions::TBIStorage::LastByte;
     if (!FlexFatOpts.TemporalTBI)
-      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::Shadow;
+      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
     FlexFatOpts.Mode = FlexFatMode;
     FlexFatOpts.AllocationAlignment = FlexFatAlignment;
     FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;

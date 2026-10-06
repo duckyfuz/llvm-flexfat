@@ -55,8 +55,7 @@ int main(int argc, char **argv) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
     forbidden = __flexfat::kTablesBase + 2 * __flexfat::kTablesOffset;
 #else
-    forbidden = ((__flexfat::kRegionBase >> __flexfat::kRegionSizeLog) - 1) *
-                (1ULL << (__flexfat::kRegionSizeLog - __flexfat::kMinSizeLog));
+    forbidden = 0x200000000000ULL;
 #endif
     FILE *maps = fopen("/proc/self/maps", "r");
     assert(maps);

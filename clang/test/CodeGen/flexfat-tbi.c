@@ -21,7 +21,7 @@
 // CHECK: @llvm.global_ctors
 // CHECK: @llvm.used
 // CHECK-LABEL: define {{.*}} @access(
-// CHECK: load atomic i8, ptr {{.*}} acquire, align 1
+// CHECK: load atomic i8, ptr {{.*}} {{acquire|monotonic}}, align 1
 // CHECK: load volatile i32
 int access(volatile int *p) { return *p; }
 // CHECK-LABEL: define {{.*}} @excluded(

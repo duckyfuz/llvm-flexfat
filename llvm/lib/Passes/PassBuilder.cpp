@@ -990,6 +990,12 @@ Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
         Result.TemporalTBI = true;
       else if (Param == "whole-access")
         Result.CheckWholeAccess = true;
+      else if (Param == "tbi-storage=shadow")
+        Result.Storage = FlexFatSanitizerOptions::TBIStorage::Shadow;
+      else if (Param == "tbi-storage=last-byte")
+        Result.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
+      else if (Param == "tbi-storage=prior-byte")
+        Result.Storage = FlexFatSanitizerOptions::TBIStorage::PriorByte;
       else
         return make_error<StringError>(
             formatv("invalid FlexFatSanitizer pass parameter '{}'", Param)

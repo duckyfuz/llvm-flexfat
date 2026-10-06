@@ -150,6 +150,9 @@ struct GeometryRecord {
   Value *Managed = nullptr;
   Value *Entry = nullptr;
   Instruction *PrepareBefore = nullptr;
+  // Custom-mode loop guards prove that affine accesses retain a nonzero
+  // root tag. This does not cache the observed generation.
+  bool NonzeroTagProven = false;
 };
 
 struct SelectProvenance {
@@ -186,7 +189,8 @@ private:
   Type *IntptrTy;
   const uint64_t TablesBase;
   bool usesInSlotTags() const {
-    return Options.Storage != FlexFatSanitizerOptions::TBIStorage::Shadow;
+    return Options.TemporalTBI &&
+           Options.Storage != FlexFatSanitizerOptions::TBIStorage::Shadow;
   }
   DenseMap<Value *, BoundsRecord> Bounds;
   DenseMap<Value *, Value *> RecoveredBases;
@@ -303,6 +307,9 @@ private:
 #endif
 
   static constexpr uint64_t kTablesOffset = 0x1000000ULL;
+#ifndef FLEXFAT_CUSTOM_CONFIG
+  static constexpr uint64_t kTemporalShadowOffset = 0x200000000000ULL;
+#endif
   static constexpr uint64_t UserAddressLimit = 1ULL << 48;
   static constexpr uint64_t NumTableEntries = UserAddressLimit >> RegionSizeLog;
   static constexpr uint64_t ManagedTableBegin = RegionBase >> RegionSizeLog;
@@ -315,6 +322,10 @@ private:
                 "FlexFat managed regions overlap fixed metadata");
   static_assert(kTablesBase + 4 * kTablesOffset <= UserAddressLimit,
                 "FlexFat fixed metadata exceeds the 48-bit address space");
+#ifndef FLEXFAT_CUSTOM_CONFIG
+  static_assert(kTemporalShadowOffset + (1ULL << 44) <= UserAddressLimit,
+                "FlexFat direct shadow exceeds the user address range");
+#endif
 
   MDNode *InstrumentedMD = nullptr;
   MDNode *NoSanitizeMD = nullptr;
@@ -703,16 +714,9 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
     return;
   }
 #ifndef FLEXFAT_CUSTOM_CONFIG
-  Value *Class = B.CreateSub(G.Index, B.getInt64(ManagedTableBegin));
-  Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
-                                B.getInt64(0));
-  Value *Local = B.CreateAnd(G.Raw, B.getInt64((1ULL << RegionSizeLog) - 1));
-  G.Slot = B.CreateLShr(Local, Shift, "flexfat.slot");
-  Value *Address =
-      B.CreateAdd(B.CreateShl(G.Index, B.getInt64(RegionSizeLog - 4)), G.Slot);
-  Address = B.CreateSelect(
-      G.Managed, Address,
-      B.getInt64((ManagedTableBegin - 1) * (1ULL << (RegionSizeLog - 4))));
+  Value *Address = B.CreateAdd(B.CreateLShr(G.Base, B.getInt64(4)),
+                               B.getInt64(kTemporalShadowOffset),
+                               "flexfat.metadata.address");
   G.Entry = B.CreateIntToPtr(Address, B.getPtrTy(), "flexfat.metadata");
 #else
   Value *Slot =
@@ -1206,7 +1210,7 @@ bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
   bool IsWrite =
       isa<StoreInst>(I) || isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I);
   if (AccessSize.isScalable()) {
-    if (!usesInSlotTags())
+    if (!usesInSlotTags() || getBounds(Ptr).Kind == BaseKind::NonFlexFat)
       return false;
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();
@@ -1302,8 +1306,9 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
   }
 }
 
-// Temporal state is intentionally never cached: every covered access must
-// observe metadata again, including after calls and on each loop iteration.
+// Emit a generation observation for each covered access. Shadow observations
+// are ordinary loads, like HWASan's, and may be reused by later optimization.
+// In-slot observations retain atomic ordering.
 bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Instruction *I = Access.Inst;
   IRBuilder<> B(I);
@@ -1333,22 +1338,31 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
       G.Tagged = B.CreatePtrToInt(Access.Pointer, IntptrTy);
   }
   auto *Generation = B.CreateLoad(B.getInt8Ty(), G.Entry, "flexfat.generation");
+#ifdef FLEXFAT_CUSTOM_CONFIG
   Generation->setAtomic(AtomicOrdering::Acquire);
+#else
+  if (usesInSlotTags())
+    Generation->setAtomic(AtomicOrdering::Monotonic);
+#endif
   Generation->setAlignment(Align(1));
   Value *Tag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
-  Value *Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)),
-                               B.CreateICmpEQ(Tag, Generation));
+  Value *Matches = B.CreateICmpEQ(Tag, Generation);
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  if (!G.NonzeroTagProven)
+    Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)), Matches);
   auto *Managed = dyn_cast<ConstantInt>(G.Managed);
   Value *Valid = Managed && Managed->isOne()
                      ? Matches
                      : B.CreateOr(B.CreateNot(G.Managed), Matches);
+#else
+  Value *Valid = Matches;
+#endif
   auto *Failure = SplitBlockAndInsertIfThen(
       B.CreateNot(Valid), CheckBefore, true,
       MDBuilder(M.getContext()).createBranchWeights(1, 1048575));
   markNoSanitize(Failure);
-  // Keep the data-dependent managed/tag predicate as one condition. Without
-  // this lowering hint SelectionDAG can expand the OR into an additional
-  // managed/unmanaged branch, despite the unconditional acquire observation.
+  // Keep the temporal predicate as one condition. In custom mode this hint
+  // prevents SelectionDAG from turning its managed/tag OR into another branch.
   Failure->getParent()->getSinglePredecessor()->getTerminator()->setMetadata(
       LLVMContext::MD_unpredictable, getInstrumentedMetadata());
   B.SetInsertPoint(Failure);
@@ -1699,6 +1713,12 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
     for (Value *Root : Roots) {
       GeometryRecord G = emitGeometry(B, Root);
       RootGeometry[Root] = G;
+      // The range guard keeps every affine access within this root's slot,
+      // so address arithmetic cannot carry into or borrow from the tag byte.
+#ifdef FLEXFAT_CUSTOM_CONFIG
+      Value *RootTag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
+      Valid = B.CreateAnd(Valid, B.CreateICmpNE(RootTag, B.getInt8(0)));
+#endif
       Value *Start = B.CreateShl(G.Index, RegionSizeLog);
       Value *End = B.CreateAdd(Start, B.getInt64(1ULL << RegionSizeLog));
       Valid = B.CreateAnd(Valid, G.Managed);
@@ -1760,6 +1780,9 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
       // Only the runtime guard proves managed allocation. Static containment
       // can also describe an allocation that fell back to libc.
       FastGeometry[Clone].Managed = B.getTrue();
+#ifdef FLEXFAT_CUSTOM_CONFIG
+      FastGeometry[Clone].NonzeroTagProven = true;
+#endif
       RangeProven.insert(Clone);
     }
     NumTBILoopRemovedSpatial += Accesses.size();
@@ -2084,16 +2107,14 @@ bool FlexFatSanitizer::run() {
                             ? "__flexfat_tbi_abi_last_byte_custom_v1"
                             : "__flexfat_tbi_abi_v3";
 #else
-  const char *CtorName = Storage == TBIStorage::PriorByte
-                             ? "__flexfat_tbi_ctor_prior_byte_pow2_v2"
-                         : Storage == TBIStorage::LastByte
-                             ? "__flexfat_tbi_ctor_last_byte_pow2_v1"
-                             : "__flexfat_tbi_ctor_v4";
-  const char *ABIName = Storage == TBIStorage::PriorByte
-                            ? "__flexfat_tbi_abi_prior_byte_pow2_v2"
-                        : Storage == TBIStorage::LastByte
-                            ? "__flexfat_tbi_abi_last_byte_pow2_v1"
-                            : "__flexfat_tbi_abi_v4";
+  const char *CtorName =
+      Storage == TBIStorage::PriorByte ? "__flexfat_tbi_ctor_prior_byte_pow2_v3"
+      : Storage == TBIStorage::LastByte ? "__flexfat_tbi_ctor_last_byte_pow2_v2"
+                                        : "__flexfat_tbi_ctor_v7";
+  const char *ABIName =
+      Storage == TBIStorage::PriorByte  ? "__flexfat_tbi_abi_prior_byte_pow2_v3"
+      : Storage == TBIStorage::LastByte ? "__flexfat_tbi_abi_last_byte_pow2_v2"
+                                        : "__flexfat_tbi_abi_v7";
 #endif
   if (Options.TemporalTBI && !M.getFunction(CtorName)) {
     auto &Ctx = M.getContext();
@@ -2166,6 +2187,14 @@ FlexFatSanitizerPass::FlexFatSanitizerPass(
 
 PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
                                             ModuleAnalysisManager &AM) {
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  if (Options.TemporalTBI &&
+      Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow) {
+    M.getContext().emitError(
+        "FlexFat TBI shadow storage requires a POW2 build");
+    return PreservedAnalyses::all();
+  }
+#endif
   FlexFatSanitizer Sanitizer(M, Options);
   if (!Sanitizer.run())
     return PreservedAnalyses::all();
@@ -2179,6 +2208,14 @@ FlexFatSanitizerFunctionPass::FlexFatSanitizerFunctionPass(
 
 PreservedAnalyses FlexFatSanitizerFunctionPass::run(Function &F,
                                                     FunctionAnalysisManager &) {
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  if (Options.TemporalTBI &&
+      Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow) {
+    F.getContext().emitError(
+        "FlexFat TBI shadow storage requires a POW2 build");
+    return PreservedAnalyses::all();
+  }
+#endif
   FlexFatSanitizer Sanitizer(*F.getParent(), Options);
   if (!Sanitizer.runFunction(F))
     return PreservedAnalyses::all();

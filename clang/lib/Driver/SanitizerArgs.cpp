@@ -721,7 +721,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       LLVMStorageArg = A;
     } else if (Value == "flexfat-tbi-last-byte=false" ||
                Value == "flexfat-tbi-last-byte=0") {
-      Storage = TBIStorage::Shadow;
+      Storage = TBIStorage::LastByte;
       LLVMStorageArg = A;
     } else if (Value == "flexfat-tbi-prior-byte" ||
                Value == "flexfat-tbi-prior-byte=true" ||
@@ -730,7 +730,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       LLVMStorageArg = A;
     } else if (Value == "flexfat-tbi-prior-byte=false" ||
                Value == "flexfat-tbi-prior-byte=0") {
-      Storage = TBIStorage::Shadow;
+      Storage = TBIStorage::LastByte;
       LLVMStorageArg = A;
     }
   }
@@ -744,7 +744,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       D.Diag(diag::err_drv_unsupported_opt_for_target)
           << "-fsanitize-flexfat-tbi" << Triple.str();
   }
-  if (Storage != TBIStorage::Shadow && !TemporalTBI && DiagnoseErrors)
+  if (LLVMStorageArg && !TemporalTBI && DiagnoseErrors)
     D.Diag(diag::err_drv_argument_only_allowed_with)
         << LLVMStorageArg->getAsString(Args)
         << "-fsanitize-flexfat-tbi";

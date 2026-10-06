@@ -14,11 +14,11 @@ define i8 @invariant(ptr %p, i1 %again) {
 ; CHECK: br label %body
 ; CHECK: body:
 ; CHECK-NOT: load i64
-; CHECK: load atomic i8, ptr %flexfat.metadata acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 ; CHECK: %a = load volatile i8, ptr %p
 ; CHECK: call void @may_free
 ; CHECK-NOT: load i64
-; CHECK: load atomic i8, ptr %flexfat.metadata acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 ; CHECK: %b = load volatile i8, ptr %p
 ; CHECK: ret i8
   br label %body
@@ -41,11 +41,11 @@ define i8 @contained(i1 %again) {
 ; CHECK: body:
 ; CHECK: %q = getelementptr i8, ptr %p, i64 3
 ; CHECK-NOT: load i64
-; CHECK: load atomic i8, ptr %flexfat.metadata acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 ; CHECK: %a = load volatile i8, ptr %q
 ; CHECK: %r = getelementptr i8, ptr %p, i64 7
 ; CHECK-NOT: load i64
-; CHECK: load atomic i8, ptr %flexfat.metadata acquire
+; CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 ; CHECK: %b = load volatile i8, ptr %r
   %p = call ptr @malloc(i64 16)
   br label %body

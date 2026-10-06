@@ -26,12 +26,12 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_init();
 // Implemented only by the Linux AArch64 temporal runtime.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v2();
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_pow2_v2();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_pow2_v3();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v1();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_pow2_v2();
 #ifndef FLEXFAT_CUSTOM_CONFIG
-// POW2 v4 uses a fixed sparse shadow: region << (region_size_log -
-// min_size_log) plus the local slot. The preceding window supplies the
-// unmanaged sentinel.
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v4();
+// POW2 v7 uses the 32–48 TiB direct shadow and modulo-256 generations.
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7();
 #endif
 // v3 immutable biases live at kTablesBase + 2 * kTablesOffset. The generation
 // byte is addressed by wrapping integer addition of bias and absolute slot.

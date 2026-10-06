@@ -58,18 +58,18 @@ __attribute__((noinline)) long small(const volatile long *p, long n) {
 // CHECK-LABEL: define{{.*}} @grouped(
 // CHECK: flexfat.metadata
 // CHECK: llvm.sadd.with.overflow.i64
-// CHECK: br i1 {{.*}}, label %for.body.flexfat.fast, label %for.body
+// CHECK: br i1 {{.*}}, label %for.body.flexfat.fast{{.*}}, label %for.body{{.*}}
 // CHECK: for.body.flexfat.fast:
-// CHECK: load atomic i8, ptr %flexfat.metadata acquire
-// CHECK: load atomic i8, ptr %flexfat.metadata acquire
-// CHECK: load atomic i8, ptr %flexfat.metadata acquire
-// CHECK: load atomic i8, ptr %flexfat.metadata acquire
-// CHECK: load atomic i8, ptr %flexfat.metadata acquire
-// CHECK: %flexfat.metadata{{[0-9]+}} = inttoptr
+// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
+// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
+// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
+// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
+// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
 // CHECK: call void @__flexfat_report_oob
+// CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]+}} {{acquire|monotonic}}
 // CHECK: for.body:
-// CHECK: flexfat.metadata{{[0-9]+}} = inttoptr
 // CHECK: call void @__flexfat_report_oob
+// CHECK: load atomic i8
 // CHECK-LABEL: define{{.*}} @many(
 // CHECK: flexfat.metadata
 // CHECK: for.body.flexfat.fast:
@@ -84,11 +84,11 @@ __attribute__((noinline)) long small(const volatile long *p, long n) {
 // CHECK: for.body.flexfat.fast:
 // ASM-LABEL: grouped:
 // ASM: // %for.body.flexfat.fast
-// ASM: ldarb
-// ASM: ldarb
-// ASM: ldarb
-// ASM: ldarb
-// ASM: ldarb
+// ASM: {{ldarb|ldrb}}
+// ASM: {{ldarb|ldrb}}
+// ASM: {{ldarb|ldrb}}
+// ASM: {{ldarb|ldrb}}
+// ASM: {{ldarb|ldrb}}
 // ASM: bl{{[[:space:]]+}}tick
 // OFF-LABEL: define{{.*}} @many(
 // OFF-NOT: flexfat.fast
