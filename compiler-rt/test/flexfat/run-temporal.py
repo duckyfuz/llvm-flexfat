@@ -73,11 +73,16 @@ for build in args.builds:
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
         exe = d/'test'
-        variants = [(['-O0'], 'O0'), (['-O2'], 'O2'),
-                    (['-O2', '-mllvm', '-flexfat-mode=safe'], 'safe'),
+        variants = [(['-O'+level, '-mllvm', '-flexfat-mode='+mode], mode+'-O'+level)
+                    for mode in ['fast', 'safe', 'optimized']
+                    for level in ['0', '2', '3']] + [
                     (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right-align'),
                     (['-O2', '-mllvm', '-flexfat-mode=safe', '-mllvm', '-flexfat-alignment=right'], 'safe-right'),
-                    (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover')]
+                    (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover'),
+                    (['-O2', '-mllvm', '-flexfat-mode=optimized', '-mllvm',
+                      '-flexfat-alignment=right'], 'optimized-right'),
+                    (['-O2', '-mllvm', '-flexfat-mode=optimized', '-mllvm',
+                      '-flexfat-recover=true'], 'optimized-recover')]
         failures = {
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',

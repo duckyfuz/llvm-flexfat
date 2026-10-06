@@ -115,7 +115,10 @@ static cl::opt<FlexFatSanitizerOptions::FlexFatMode> FlexFatMode(
         clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Fast, "fast",
                    "Instrument at ScalarOptimizerLateEP"),
         clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Safe, "safe",
-                   "Instrument at PipelineStartEP and ScalarOptimizerLateEP")));
+                   "Instrument at PipelineStartEP and ScalarOptimizerLateEP"),
+        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Optimized, "optimized",
+                   "Instrument at OptimizerLastEP, then run MemorySSA EarlyCSE, "
+                   "InstCombine and SimplifyCFG")));
 
 static cl::opt<FlexFatSanitizerOptions::Alignment> FlexFatAlignment(
     "flexfat-alignment", cl::init(FlexFatSanitizerOptions::Alignment::Left),
@@ -854,30 +857,46 @@ static void addSanitizers(const Triple &TargetTriple,
                                 : FlexFatSanitizerOptions::TBIStorage::LastByte;
     if (!FlexFatOpts.TemporalTBI)
       FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    FlexFatOpts.Mode = FlexFatMode;
+    FlexFatOpts.setMode(FlexFatMode);
     FlexFatOpts.AllocationAlignment = FlexFatAlignment;
     FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
 
+    FlexFatOpts = resolveFlexFatSanitizerOptions(FlexFatOpts);
     FlexFatSanitizerOptions SetupOpts = FlexFatOpts;
     SetupOpts.InternalModuleSetupOnly_ = true;
     PB.registerPipelineStartEPCallback(
         [SetupOpts](ModulePassManager &MPM, OptimizationLevel) {
           MPM.addPass(FlexFatSanitizerPass(SetupOpts));
         });
-    PB.registerScalarOptimizerLateEPCallback(
-        [FlexFatOpts](FunctionPassManager &FPM, OptimizationLevel) {
-          FPM.addPass(FlexFatSanitizerFunctionPass(FlexFatOpts));
-        });
+    if (FlexFatOpts.Point ==
+        FlexFatSanitizerOptions::InstrumentationPoint::ScalarLate)
+      PB.registerScalarOptimizerLateEPCallback(
+          [FlexFatOpts](FunctionPassManager &FPM,
+                        OptimizationLevel Level) mutable {
+            FlexFatOpts.InternalSkipOptimizations_ =
+                Level == OptimizationLevel::O0;
+            FPM.addPass(FlexFatSanitizerFunctionPass(FlexFatOpts));
+          });
+    else
+      PB.registerOptimizerLastEPCallback(
+          [FlexFatOpts](ModulePassManager &MPM, OptimizationLevel Level,
+                        ThinOrFullLTOPhase) mutable {
+            FlexFatOpts.InternalSkipOptimizations_ =
+                Level == OptimizationLevel::O0;
+            MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
+          });
 
     if (FlexFatOpts.Mode == FlexFatSanitizerOptions::FlexFatMode::Safe) {
       // Safe: instrument once at PipelineStartEP so early-inlined dead
       // computations are still checked, then instrument at scalar-late again to
       // catch optimizer-introduced accesses. The pass tags its own IR so the
       // later run skips already-instrumented accesses.
-      PB.registerPipelineStartEPCallback(
-          [FlexFatOpts](ModulePassManager &MPM, OptimizationLevel) {
-            MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
-          });
+      PB.registerPipelineStartEPCallback([FlexFatOpts](
+                                             ModulePassManager &MPM,
+                                             OptimizationLevel Level) mutable {
+        FlexFatOpts.InternalSkipOptimizations_ = Level == OptimizationLevel::O0;
+        MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
+      });
     }
   }
 }

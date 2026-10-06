@@ -1,3 +1,12 @@
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O0 -mllvm -flexfat-mode=fast -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-mode=fast -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O3 -mllvm -flexfat-mode=fast -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O0 -mllvm -flexfat-mode=safe -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-mode=safe -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O3 -mllvm -flexfat-mode=safe -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O0 -mllvm -flexfat-mode=optimized -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-mode=optimized -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O3 -mllvm -flexfat-mode=optimized -emit-llvm -o /dev/null %s
 // REQUIRES: aarch64-registered-target
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -emit-llvm -o /dev/null %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-tbi=true -emit-llvm -o /dev/null %s

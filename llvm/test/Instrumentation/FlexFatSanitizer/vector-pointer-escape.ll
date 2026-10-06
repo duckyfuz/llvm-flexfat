@@ -1,3 +1,4 @@
+; RUN: opt -passes='default<O3>,flexfat<mode=optimized>,verify' -disable-output %s
 ; RUN: opt -passes='flexfat,verify' -S %s | FileCheck %s
 ; RUN: opt -passes='flexfat,flexfat,verify' -S %s | FileCheck %s
 ; RUN: opt -passes='flexfat,default<O2>,verify' -disable-output %s
@@ -73,9 +74,9 @@ merge:
 ; Duplicate switch edges must also agree in the scalar lane PHIs.
 define <2 x i64> @duplicate_edges(ptr %base, <2 x i64> %offsets, i32 %which) {
 ; CHECK-LABEL: define <2 x i64> @duplicate_edges(
-; CHECK: flexfat.escape.phi
-; CHECK: call void @__flexfat_report_oob(
-; CHECK: call void @__flexfat_report_oob(
+; CHECK: flexfat.escape.phi = phi ptr
+; CHECK: flexfat.base = phi ptr
+; CHECK: flexfat.escape.phi{{[0-9]+}} = phi ptr
 ; CHECK: ret <2 x i64>
 entry:
   %p = getelementptr i8, ptr %base, <2 x i64> %offsets
@@ -87,4 +88,46 @@ join:
   ret <2 x i64> %bits
 exit:
   ret <2 x i64> zeroinitializer
+}
+
+; Scalarize the select as well as its lane-wise GEP operands.
+define <2 x i64> @selected_escape(<2 x i1> %choose, ptr %a, ptr %b,
+                                 <2 x i64> %offsets) {
+; CHECK-LABEL: define <2 x i64> @selected_escape(
+; CHECK: select i1
+; CHECK: call void @__flexfat_report_oob(
+; CHECK: select i1
+; CHECK: call void @__flexfat_report_oob(
+; CHECK: ret <2 x i64>
+  %left = getelementptr i8, ptr %a, <2 x i64> %offsets
+  %right = getelementptr i8, ptr %b, <2 x i64> %offsets
+  %chosen = select <2 x i1> %choose, <2 x ptr> %left, <2 x ptr> %right
+  %bits = ptrtoint <2 x ptr> %chosen to <2 x i64>
+  ret <2 x i64> %bits
+}
+
+declare <2 x ptr> @may_throw()
+declare i32 @personality(...)
+; Extraction of an invoke result must stay on its normal edge.
+define <2 x i64> @invoke_escape(i1 %choose) personality ptr @personality {
+; CHECK-LABEL: define <2 x i64> @invoke_escape(
+; CHECK: invoke <2 x ptr> @may_throw()
+; CHECK: extractelement <2 x ptr> %p
+; CHECK: flexfat.escape.phi = phi ptr
+; CHECK: flexfat.base = phi ptr
+; CHECK: flexfat.escape.phi{{[0-9]+}} = phi ptr
+; CHECK: ret <2 x i64>
+entry:
+  br i1 %choose, label %call, label %other
+call:
+  %p = invoke <2 x ptr> @may_throw() to label %join unwind label %unwind
+other:
+  br label %join
+join:
+  %joined = phi <2 x ptr> [ %p, %call ], [ zeroinitializer, %other ]
+  %bits = ptrtoint <2 x ptr> %joined to <2 x i64>
+  ret <2 x i64> %bits
+unwind:
+  %landing = landingpad { ptr, i32 } cleanup
+  resume { ptr, i32 } %landing
 }

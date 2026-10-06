@@ -22,6 +22,7 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -40,6 +41,9 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ModRef.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/EarlyCSE.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
@@ -65,6 +69,27 @@ static cl::opt<bool> ClShareContainedGeometry(
 static cl::opt<bool> ClVersionTBILoops(
     "flexfat-version-tbi-loops", cl::Hidden, cl::init(false),
     cl::desc("Extend TBI loop versioning with grouped access ranges"));
+
+using FFOptions = FlexFatSanitizerOptions;
+static cl::opt<FFOptions::InstrumentationPoint> ClPoint(
+    "flexfat-instrumentation-point", cl::Hidden,
+    cl::init(FFOptions::InstrumentationPoint::ScalarLate),
+    cl::values(clEnumValN(FFOptions::InstrumentationPoint::ScalarLate,
+                          "scalar-late", "Scalar optimizer late"),
+               clEnumValN(FFOptions::InstrumentationPoint::OptimizerLast,
+                          "optimizer-last", "Optimizer last")));
+static cl::opt<FFOptions::PostCleanup> ClCleanup(
+    "flexfat-post-cleanup", cl::Hidden, cl::init(FFOptions::PostCleanup::None),
+    cl::values(clEnumValN(FFOptions::PostCleanup::None, "none", "No cleanup"),
+               clEnumValN(FFOptions::PostCleanup::EarlyCSE, "early-cse",
+                          "MemorySSA EarlyCSE cleanup")));
+FlexFatSanitizerOptions llvm::resolveFlexFatSanitizerOptions(FFOptions O) {
+  if (ClPoint.getNumOccurrences())
+    O.Point = ClPoint;
+  if (ClCleanup.getNumOccurrences())
+    O.Cleanup = ClCleanup;
+  return O;
+}
 
 STATISTIC(NumInstrumentedLoads, "Number of loads instrumented");
 STATISTIC(NumInstrumentedStores, "Number of stores instrumented");
@@ -205,6 +230,11 @@ private:
   SmallPtrSet<Instruction *, 16> RangeProven;
   DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> SpatialGeometry;
   SmallPtrSet<BasicBlock *, 16> CountedLoopHeaders;
+  void remark(Instruction *I, StringRef Name, StringRef Message) {
+    OptimizationRemarkEmitter ORE(I->getFunction());
+    ORE.emit(
+        [&]() { return OptimizationRemark(DEBUG_TYPE, Name, I) << Message; });
+  }
   bool versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                    ScalarEvolution &SE);
   void prepareLoopGeometry(ArrayRef<AccessRecord> Accesses, DominatorTree &DT,
@@ -1549,10 +1579,11 @@ void FlexFatSanitizer::discoverAccesses(
 
 // Version original scalar loops before provenance or check insertion mutates
 // their CFG. Recompute candidate facts after each clone before selecting the
-// next original loop. Generation observations are never moved.
+// next original loop. This transformation does not move generation
+// observations.
 bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                                    ScalarEvolution &SE) {
-  if (!Options.TemporalTBI)
+  if (!Options.TemporalTBI || Options.InternalSkipOptimizations_)
     return false;
   const bool Extended = ClVersionTBILoops;
   struct RangeAccess {
@@ -1730,8 +1761,7 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           Group->HighEnd = std::max(Group->HighEnd, End);
         }
         if (Accesses.size() > (Extended ? 128U : 8U) ||
-            Roots.size() > (Extended ? 8U : 4U) ||
-            Groups.size() > (Extended ? 16U : 8U)) {
+            Roots.size() > (Extended ? 8U : 4U) || Groups.size() > (Extended ? 16U : 8U)) {
           if (CountStats)
             ++NumTBILoopRejectedSize;
           Eligible = false;
@@ -1744,23 +1774,27 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
     if (!Eligible) {
       if (CountStats && Instructions <= (Extended ? 1024U : 128U) &&
           Accesses.size() <= (Extended ? 128U : 8U) &&
-          Roots.size() <= (Extended ? 8U : 4U) &&
-          Groups.size() <= (Extended ? 16U : 8U))
+          Roots.size() <= (Extended ? 8U : 4U) && Groups.size() <= (Extended ? 16U : 8U))
         ++NumTBILoopRejectedControl;
+      remark(L->getHeader()->getTerminator(), "LoopControlRejected",
+             "Loop fails existing control-flow or access legality rules");
       continue;
     }
     if (Instructions > (Extended ? 1024U : 128U) ||
-        Accesses.size() > (Extended ? 128U : 8U) ||
-        Roots.size() > (Extended ? 8U : 4U) ||
+        Accesses.size() > (Extended ? 128U : 8U) || Roots.size() > (Extended ? 8U : 4U) ||
         Groups.size() > (Extended ? 16U : 8U)) {
       if (CountStats)
         ++NumTBILoopRejectedSize;
+      remark(L->getHeader()->getTerminator(), "LoopSizeRejected",
+             "Loop exceeds existing hard size limits");
       continue;
     }
     if (Accesses.empty() ||
         (Extended && Accesses.size() < 4 && !DefaultEligible)) {
       if (CountStats)
         ++NumTBILoopRejectedFew;
+      remark(L->getHeader()->getTerminator(), "LoopAccessRejected",
+             "Loop fails access-count profitability policy");
       continue;
     }
     SCEVExpander Exp(SE, "flexfat.trip");
@@ -1772,6 +1806,8 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
                               L->getLoopPreheader()->getTerminator())) {
       if (CountStats)
         ++NumTBILoopRejectedTrip;
+      remark(L->getHeader()->getTerminator(), "LoopTripRejected",
+             "Loop trip count cannot safely be expanded at the entry guard");
       continue;
     }
 
@@ -1806,6 +1842,8 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
           RangeProven.insert(A.Inst);
         }
         NumTBILoopRemovedSpatial += Accesses.size();
+        remark(L->getHeader()->getTerminator(), "LoopContainedSelected",
+               "Selected statically contained spatial loop");
         L->getLoopLatch()->getTerminator()->setMetadata(
             "flexfat.loop.versioned", getInstrumentedMetadata());
         return true;
@@ -1906,6 +1944,8 @@ bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
       RangeProven.insert(Clone);
     }
     NumTBILoopRemovedSpatial += Accesses.size();
+    remark(Fast->getHeader()->getTerminator(), "LoopGuardedSelected",
+           "Selected spatial loop with guarded fallback");
     for (Loop *Version : {L, Fast}) {
       Version->getLoopLatch()->getTerminator()->setMetadata(
           "flexfat.loop.versioned", getInstrumentedMetadata());
@@ -2067,8 +2107,10 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   DT.recalculate(F);
   LI.releaseMemory();
   LI.analyze(DT);
-  prepareLoopGeometry(LoopAccesses, DT, LI);
-  prepareContainedGeometry(TemporalAccesses, DT);
+  if (!Options.InternalSkipOptimizations_) {
+    prepareLoopGeometry(LoopAccesses, DT, LI);
+    prepareContainedGeometry(TemporalAccesses, DT);
+  }
   if (!Options.Recover)
     for (const AccessRecord &A : TemporalAccesses)
       if (!FastGeometry.contains(A.Inst) &&
@@ -2301,9 +2343,22 @@ bool FlexFatSanitizer::run() {
 
 } // anonymous namespace
 
+static void runFlexFatCleanup(Function &F, FunctionAnalysisManager &AM,
+                              const FFOptions &Options) {
+  if (Options.InternalSkipOptimizations_ || Options.InternalModuleSetupOnly_ ||
+      Options.Cleanup == FFOptions::PostCleanup::None)
+    return;
+  AM.invalidate(F, PreservedAnalyses::none());
+  FunctionPassManager FPM;
+  FPM.addPass(EarlyCSEPass(true));
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  FPM.run(F, AM);
+}
+
 FlexFatSanitizerPass::FlexFatSanitizerPass(
     const FlexFatSanitizerOptions &Options)
-    : Options(Options) {}
+    : Options(resolveFlexFatSanitizerOptions(Options)) {}
 
 PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
                                             ModuleAnalysisManager &AM) {
@@ -2315,19 +2370,23 @@ PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
     return PreservedAnalyses::all();
   }
 #endif
+  auto &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
   FlexFatSanitizer Sanitizer(M, Options);
   if (!Sanitizer.run())
     return PreservedAnalyses::all();
+  for (Function &F : M)
+    if (!F.isDeclaration())
+      runFlexFatCleanup(F, FAM, Options);
 
   return PreservedAnalyses::none();
 }
 
 FlexFatSanitizerFunctionPass::FlexFatSanitizerFunctionPass(
     const FlexFatSanitizerOptions &Options)
-    : Options(Options) {}
+    : Options(resolveFlexFatSanitizerOptions(Options)) {}
 
-PreservedAnalyses FlexFatSanitizerFunctionPass::run(Function &F,
-                                                    FunctionAnalysisManager &) {
+PreservedAnalyses
+FlexFatSanitizerFunctionPass::run(Function &F, FunctionAnalysisManager &AM) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
   if (Options.TemporalTBI &&
       Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow) {
@@ -2339,5 +2398,6 @@ PreservedAnalyses FlexFatSanitizerFunctionPass::run(Function &F,
   FlexFatSanitizer Sanitizer(*F.getParent(), Options);
   if (!Sanitizer.runFunction(F))
     return PreservedAnalyses::all();
+  runFlexFatCleanup(F, AM, Options);
   return PreservedAnalyses::none();
 }

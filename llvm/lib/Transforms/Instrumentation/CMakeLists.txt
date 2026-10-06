@@ -36,6 +36,8 @@ add_llvm_component_library(LLVMInstrumentation
   intrinsics_gen
 
   LINK_COMPONENTS
+  InstCombine
+  ScalarOpts
   Analysis
   Core
   Demangle

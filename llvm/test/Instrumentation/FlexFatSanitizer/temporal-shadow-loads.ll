@@ -1,6 +1,7 @@
 ; REQUIRES: !flexfat-custom-config
 ; RUN: opt -passes='flexfat<tbi;tbi-storage=shadow>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
 ; RUN: opt -passes='flexfat<tbi;tbi-storage=shadow>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
+; RUN: opt -passes='flexfat<mode=optimized;tbi;tbi-storage=shadow>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
@@ -51,3 +52,37 @@ define i8 @adjacent(ptr %p) {
 }
 
 !0 = !{}
+
+; A metadata write may invalidate the first observation, even when the
+; instrumented data reads themselves are volatile.
+define i8 @metadata_write(ptr %p, ptr %metadata) {
+; RAW-LABEL: define i8 @metadata_write(
+; RAW: load i8, ptr %flexfat.metadata
+; RAW: store i8 42, ptr %metadata
+; RAW: load i8, ptr %flexfat.metadata
+; OPT-LABEL: define i8 @metadata_write(
+; OPT: load i8, ptr
+; OPT: store i8 42, ptr %metadata
+; OPT: load i8, ptr
+  %a = load volatile i8, ptr %p, !flexfat.instrumented !0
+  store i8 42, ptr %metadata, !nosanitize !0
+  %b = load volatile i8, ptr %p, !flexfat.instrumented !0
+  %sum = add i8 %a, %b
+  ret i8 %sum
+}
+
+define i8 @synchronization(ptr %p) {
+; RAW-LABEL: define i8 @synchronization(
+; RAW: load i8, ptr %flexfat.metadata
+; RAW: fence acquire
+; RAW: load i8, ptr %flexfat.metadata
+; OPT-LABEL: define i8 @synchronization(
+; OPT: load i8, ptr
+; OPT: fence acquire
+; OPT: load i8, ptr
+  %a = load volatile i8, ptr %p, !flexfat.instrumented !0
+  fence acquire
+  %b = load volatile i8, ptr %p, !flexfat.instrumented !0
+  %sum = add i8 %a, %b
+  ret i8 %sum
+}

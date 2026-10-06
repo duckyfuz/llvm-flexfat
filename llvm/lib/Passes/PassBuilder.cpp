@@ -983,8 +983,21 @@ Expected<HWAddressSanitizerOptions> parseHWASanPassOptions(StringRef Params) {
 Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
   FlexFatSanitizerOptions Result;
   if (!Params.empty()) {
+    // Apply the mode preset first so explicit placement/cleanup parameters
+    // override it independently of their position in the parameter list.
     for (StringRef Param : llvm::split(Params, ';')) {
-      if (Param == "recover")
+      if (Param == "mode=fast")
+        Result.setMode(FlexFatSanitizerOptions::FlexFatMode::Fast);
+      else if (Param == "mode=safe")
+        Result.setMode(FlexFatSanitizerOptions::FlexFatMode::Safe);
+      else if (Param == "mode=optimized")
+        Result.setMode(FlexFatSanitizerOptions::FlexFatMode::Optimized);
+    }
+    for (StringRef Param : llvm::split(Params, ';')) {
+      if (Param == "mode=fast" || Param == "mode=safe" ||
+          Param == "mode=optimized")
+        continue;
+      else if (Param == "recover")
         Result.Recover = true;
       else if (Param == "tbi")
         Result.TemporalTBI = true;
@@ -996,6 +1009,16 @@ Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
         Result.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
       else if (Param == "tbi-storage=prior-byte")
         Result.Storage = FlexFatSanitizerOptions::TBIStorage::PriorByte;
+      else if (Param == "instrumentation-point=scalar-late")
+        Result.Point =
+            FlexFatSanitizerOptions::InstrumentationPoint::ScalarLate;
+      else if (Param == "instrumentation-point=optimizer-last")
+        Result.Point =
+            FlexFatSanitizerOptions::InstrumentationPoint::OptimizerLast;
+      else if (Param == "post-cleanup=none")
+        Result.Cleanup = FlexFatSanitizerOptions::PostCleanup::None;
+      else if (Param == "post-cleanup=early-cse")
+        Result.Cleanup = FlexFatSanitizerOptions::PostCleanup::EarlyCSE;
       else
         return make_error<StringError>(
             formatv("invalid FlexFatSanitizer pass parameter '{}'", Param)
