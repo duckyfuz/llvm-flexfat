@@ -25,6 +25,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/VectorUtils.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -979,23 +980,38 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
 
     bool AllNonFlexFat = true;
     std::optional<uint64_t> StaticUpperBound = UINT64_MAX;
+    DenseMap<BasicBlock *, unsigned> IncomingEdges;
     for (unsigned I = 0; I != NumIncoming; ++I) {
       BoundsRecord Incoming = getBounds(Phi->getIncomingValue(I));
-      BasePhi->setIncomingValue(I, Incoming.CompanionBase);
-      if (IndexPhi) {
-        Value *IncomingIndex = getMemoizedTableIndex(Incoming.CompanionBase);
-        assert(IncomingIndex &&
-               "companion base is missing its safe table index");
-        IndexPhi->setIncomingValue(I, IncomingIndex);
-        Value *Size = BaseSizes.lookup(Incoming.CompanionBase);
-        if (!Size) {
-          IRBuilder<> B(Phi->getIncomingBlock(I)->getTerminator());
-          B.SetNoSanitizeMetadata();
-          Size = B.CreateZExtOrTrunc(
-              loadFromFixedTable(B, TablesBase, B.getInt64Ty(), IncomingIndex),
-              IntptrTy);
+      // Duplicate switch edges from one predecessor must carry identical PHI
+      // values. In particular, do not emit a separate size load for each edge.
+      auto [Edge, IsNew] =
+          IncomingEdges.try_emplace(Phi->getIncomingBlock(I), I);
+      if (!IsNew) {
+        BasePhi->setIncomingValue(I, BasePhi->getIncomingValue(Edge->second));
+        if (IndexPhi) {
+          IndexPhi->setIncomingValue(I,
+                                     IndexPhi->getIncomingValue(Edge->second));
+          SizePhi->setIncomingValue(I, SizePhi->getIncomingValue(Edge->second));
         }
-        SizePhi->setIncomingValue(I, Size);
+      } else {
+        BasePhi->setIncomingValue(I, Incoming.CompanionBase);
+        if (IndexPhi) {
+          Value *IncomingIndex = getMemoizedTableIndex(Incoming.CompanionBase);
+          assert(IncomingIndex &&
+                 "companion base is missing its safe table index");
+          IndexPhi->setIncomingValue(I, IncomingIndex);
+          Value *Size = BaseSizes.lookup(Incoming.CompanionBase);
+          if (!Size) {
+            IRBuilder<> B(Phi->getIncomingBlock(I)->getTerminator());
+            B.SetNoSanitizeMetadata();
+            Size = B.CreateZExtOrTrunc(loadFromFixedTable(B, TablesBase,
+                                                          B.getInt64Ty(),
+                                                          IncomingIndex),
+                                       IntptrTy);
+          }
+          SizePhi->setIncomingValue(I, Size);
+        }
       }
       AllNonFlexFat &= Incoming.Kind == BaseKind::NonFlexFat;
       if (StaticUpperBound && Incoming.StaticUpperBound)
@@ -1245,6 +1261,106 @@ bool FlexFatSanitizer::instrumentMemoryRange(Instruction *I, Value *Ptr,
 
 bool FlexFatSanitizer::instrumentPointerEscape(Instruction *I, Value *Ptr,
                                                CheckKind Kind) {
+  if (auto *VT = dyn_cast<VectorType>(Ptr->getType())) {
+    // Late instrumentation can see vectorized pointer-to-integer escapes.
+    // Geometry and tags belong to individual pointers, never the vector.
+    markInstrumented(I);
+    IRBuilder<> B(I);
+    B.SetNoSanitizeMetadata();
+    DenseMap<std::pair<PHINode *, unsigned>, PHINode *> LanePhis;
+    auto ScalarLane = [&](auto &&Self, Value *V, Value *Lane,
+                          IRBuilder<> &Builder) -> Value * {
+      if (!V->getType()->isVectorTy())
+        return V;
+      auto *Index = dyn_cast<ConstantInt>(Lane);
+      if (Index)
+        if (Value *Scalar = findScalarElement(V, Index->getZExtValue()))
+          return Scalar;
+      if (auto *GEP = dyn_cast<GEPOperator>(V)) {
+        SmallVector<Value *, 4> Indices;
+        for (Value *Offset : GEP->indices())
+          Indices.push_back(Offset->getType()->isVectorTy()
+                                ? Builder.CreateExtractElement(Offset, Lane)
+                                : Offset);
+        return Builder.CreateGEP(GEP->getSourceElementType(),
+                                 Self(Self, GEP->getPointerOperand(), Lane,
+                                      Builder),
+                                 Indices, "flexfat.escape.pointer",
+                                 GEP->getNoWrapFlags());
+      }
+      if (auto *Select = dyn_cast<SelectInst>(V)) {
+        Value *Condition = Select->getCondition();
+        if (Condition->getType()->isVectorTy())
+          Condition = Builder.CreateExtractElement(Condition, Lane);
+        return Builder.CreateSelect(
+            Condition, Self(Self, Select->getTrueValue(), Lane, Builder),
+            Self(Self, Select->getFalseValue(), Lane, Builder));
+      }
+      if (auto *Phi = dyn_cast<PHINode>(V)) {
+        if (!Index)
+          report_fatal_error("FlexFat cannot recover scalable pointer-PHI "
+                             "escape provenance");
+        auto Key = std::make_pair(Phi, unsigned(Index->getZExtValue()));
+        if (auto It = LanePhis.find(Key); It != LanePhis.end())
+          return It->second;
+        auto *Scalar = PHINode::Create(
+            VT->getElementType(), Phi->getNumIncomingValues(),
+            "flexfat.escape.phi", Phi->getParent()->getFirstNonPHIIt());
+        LanePhis[Key] = Scalar;
+        markNoSanitize(Scalar);
+        // Edge splitting must see complete predecessor lists, including cycles.
+        for (unsigned N = 0; N < Phi->getNumIncomingValues(); ++N)
+          Scalar->addIncoming(PoisonValue::get(Scalar->getType()),
+                               Phi->getIncomingBlock(N));
+        DenseMap<BasicBlock *, unsigned> IncomingEdges;
+        for (unsigned N = 0; N < Phi->getNumIncomingValues(); ++N) {
+          Value *Incoming = Phi->getIncomingValue(N);
+          BasicBlock *Pred = Phi->getIncomingBlock(N);
+          auto [Edge, IsNew] = IncomingEdges.try_emplace(Pred, N);
+          if (!IsNew) {
+            Scalar->setIncomingValue(N, Scalar->getIncomingValue(Edge->second));
+            continue;
+          }
+          if (auto *Invoke = dyn_cast<InvokeInst>(Incoming))
+            Pred = SplitEdge(Invoke->getParent(), Invoke->getNormalDest());
+          IRBuilder<> IncomingBuilder(Pred->getTerminator());
+          IncomingBuilder.SetNoSanitizeMetadata();
+          Scalar->setIncomingValue(
+              N, Self(Self, Incoming, Lane, IncomingBuilder));
+        }
+        return Scalar;
+      }
+      return Builder.CreateExtractElement(V, Lane, "flexfat.escape.lane");
+    };
+    if (auto *Fixed = dyn_cast<FixedVectorType>(VT)) {
+      for (unsigned Lane = 0; Lane < Fixed->getNumElements(); ++Lane) {
+        B.SetInsertPoint(I);
+        Value *Element = ScalarLane(ScalarLane, Ptr, B.getInt64(Lane), B);
+        instrumentPointerEscape(I, Element, Kind);
+      }
+      return true;
+    }
+
+    // Scalable vectors require one check for every runtime lane.
+    Value *Count = B.CreateElementCount(IntptrTy, VT->getElementCount());
+    BasicBlock *Entry = I->getParent();
+    BasicBlock *Continue = Entry->splitBasicBlock(I->getIterator(),
+                                                 "flexfat.escape.continue");
+    BasicBlock *Loop = BasicBlock::Create(I->getContext(), "flexfat.escape.loop",
+                                          I->getFunction(), Continue);
+    Entry->getTerminator()->setSuccessor(0, Loop);
+    markNoSanitize(Entry->getTerminator());
+    B.SetInsertPoint(Loop);
+    PHINode *Lane = B.CreatePHI(IntptrTy, 2, "flexfat.escape.index");
+    Lane->addIncoming(ConstantInt::get(IntptrTy, 0), Entry);
+    Value *Element = ScalarLane(ScalarLane, Ptr, Lane, B);
+    Value *Next = B.CreateAdd(Lane, ConstantInt::get(IntptrTy, 1));
+    BranchInst *Latch = B.CreateCondBr(B.CreateICmpULT(Next, Count), Loop,
+                                      Continue);
+    instrumentPointerEscape(Latch, Element, Kind);
+    Lane->addIncoming(Next, Latch->getParent());
+    return true;
+  }
   if (!instrumentPointerCheck(I, Ptr, 0, nullptr, Kind))
     return false;
   NumInstrumentedEscapes++;
@@ -1252,7 +1368,11 @@ bool FlexFatSanitizer::instrumentPointerEscape(Instruction *I, Value *Ptr,
 }
 
 void FlexFatSanitizer::prepareBounds(Instruction *I) {
-  auto Prepare = [this](Value *Ptr) { (void)getBounds(Ptr); };
+  auto Prepare = [this](Value *Ptr) {
+    // Vector escape operands are extracted and checked lane by lane later.
+    if (Ptr->getType()->isPointerTy())
+      (void)getBounds(Ptr);
+  };
 
   if (auto *LI = dyn_cast<LoadInst>(I))
     Prepare(LI->getPointerOperand());
