@@ -94,6 +94,7 @@ int load_value(int *p) { return *p; }
 // RUN: not %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-temporal-reuse=true -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
 // RUN: not %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-temporal-hoist=true -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
 // RUN: not %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-loop-profitability=cost -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-version-tbi-loops=true -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
 // REMOVED: Unknown command line argument
 // RUN: not %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-post-cleanup=gvn -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=NO-GVN
 // NO-GVN: Cannot find option named 'gvn'

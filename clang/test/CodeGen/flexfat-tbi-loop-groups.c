@@ -1,6 +1,4 @@
-// RUN: %clang -target aarch64-linux-gnu -O1 -fno-vectorize -fno-unroll-loops -S -emit-llvm -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm -flexfat-version-tbi-loops=true %s -o - | FileCheck %s
-// RUN: %clang -target aarch64-linux-gnu -O1 -fno-vectorize -fno-unroll-loops -S -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm -flexfat-version-tbi-loops=true %s -o - | FileCheck %s --check-prefix=ASM
-// RUN: %clang -target aarch64-linux-gnu -O1 -fno-vectorize -fno-unroll-loops -S -emit-llvm -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm -flexfat-version-tbi-loops=false %s -o - | FileCheck %s --check-prefix=OFF
+// RUN: %clang -target aarch64-linux-gnu -O1 -fno-vectorize -fno-unroll-loops -S -emit-llvm -fsanitize=flexfat -mllvm -flexfat-tbi=true %s -o - | FileCheck %s --implicit-check-not=flexfat.fast --implicit-check-not=flexfat.trip
 
 extern void tick(long);
 
@@ -46,8 +44,7 @@ __attribute__((noinline)) long rows(const volatile long *const *grid,
   return sum;
 }
 
-// The extended policy must retain the default versioned path for a small,
-// otherwise eligible loop.
+// Small loops retain ordinary spatial and temporal checks too.
 __attribute__((noinline)) long small(const volatile long *p, long n) {
   long sum = 0;
   for (long i = 0; i < n; ++i)
@@ -55,44 +52,24 @@ __attribute__((noinline)) long small(const volatile long *p, long n) {
   return sum;
 }
 
+// Loop accesses retain spatial checks and per-access generation checks.
 // CHECK-LABEL: define{{.*}} @grouped(
-// CHECK: flexfat.metadata
-// CHECK: llvm.sadd.with.overflow.i64
-// CHECK: br i1 {{.*}}, label %for.body.flexfat.fast{{.*}}, label %for.body{{.*}}
-// CHECK: for.body.flexfat.fast:
-// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
-// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
-// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
-// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
-// CHECK: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
-// CHECK: call void @__flexfat_report_oob
-// CHECK: load atomic i8, ptr %flexfat.metadata{{[0-9]+}} {{acquire|monotonic}}
-// CHECK: for.body:
 // CHECK: call void @__flexfat_report_oob
 // CHECK: load atomic i8
+// CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @many(
-// CHECK: flexfat.metadata
-// CHECK: for.body.flexfat.fast:
+// CHECK: call void @__flexfat_report_oob
+// CHECK: load atomic i8
+// CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @two_roots(
-// CHECK: flexfat.metadata
-// CHECK: flexfat.metadata
-// CHECK: for.body.flexfat.fast:
+// CHECK: call void @__flexfat_report_oob
+// CHECK: load atomic i8
+// CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @rows(
-// CHECK: flexfat.metadata
-// CHECK: for.body{{.*}}flexfat.fast:
+// CHECK: call void @__flexfat_report_oob
+// CHECK: load atomic i8
+// CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @small(
-// CHECK: for.body.flexfat.fast:
-// ASM-LABEL: grouped:
-// ASM: // %for.body.flexfat.fast
-// ASM: {{ldarb|ldrb}}
-// ASM: {{ldarb|ldrb}}
-// ASM: {{ldarb|ldrb}}
-// ASM: {{ldarb|ldrb}}
-// ASM: {{ldarb|ldrb}}
-// ASM: bl{{[[:space:]]+}}tick
-// OFF-LABEL: define{{.*}} @many(
-// OFF-NOT: flexfat.fast
-// OFF-LABEL: define{{.*}} @two_roots(
-// OFF: for.body.flexfat.fast:
-// OFF-LABEL: define{{.*}} @small(
-// OFF: for.body.flexfat.fast:
+// CHECK: call void @__flexfat_report_oob
+// CHECK: load atomic i8
+// CHECK: call void @__flexfat_report_temporal_v3

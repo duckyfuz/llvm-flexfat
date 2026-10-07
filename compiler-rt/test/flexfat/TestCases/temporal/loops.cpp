@@ -1,5 +1,5 @@
 // REQUIRES: flexfat-tbi
-// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-version-tbi-loops=true -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops %s -o %t && %t
+// RUN: %clangxx_flexfat_tbi -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops %s -o %t && %t
 // RUN: not %t stale 2>&1 | FileCheck %s
 // RUN: not %t overflow 2>&1 | FileCheck %s
 // RUN: not %t quad-call 2>&1 | FileCheck %s
@@ -140,12 +140,12 @@ int main(int argc, char **argv) {
   assert(four_offsets(foreign, 28) == 2114);
   assert(scan(a+4, 8) == 68);
   assert(backwards(a+11, 8) == 68);
-  assert(scan(foreign, 32) == 528); // Guard fails normally for unmanaged root.
-  update(a, b, 32);              // Successful multiple-root guard.
+  assert(scan(foreign, 32) == 528); // Unmanaged memory remains accessible.
+  update(a, b, 32);              // Check both managed roots.
   assert(scan(a, 32) == 1056);
-  update(a, foreign, 32);        // Mixed roots force ordinary fallback.
+  update(a, foreign, 32);        // Check mixed managed and unmanaged roots.
   assert(scan(a, 32) == 1584);
-  update(a, b, 1);               // Short-loop guard.
+  update(a, b, 1);               // Check a single iteration.
   reverse_write(a+11, 8);
   assert(scan(a+4, 8) == 56);
   fixed_write(a, 8);

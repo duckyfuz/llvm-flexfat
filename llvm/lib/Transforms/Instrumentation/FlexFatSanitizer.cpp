@@ -19,12 +19,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/Analysis/AssumptionCache.h"
-#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
-#include "llvm/Analysis/OptimizationRemarkEmitter.h"
-#include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/VectorUtils.h"
 #include "llvm/IR/DataLayout.h"
@@ -45,10 +40,7 @@
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/Cloning.h"
-#include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
-#include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include <algorithm>
 #include <optional>
@@ -67,10 +59,6 @@ static cl::opt<bool> ClShareContainedGeometry(
     "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
     cl::desc(
         "Share temporal geometry for accesses proven within an allocation"));
-static cl::opt<bool> ClVersionTBILoops(
-    "flexfat-version-tbi-loops", cl::Hidden, cl::init(false),
-    cl::desc("Extend TBI loop versioning with grouped access ranges"));
-
 using FFOptions = FlexFatSanitizerOptions;
 static cl::opt<FFOptions::InstrumentationPoint> ClPoint(
     "flexfat-instrumentation-point", cl::Hidden,
@@ -98,14 +86,7 @@ STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
 STATISTIC(NumInstrumentedMemIntrinsics,
           "Number of mem intrinsics instrumented");
 STATISTIC(NumInstrumentedEscapes, "Number of pointer escapes instrumented");
-STATISTIC(NumTBILoopCandidates, "Number of TBI loop candidates");
-STATISTIC(NumTBILoopEligibleAccesses, "TBI affine accesses collected");
-STATISTIC(NumTBILoopRejectedSize, "TBI loops rejected by size limits");
-STATISTIC(NumTBILoopRejectedFew, "TBI loops with too few affine accesses");
-STATISTIC(NumTBILoopRejectedTrip, "TBI loops without expandable trip counts");
-STATISTIC(NumTBILoopRejectedControl, "TBI loops with unsupported control flow");
-STATISTIC(NumTBILoopHoistedGeometry, "TBI root geometry records hoisted");
-STATISTIC(NumTBILoopRemovedSpatial, "TBI loop spatial checks removed");
+
 
 namespace {
 
@@ -177,9 +158,6 @@ struct GeometryRecord {
   Value *Managed = nullptr;
   Value *Entry = nullptr;
   Instruction *PrepareBefore = nullptr;
-  // Custom-mode loop guards prove that affine accesses retain a nonzero
-  // root tag. This does not cache the observed generation.
-  bool NonzeroTagProven = false;
 };
 
 struct SelectProvenance {
@@ -227,19 +205,7 @@ private:
   DenseMap<Value *, Value *> BaseSizes;
   DenseMap<Instruction *, Value *> AccessLengths;
   DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> AccessGeometry;
-  DenseMap<Instruction *, GeometryRecord> FastGeometry;
-  SmallPtrSet<Instruction *, 16> RangeProven;
   DenseMap<std::pair<Instruction *, Value *>, GeometryRecord> SpatialGeometry;
-  SmallPtrSet<BasicBlock *, 16> CountedLoopHeaders;
-  void remark(Instruction *I, StringRef Name, StringRef Message) {
-    OptimizationRemarkEmitter ORE(I->getFunction());
-    ORE.emit(
-        [&]() { return OptimizationRemark(DEBUG_TYPE, Name, I) << Message; });
-  }
-  bool versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
-                   ScalarEvolution &SE);
-  void prepareLoopGeometry(ArrayRef<AccessRecord> Accesses, DominatorTree &DT,
-                           LoopInfo &LI);
   void prepareContainedGeometry(ArrayRef<AccessRecord> Accesses,
                                 DominatorTree &DT);
   Value *getContainedAllocationRoot(const AccessRecord &Access);
@@ -1249,10 +1215,6 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
 
 bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
                                               Type *AccessTy) {
-  if (RangeProven.contains(I)) {
-    markInstrumented(I);
-    return false;
-  }
   TypeSize AccessSize = DL.getTypeStoreSize(AccessTy);
   bool IsWrite =
       isa<StoreInst>(I) || isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I);
@@ -1473,16 +1435,14 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   }
   auto Existing = Geometries.find(Access.Pointer);
   auto Shared = AccessGeometry.find({I, Access.Pointer});
-  auto Fast = FastGeometry.find(I);
   auto Spatial = SpatialGeometry.find({I, Access.Pointer});
-  GeometryRecord G = Fast != FastGeometry.end()         ? Fast->second
-                     : Shared != AccessGeometry.end()   ? Shared->second
+  GeometryRecord G = Shared != AccessGeometry.end()     ? Shared->second
                      : Spatial != SpatialGeometry.end() ? Spatial->second
                      : Existing != Geometries.end()
                          ? Existing->second
                          : emitGeometry(B, Access.Pointer, true);
   // A proven same-slot root shares geometry, never the actual pointer tag.
-  if (Fast != FastGeometry.end() || Shared != AccessGeometry.end() ||
+  if (Shared != AccessGeometry.end() ||
       Spatial != SpatialGeometry.end()) {
     auto *Tagged = dyn_cast<PtrToIntInst>(G.Tagged);
     if (!Tagged || Tagged->getPointerOperand() != Access.Pointer)
@@ -1499,8 +1459,7 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Value *Tag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
   Value *Matches = B.CreateICmpEQ(Tag, Generation);
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  if (!G.NonzeroTagProven)
-    Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)), Matches);
+  Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)), Matches);
   auto *Managed = dyn_cast<ConstantInt>(G.Managed);
   Value *Valid = Managed && Managed->isOne()
                      ? Matches
@@ -1577,425 +1536,6 @@ void FlexFatSanitizer::discoverAccesses(
     Add(S->getDest(), S->getLength(), true, 0);
 }
 
-// Version original scalar loops before provenance or check insertion mutates
-// their CFG. Recompute candidate facts after each clone before selecting the
-// next original loop. This transformation does not move generation
-// observations.
-bool FlexFatSanitizer::versionLoop(Function &F, DominatorTree &DT, LoopInfo &LI,
-                                   ScalarEvolution &SE) {
-  if (!Options.TemporalTBI || Options.InternalSkipOptimizations_)
-    return false;
-  const bool Extended = ClVersionTBILoops;
-  struct RangeAccess {
-    Instruction *Inst;
-    Value *Root;
-    int64_t Offset;
-    int64_t Stride;
-    uint64_t Width;
-  };
-  struct RangeGroup {
-    Value *Root;
-    int64_t Stride;
-    int64_t LowOffset;
-    int64_t HighEnd;
-  };
-  auto Loops = LI.getLoopsInPreorder();
-  for (Loop *L : Loops) {
-    if (!L->isInnermost() || !L->isLoopSimplifyForm() || !L->getLoopLatch() ||
-        !L->getExitingBlock() || !L->getUniqueExitBlock() ||
-        L->getLoopLatch()->getTerminator()->getMetadata(
-            "flexfat.loop.versioned"))
-      continue;
-    bool CountStats = CountedLoopHeaders.insert(L->getHeader()).second;
-    if (CountStats)
-      ++NumTBILoopCandidates;
-    SmallVector<RangeAccess, 128> Accesses;
-    SmallVector<RangeGroup, 16> Groups;
-    SmallPtrSet<Value *, 8> Roots;
-    bool Eligible = true;
-    // Keep the default small-loop path when the extended policy is enabled.
-    // Its one-access threshold is profitable for loops such as
-    // quantum_sigma_x, provided all of its stricter legality rules hold.
-    bool DefaultEligible = true;
-    unsigned Instructions = 0;
-    for (BasicBlock *BB : L->blocks()) {
-      for (Instruction &I : *BB) {
-        if (isa<DbgInfoIntrinsic>(I))
-          continue;
-        if (++Instructions > (Extended ? 1024U : 128U)) {
-          if (CountStats)
-            ++NumTBILoopRejectedSize;
-          Eligible = false;
-          break;
-        }
-        if (Instructions > 128)
-          DefaultEligible = false;
-        if (I.getMetadata("flexfat.instrumented") ||
-            I.getMetadata("flexfat.temporal") || I.isEHPad() ||
-            isa<ResumeInst, CatchReturnInst, CleanupReturnInst, IndirectBrInst>(
-                I)) {
-          Eligible = false;
-          break;
-        }
-        if (auto *CB = dyn_cast<CallBase>(&I)) {
-          auto *II = dyn_cast<IntrinsicInst>(CB);
-          if (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
-                      II->getIntrinsicID() != Intrinsic::lifetime_end))
-            DefaultEligible = false;
-          if ((!Extended &&
-               (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
-                        II->getIntrinsicID() != Intrinsic::lifetime_end))) ||
-              (Extended &&
-               (!isa<CallInst>(CB) || CB->cannotDuplicate() ||
-                CB->isConvergent() || CB->hasFnAttr(Attribute::ReturnsTwice) ||
-                cast<CallInst>(CB)->isMustTailCall())))
-            Eligible = false;
-          continue;
-        }
-        Value *Ptr = nullptr;
-        Type *Ty = nullptr;
-        if (auto *Load = dyn_cast<LoadInst>(&I)) {
-          if (Load->isAtomic()) {
-            DefaultEligible = false;
-            if (!Extended)
-              Eligible = false;
-            continue;
-          }
-          Ptr = Load->getPointerOperand();
-          Ty = Load->getType();
-        } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
-          if (Store->isAtomic()) {
-            DefaultEligible = false;
-            if (!Extended)
-              Eligible = false;
-            continue;
-          }
-          Ptr = Store->getPointerOperand();
-          Ty = Store->getValueOperand()->getType();
-        } else if (I.mayReadOrWriteMemory()) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        } else {
-          continue;
-        }
-        if ((!Ty->isIntegerTy() && !Ty->isFloatingPointTy()) ||
-            DL.getTypeStoreSize(Ty).isScalable() ||
-            (!Extended && (!DT.dominates(BB, L->getLoopLatch()) ||
-                           !DT.dominates(BB, L->getExitingBlock())))) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        }
-        if (!DT.dominates(BB, L->getLoopLatch()) ||
-            !DT.dominates(BB, L->getExitingBlock()))
-          DefaultEligible = false;
-        SmallPtrSet<Value *, 16> NonFlexFatSeen;
-        if (isDefinitelyNonFlexFat(Ptr, NonFlexFatSeen))
-          continue;
-        const SCEV *Start = SE.getSCEV(Ptr);
-        int64_t Stride = 0;
-        if (auto *AR = dyn_cast<SCEVAddRecExpr>(Start)) {
-          auto *Step = dyn_cast<SCEVConstant>(AR->getStepRecurrence(SE));
-          if (AR->getLoop() != L || !AR->isAffine() || !Step ||
-              Step->getAPInt().getSignificantBits() > 64) {
-            DefaultEligible = false;
-            if (!Extended)
-              Eligible = false;
-            continue;
-          }
-          Stride = Step->getAPInt().getSExtValue();
-          Start = AR->getStart();
-        } else if (!SE.isLoopInvariant(Start, L)) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        }
-        auto *RootSCEV = dyn_cast<SCEVUnknown>(SE.getPointerBase(Start));
-        if (!RootSCEV || !RootSCEV->getType()->isPointerTy() ||
-            !L->isLoopInvariant(RootSCEV->getValue())) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        }
-        auto *Offset = dyn_cast<SCEVConstant>(SE.getMinusSCEV(Start, RootSCEV));
-        if (!Offset || Offset->getAPInt().getSignificantBits() > 64) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        }
-        Value *Root = RootSCEV->getValue();
-        if (auto *Def = dyn_cast<Instruction>(Root);
-            Def && !DT.dominates(Def, L->getLoopPreheader()->getTerminator())) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        }
-        int64_t OffsetValue = Offset->getAPInt().getSExtValue();
-        uint64_t Width = DL.getTypeStoreSize(Ty).getFixedValue();
-        if (Width > INT64_MAX || OffsetValue > INT64_MAX - int64_t(Width)) {
-          DefaultEligible = false;
-          if (!Extended)
-            Eligible = false;
-          continue;
-        }
-        Roots.insert(Root);
-        Accesses.push_back({&I, Root, OffsetValue, Stride, Width});
-        if (CountStats)
-          ++NumTBILoopEligibleAccesses;
-        int64_t End = OffsetValue + int64_t(Width);
-        auto Group = llvm::find_if(Groups, [&](const RangeGroup &G) {
-          return G.Root == Root && G.Stride == Stride;
-        });
-        if (!Extended || Group == Groups.end())
-          Groups.push_back({Root, Stride, OffsetValue, End});
-        else {
-          Group->LowOffset = std::min(Group->LowOffset, OffsetValue);
-          Group->HighEnd = std::max(Group->HighEnd, End);
-        }
-        if (Accesses.size() > (Extended ? 128U : 8U) ||
-            Roots.size() > (Extended ? 8U : 4U) || Groups.size() > (Extended ? 16U : 8U)) {
-          if (CountStats)
-            ++NumTBILoopRejectedSize;
-          Eligible = false;
-          break;
-        }
-      }
-      if (!Eligible)
-        break;
-    }
-    if (!Eligible) {
-      if (CountStats && Instructions <= (Extended ? 1024U : 128U) &&
-          Accesses.size() <= (Extended ? 128U : 8U) &&
-          Roots.size() <= (Extended ? 8U : 4U) && Groups.size() <= (Extended ? 16U : 8U))
-        ++NumTBILoopRejectedControl;
-      remark(L->getHeader()->getTerminator(), "LoopControlRejected",
-             "Loop fails existing control-flow or access legality rules");
-      continue;
-    }
-    if (Instructions > (Extended ? 1024U : 128U) ||
-        Accesses.size() > (Extended ? 128U : 8U) || Roots.size() > (Extended ? 8U : 4U) ||
-        Groups.size() > (Extended ? 16U : 8U)) {
-      if (CountStats)
-        ++NumTBILoopRejectedSize;
-      remark(L->getHeader()->getTerminator(), "LoopSizeRejected",
-             "Loop exceeds existing hard size limits");
-      continue;
-    }
-    if (Accesses.empty() ||
-        (Extended && Accesses.size() < 4 && !DefaultEligible)) {
-      if (CountStats)
-        ++NumTBILoopRejectedFew;
-      remark(L->getHeader()->getTerminator(), "LoopAccessRejected",
-             "Loop fails access-count profitability policy");
-      continue;
-    }
-    SCEVExpander Exp(SE, "flexfat.trip");
-    const SCEV *Backedges = SE.getBackedgeTakenCount(L);
-    if (isa<SCEVCouldNotCompute>(Backedges) ||
-        !SE.isLoopInvariant(Backedges, L) ||
-        SE.getTypeSizeInBits(Backedges->getType()) > 64 ||
-        !Exp.isSafeToExpandAt(Backedges,
-                              L->getLoopPreheader()->getTerminator())) {
-      if (CountStats)
-        ++NumTBILoopRejectedTrip;
-      remark(L->getHeader()->getTerminator(), "LoopTripRejected",
-             "Loop trip count cannot safely be expanded at the entry guard");
-      continue;
-    }
-
-    // A constant trip count within a known allocation needs neither a range
-    // guard nor a clone. Use wide signed arithmetic for the static proof; even
-    // a 64-bit count times a signed 64-bit stride fits this calculation.
-    if (auto *Count = dyn_cast<SCEVConstant>(Backedges)) {
-      bool Contained = true;
-      for (const RangeAccess &A : Accesses) {
-        auto Bound = getAllocationUpperBound(A.Root);
-        APInt First(128, A.Offset, true);
-        APInt Span =
-            Count->getAPInt().zextOrTrunc(128) * APInt(128, A.Stride, true);
-        APInt Low = A.Stride < 0 ? First + Span : First;
-        APInt High = A.Stride < 0 ? First : First + Span;
-        APInt End = High + APInt(128, A.Width);
-        if (!isAllocationResult(A.Root) || !Bound || Low.isNegative() ||
-            End.ugt(APInt(128, *Bound))) {
-          Contained = false;
-          break;
-        }
-      }
-      if (Contained) {
-        IRBuilder<> B(L->getLoopPreheader()->getTerminator());
-        B.SetNoSanitizeMetadata();
-        DenseMap<Value *, GeometryRecord> RootGeometry;
-        for (Value *Root : Roots)
-          RootGeometry[Root] = emitGeometry(B, Root);
-        NumTBILoopHoistedGeometry += Roots.size();
-        for (const RangeAccess &A : Accesses) {
-          FastGeometry[A.Inst] = RootGeometry.find(A.Root)->second;
-          RangeProven.insert(A.Inst);
-        }
-        NumTBILoopRemovedSpatial += Accesses.size();
-        remark(L->getHeader()->getTerminator(), "LoopContainedSelected",
-               "Selected statically contained spatial loop");
-        L->getLoopLatch()->getTerminator()->setMetadata(
-            "flexfat.loop.versioned", getInstrumentedMetadata());
-        return true;
-      }
-    }
-
-    // Check the entire affine range before entering either loop version.
-    // Conditional accesses are covered even on iterations that skip them.
-    BasicBlock *Guard = L->getLoopPreheader();
-    Value *Count = Exp.expandCodeFor(Backedges, Backedges->getType(),
-                                     Guard->getTerminator());
-    for (Instruction *Inserted : Exp.getAllInsertedInstructions())
-      markNoSanitize(Inserted);
-    IRBuilder<> B(Guard->getTerminator());
-    B.SetNoSanitizeMetadata();
-    Count = B.CreateZExtOrTrunc(Count, IntptrTy);
-    Value *Valid = B.CreateICmpULE(Count, B.getInt64(INT64_MAX));
-    auto Checked = [&](Intrinsic::ID ID, Value *A, Value *C) {
-      auto *Fn = Intrinsic::getOrInsertDeclaration(&M, ID, {IntptrTy});
-      Value *Pair = B.CreateCall(Fn, {A, C});
-      Valid = B.CreateAnd(Valid, B.CreateNot(B.CreateExtractValue(Pair, 1)));
-      return B.CreateExtractValue(Pair, 0);
-    };
-    DenseMap<Value *, GeometryRecord> RootGeometry;
-    for (Value *Root : Roots) {
-      GeometryRecord G = emitGeometry(B, Root);
-      RootGeometry[Root] = G;
-      // The range guard keeps every affine access within this root's slot,
-      // so address arithmetic cannot carry into or borrow from the tag byte.
-#ifdef FLEXFAT_CUSTOM_CONFIG
-      Value *RootTag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
-      Valid = B.CreateAnd(Valid, B.CreateICmpNE(RootTag, B.getInt8(0)));
-#endif
-      Value *Start = B.CreateShl(G.Index, RegionSizeLog);
-      Value *End = B.CreateAdd(Start, B.getInt64(1ULL << RegionSizeLog));
-      Valid = B.CreateAnd(Valid, G.Managed);
-      Valid = B.CreateAnd(Valid, B.CreateICmpUGE(G.Base, Start));
-      if (Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte)
-        Valid = B.CreateAnd(
-            Valid, B.CreateICmpUGE(G.Base, B.CreateAdd(Start, G.Size)));
-      Valid =
-          B.CreateAnd(Valid, B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
-    }
-    NumTBILoopHoistedGeometry += Roots.size();
-    for (const RangeGroup &Group : Groups) {
-      const GeometryRecord &G = RootGeometry.find(Group.Root)->second;
-      Value *Span = Checked(Intrinsic::smul_with_overflow, Count,
-                            B.getInt64(Group.Stride));
-      Value *First = Checked(Intrinsic::sadd_with_overflow, G.Raw,
-                             B.getInt64(Group.LowOffset));
-      Value *Low = Group.Stride < 0
-                       ? Checked(Intrinsic::sadd_with_overflow, First, Span)
-                       : First;
-      Value *High = Checked(Intrinsic::sadd_with_overflow, G.Raw,
-                            B.getInt64(Group.HighEnd));
-      Value *Limit = Group.Stride < 0
-                         ? High
-                         : Checked(Intrinsic::sadd_with_overflow, High, Span);
-      Valid = B.CreateAnd(Valid, B.CreateICmpUGE(Low, G.Base));
-      Valid = B.CreateAnd(
-          Valid, B.CreateICmpULE(
-                     Limit, B.CreateAdd(G.Base,
-                                        usesInSlotTags()
-                                            ? B.CreateSub(G.Size, B.getInt64(1))
-                                            : G.Size)));
-    }
-    formLCSSARecursively(*L, DT, &LI, &SE);
-    BasicBlock *PH = SplitBlock(Guard, Guard->getTerminator(), &DT, &LI,
-                                nullptr, "flexfat.fallback.ph");
-    ValueToValueMapTy VMap;
-    SmallVector<BasicBlock *, 8> Blocks;
-    Loop *Fast = cloneLoopWithPreheader(PH, Guard, L, VMap, ".flexfat.fast",
-                                        &LI, &DT, Blocks);
-    remapInstructionsInBlocks(Blocks, VMap);
-    Instruction *OldBranch = Guard->getTerminator();
-    B.SetInsertPoint(OldBranch);
-    B.CreateCondBr(Valid, Fast->getLoopPreheader(), PH);
-    OldBranch->eraseFromParent();
-    BasicBlock *Exit = L->getUniqueExitBlock();
-    for (PHINode &Phi : Exit->phis()) {
-      int Index = Phi.getBasicBlockIndex(L->getExitingBlock());
-      assert(Index >= 0 && "LCSSA exit missing original edge");
-      Value *Incoming = Phi.getIncomingValue(Index);
-      if (Value *Mapped = VMap.lookup(Incoming))
-        Incoming = Mapped;
-      Phi.addIncoming(Incoming, Fast->getExitingBlock());
-    }
-    for (const RangeAccess &A : Accesses) {
-      auto *Clone = cast<Instruction>(VMap.lookup(A.Inst));
-      FastGeometry[Clone] = RootGeometry.find(A.Root)->second;
-      // Only the runtime guard proves managed allocation. Static containment
-      // can also describe an allocation that fell back to libc.
-      FastGeometry[Clone].Managed = B.getTrue();
-#ifdef FLEXFAT_CUSTOM_CONFIG
-      FastGeometry[Clone].NonzeroTagProven = true;
-#endif
-      RangeProven.insert(Clone);
-    }
-    NumTBILoopRemovedSpatial += Accesses.size();
-    remark(Fast->getHeader()->getTerminator(), "LoopGuardedSelected",
-           "Selected spatial loop with guarded fallback");
-    for (Loop *Version : {L, Fast}) {
-      Version->getLoopLatch()->getTerminator()->setMetadata(
-          "flexfat.loop.versioned", getInstrumentedMetadata());
-      if (MDNode *ID = Version->getLoopID()) {
-        SmallVector<Metadata *, 8> Ops;
-        Ops.push_back(nullptr);
-        for (unsigned I = 1; I < ID->getNumOperands(); ++I)
-          Ops.push_back(ID->getOperand(I));
-        MDNode *NewID = MDNode::getDistinct(M.getContext(), Ops);
-        NewID->replaceOperandWith(0, NewID);
-        Version->setLoopID(NewID);
-      }
-    }
-    SE.forgetAllLoops();
-    DT.recalculate(F);
-    return true;
-  }
-  return false;
-}
-
-void FlexFatSanitizer::prepareLoopGeometry(ArrayRef<AccessRecord> Accesses,
-                                           DominatorTree &DT, LoopInfo &LI) {
-  DenseMap<std::pair<BasicBlock *, Value *>, GeometryRecord> Shared;
-  for (const AccessRecord &A : Accesses) {
-    Loop *L = LI.getLoopFor(A.Inst->getParent());
-    if (!L || !L->getLoopPreheader())
-      continue;
-    Value *Root = A.Pointer;
-    if (!L->isLoopInvariant(Root)) {
-      Root = getContainedAllocationRoot(A);
-      if (!Root || !L->isLoopInvariant(Root))
-        continue;
-    }
-    BasicBlock *PH = L->getLoopPreheader();
-    if (auto *Def = dyn_cast<Instruction>(Root);
-        Def && !DT.dominates(Def, PH->getTerminator()))
-      continue;
-    auto Key = std::make_pair(PH, Root);
-    auto It = Shared.find(Key);
-    if (It == Shared.end()) {
-      IRBuilder<> B(PH->getTerminator());
-      B.SetNoSanitizeMetadata();
-      auto Existing = Geometries.find(Root);
-      GeometryRecord G = Existing != Geometries.end()
-                             ? getTemporalGeometry(Root)
-                             : emitGeometry(B, Root);
-      It = Shared.insert({Key, G}).first;
-    }
-    AccessGeometry[{A.Inst, A.Pointer}] = It->second;
-  }
-}
-
 // A constant-offset access within the requested allocation remains in the
 // root's slot. Share immutable metadata geometry, but continue to observe the
 // generation at every access and use the actual pointer's tag for comparison.
@@ -2021,8 +1561,7 @@ void FlexFatSanitizer::prepareContainedGeometry(
   if (!ClShareContainedGeometry)
     return;
   for (const AccessRecord &Access : Accesses) {
-    if (FastGeometry.contains(Access.Inst) ||
-        AccessGeometry.count({Access.Inst, Access.Pointer}))
+    if (AccessGeometry.count({Access.Inst, Access.Pointer}))
       continue;
     Value *Root = getContainedAllocationRoot(Access);
     // Materializing geometry after an invoke can split its normal edge and
@@ -2048,18 +1587,10 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   BaseSizes.clear();
   AccessLengths.clear();
   AccessGeometry.clear();
-  FastGeometry.clear();
-  RangeProven.clear();
   SpatialGeometry.clear();
-  CountedLoopHeaders.clear();
   BoundsIRGeneration = 0;
   bool Modified = false;
   DominatorTree DT(F);
-  LoopInfo LI(DT);
-  AssumptionCache AC(F);
-  ScalarEvolution SE(F, TLI, AC, DT, LI);
-  while (versionLoop(F, DT, LI, SE))
-    Modified = true;
   SmallVector<Instruction *, 16> ToInstrument;
 
   for (auto &BB : F) {
@@ -2085,33 +1616,23 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   SmallVector<AccessRecord, 16> TemporalAccesses;
   for (Instruction *I : ToInstrument)
     discoverAccesses(I, TemporalAccesses);
-  SmallVector<AccessRecord, 16> LoopAccesses;
-  for (const AccessRecord &A : TemporalAccesses)
-    if (LI.getLoopFor(A.Inst->getParent()))
-      LoopAccesses.push_back(A);
   llvm::erase_if(ToInstrument,
                  [this](Instruction *I) { return shouldSkipInstruction(I); });
 
   // LowFat-style phase 2: resolve every provenance root and memoize one
   // recovered allocation base before CFG-changing checks are inserted.
   for (Instruction *I : ToInstrument)
-    if (!I->hasMetadata(LLVMContext::MD_nosanitize) && !RangeProven.contains(I))
+    if (!I->hasMetadata(LLVMContext::MD_nosanitize))
       prepareBounds(I);
 
-  // Invoke provenance can split normal edges. Rebuild CFG analyses and
-  // discard SCEV results before revalidating loop geometry candidates.
-  SE.forgetAllLoops();
+  // Invoke provenance can split normal edges. Refresh dominance before
+  // sharing geometry for accesses proven within the same allocation.
   DT.recalculate(F);
-  LI.releaseMemory();
-  LI.analyze(DT);
-  if (!Options.InternalSkipOptimizations_) {
-    prepareLoopGeometry(LoopAccesses, DT, LI);
+  if (!Options.InternalSkipOptimizations_)
     prepareContainedGeometry(TemporalAccesses, DT);
-  }
   if (!Options.Recover)
     for (const AccessRecord &A : TemporalAccesses)
-      if (!FastGeometry.contains(A.Inst) &&
-          !AccessGeometry.count({A.Inst, A.Pointer}) &&
+      if (!AccessGeometry.count({A.Inst, A.Pointer}) &&
           !shouldSkipInstruction(A.Inst)) {
         BoundsRecord B = getBounds(A.Pointer);
         if (B.Kind != BaseKind::NonFlexFat) {
@@ -2125,17 +1646,10 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   // Without a retained spatial check or an independent same-slot proof,
   // derive temporal metadata from the actual access pointer.
   for (const AccessRecord &A : TemporalAccesses)
-    if (!FastGeometry.contains(A.Inst) &&
-        !AccessGeometry.count({A.Inst, A.Pointer}) &&
+    if (!AccessGeometry.count({A.Inst, A.Pointer}) &&
         !SpatialGeometry.count({A.Inst, A.Pointer}) &&
         (isa<Instruction>(A.Pointer) || isa<Argument>(A.Pointer)))
       (void)getTemporalGeometry(A.Pointer);
-  // The final preparation step can also split an invoke's normal edge.
-  SE.forgetAllLoops();
-  DT.recalculate(F);
-  LI.releaseMemory();
-  LI.analyze(DT);
-
   // Temporal discovery is independent of spatial elision. Prepare all
   // provenance before inserting any check branches (including invoke splits).
   if (Options.Recover)

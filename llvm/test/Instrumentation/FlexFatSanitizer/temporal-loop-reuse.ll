@@ -6,7 +6,7 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 declare void @may_free(ptr)
 declare ptr @malloc(i64)
 
-; Even spatially marked accesses share immutable loop-invariant geometry.
+; Spatially marked accesses retain per-access temporal checks without loop hoisting.
 ; A call between accesses must not allow either acquire observation to move.
 define i8 @invariant(ptr %p, i1 %again) {
 ; CHECK-LABEL: @invariant(

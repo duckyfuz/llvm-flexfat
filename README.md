@@ -57,7 +57,7 @@ Use `-fsanitize=flexfat` to instrument an application. Controls:
 | `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-recover=` | `true`, `false` | `false` |
-| `-mllvm -flexfat-tbi-storage=` | `shadow`, `last-byte`, `prior-byte` | `shadow` |
+| `-mllvm -flexfat-tbi-storage=` | `shadow` (POW2 only), `last-byte`, `prior-byte` | `last-byte` |
 
 The existing Clang TBI and sanitizer recovery flags remain supported. Explicit
 `-flexfat-tbi` and `-flexfat-recover` settings override them.
@@ -65,26 +65,62 @@ The existing Clang TBI and sanitizer recovery flags remain supported. Explicit
 The storage option requires `-fsanitize-flexfat-tbi`. The older
 `-mllvm -flexfat-tbi-last-byte` and `-mllvm -flexfat-tbi-prior-byte`
 spellings remain supported. Each storage assignment replaces the previous
-one; either compatibility flag set to `false` selects `shadow`.
+one; either compatibility flag set to `false` selects `last-byte`.
 In `last-byte` mode,
 the generation occupies the final byte of each size-class slot. That byte is
-excluded from usable capacity, copies, and instrumented memory accesses.
-One-past pointers may point to it, but dereferencing it terminates even with
-FlexFat recovery enabled. Last-byte and shadow objects have different link
-ABIs and must be built with the same storage choice. Uninstrumented code can
-overwrite an in-slot generation byte; use shadow storage when such writes are
+excluded from usable capacity and runtime copies. Default scalar checks reject
+accesses starting at the reserved byte; a wider scalar access starting before
+it may overlap it. `-mllvm -flexfat-check-whole-access=true` checks the full
+scalar width, and memory intrinsics always check their full range. One-past
+pointers may point to the reserved byte. Last-byte and shadow objects have
+different link ABIs and must be built with the same storage choice.
+Uninstrumented code can overwrite an in-slot generation byte; use shadow
+storage when such writes are
 possible. Compare the layouts with
 `compiler-rt/test/flexfat/compare-temporal-storage.py BUILD_DIR`.
+
+POW2 TBI shadow storage derives a generation address from the slot base:
+`32 TiB + (slot_base >> 4)`. It reserves the zero-initialized 32–48 TiB
+virtual address range at startup. Only the first 16-byte granule of each
+slot stores its generation. Unmanaged pointers have a recovered base of zero,
+which addresses a shared zero entry. The reservation commits physical pages
+only as entries are written.
 
 In `prior-byte` mode, each slot's generation occupies the byte immediately
 before its base. The first aligned slot in every region is reserved so this
 byte is mapped for the first allocation. The final byte of an allocated slot
 may hold the following slot's generation and is excluded from usable capacity
-and instrumented accesses. A zero-filled guard page precedes the first region;
+and the start of default point-checked accesses. A wider scalar access may
+overlap it unless whole-access checking is enabled. A zero-filled guard page
+precedes the first region;
 the reserved final byte of each later region provides a safe zero tag for its
 unallocated first slot. Once a slot base is recovered, the tag address is
 `base - 1`; recovering a base from an interior pointer still requires the
 size-class geometry. This mode has its own link ABI.
+
+FlexFat does not perform loop-specific geometry hoisting, loop versioning,
+or affine-range grouping. Loop accesses use ordinary spatial and temporal
+instrumentation. Proven contained-allocation geometry sharing and the
+`optimized` mode's general IR cleanup remain available.
+
+POW2 uses generations 0–255 in every TBI storage mode. Fresh slots start at
+zero, and free advances the generation modulo 256. Each covered access loads
+the generation and compares it directly with the pointer tag. Shadow checks
+use ordinary, non-volatile loads, like HWASan; later optimization may reuse or
+hoist these observations when legal. In-slot checks retain relaxed atomic
+loads. Allocator metadata updates remain atomic. Untagged foreign pointers
+match the zero sentinel; tagged foreign pointers fail. Generation wraparound
+can make an old tag match again,
+and zero-tag pointers into never-allocated slots can pass the temporal check.
+The POW2 ABI markers are `last_byte_pow2_v2`, `prior_byte_pow2_v3`, and `v7`
+(shadow); objects compiled with older generation rules must be rebuilt.
+
+Custom builds support last-byte and prior-byte storage. Metadata addresses
+use the recovered slot base and class size, without a 1:16 shadow layout or
+granule-alignment assumption. The existing size generator requires multiples
+of 16 for allocation alignment. Custom generations remain 1–255, with the existing managed
+region and zero-tag checks and partial-slot handling. Custom builds reject
+shadow selection.
 
 Fast mode instruments at ScalarOptimizerLateEP. Safe mode additionally
 instruments at PipelineStartEP. Placement is internal and has no command-line
