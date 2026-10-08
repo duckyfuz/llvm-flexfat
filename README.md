@@ -52,7 +52,6 @@ Use `-fsanitize=flexfat` to instrument an application. Controls:
 
 | Setting | Values | Default |
 | --- | --- | --- |
-| `-mllvm -flexfat-mode=` | `fast`, `safe` | `fast` |
 | `-mllvm -flexfat-alignment=` | `left`, `right` | `left` |
 | `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
@@ -76,8 +75,9 @@ pointers may point to the reserved byte. Last-byte and shadow objects have
 different link ABIs and must be built with the same storage choice.
 Uninstrumented code can overwrite an in-slot generation byte; use shadow
 storage when such writes are
-possible. Compare the layouts with
-`compiler-rt/test/flexfat/compare-temporal-storage.py BUILD_DIR`.
+possible. Exercise the layouts with
+`compiler-rt/test/flexfat/run-temporal.py BUILD_DIR --storage=last-byte`
+(or `prior-byte`, or `shadow` for a POW2 build).
 
 POW2 TBI shadow storage derives a generation address from the slot base:
 `32 TiB + (slot_base >> 4)`. It reserves the zero-initialized 32–48 TiB
@@ -100,8 +100,8 @@ size-class geometry. This mode has its own link ABI.
 
 FlexFat does not perform loop-specific geometry hoisting, loop versioning,
 or affine-range grouping. Loop accesses use ordinary spatial and temporal
-instrumentation. Proven contained-allocation geometry sharing and the
-`optimized` mode's general IR cleanup remain available.
+instrumentation. Proven contained-allocation geometry sharing and general IR
+cleanup remain available.
 
 POW2 uses generations 0–255 in every TBI storage mode. Fresh slots start at
 zero, and free advances the generation modulo 256. Each covered access loads
@@ -122,10 +122,12 @@ of 16 for allocation alignment. Custom generations remain 1–255, with the exis
 region and zero-tag checks and partial-slot handling. Custom builds reject
 shadow selection.
 
-Fast mode instruments at ScalarOptimizerLateEP. Safe mode additionally
-instruments at PipelineStartEP. Placement is internal and has no command-line
-option. Alignment is independent of mode; for example, combine
-`-mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right`.
+FlexFat instruments at OptimizerLastEP, then runs MemorySSA EarlyCSE,
+InstCombine, and SimplifyCFG to simplify generated checks. At `-O0`, the
+instrumentation still runs, but cleanup and contained-allocation geometry
+sharing are skipped. Accesses removed by earlier optimization cannot be
+checked. There are no mode, placement, or cleanup-selection flags.
+Use `-mllvm -flexfat-alignment=right` to select right alignment independently.
 
 Set `FLEXFAT_SIZES_CFG` to select a custom size-class configuration and
 `FLEXFAT_OPTIONS` to provide runtime options such as `exitcode=6`.
