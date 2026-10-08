@@ -36,9 +36,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ModRef.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar/EarlyCSE.h"
-#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -59,27 +56,6 @@ static cl::opt<bool> ClShareContainedGeometry(
     "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
     cl::desc(
         "Share temporal geometry for accesses proven within an allocation"));
-using FFOptions = FlexFatSanitizerOptions;
-static cl::opt<FFOptions::InstrumentationPoint> ClPoint(
-    "flexfat-instrumentation-point", cl::Hidden,
-    cl::init(FFOptions::InstrumentationPoint::ScalarLate),
-    cl::values(clEnumValN(FFOptions::InstrumentationPoint::ScalarLate,
-                          "scalar-late", "Scalar optimizer late"),
-               clEnumValN(FFOptions::InstrumentationPoint::OptimizerLast,
-                          "optimizer-last", "Optimizer last")));
-static cl::opt<FFOptions::PostCleanup> ClCleanup(
-    "flexfat-post-cleanup", cl::Hidden, cl::init(FFOptions::PostCleanup::None),
-    cl::values(clEnumValN(FFOptions::PostCleanup::None, "none", "No cleanup"),
-               clEnumValN(FFOptions::PostCleanup::EarlyCSE, "early-cse",
-                          "MemorySSA EarlyCSE cleanup")));
-FlexFatSanitizerOptions llvm::resolveFlexFatSanitizerOptions(FFOptions O) {
-  if (ClPoint.getNumOccurrences())
-    O.Point = ClPoint;
-  if (ClCleanup.getNumOccurrences())
-    O.Cleanup = ClCleanup;
-  return O;
-}
-
 STATISTIC(NumInstrumentedLoads, "Number of loads instrumented");
 STATISTIC(NumInstrumentedStores, "Number of stores instrumented");
 STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
@@ -143,7 +119,6 @@ struct AccessRecord {
   Value *Pointer;
   Value *Length;
   bool Write;
-  uint64_t SpatialWidth;
 };
 
 // Immutable address geometry only. A generation observation must never be
@@ -183,7 +158,6 @@ public:
   }
 
   bool run();
-  bool runFunction(Function &F);
 
 private:
   Module &M;
@@ -1497,7 +1471,7 @@ void FlexFatSanitizer::discoverAccesses(
     Instruction *I, SmallVectorImpl<AccessRecord> &Accesses) {
   if (!Options.TemporalTBI || I->getMetadata("flexfat.temporal"))
     return;
-  auto Add = [&](Value *Ptr, Value *Length, bool Write, uint64_t Width) {
+  auto Add = [&](Value *Ptr, Value *Length, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
     if (isDefinitelyNonFlexFat(Ptr, Seen))
       return;
@@ -1508,8 +1482,7 @@ void FlexFatSanitizer::discoverAccesses(
     Value *Converted = AccessLengths.lookup(I);
     if (!Converted)
       AccessLengths[I] = Converted = B.CreateZExtOrTrunc(Length, IntptrTy);
-    Accesses.push_back(
-        {I, Ptr, Converted, Write, Options.CheckWholeAccess ? Width : 0});
+    Accesses.push_back({I, Ptr, Converted, Write});
   };
   auto Scalar = [&](Value *Ptr, Type *Ty, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
@@ -1518,8 +1491,7 @@ void FlexFatSanitizer::discoverAccesses(
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();
     TypeSize Size = DL.getTypeStoreSize(Ty);
-    Add(Ptr, B.CreateTypeSize(IntptrTy, Size), Write,
-        Size.isScalable() ? 0 : Size.getFixedValue());
+    Add(Ptr, B.CreateTypeSize(IntptrTy, Size), Write);
   };
   if (auto *L = dyn_cast<LoadInst>(I))
     Scalar(L->getPointerOperand(), L->getType(), false);
@@ -1530,10 +1502,10 @@ void FlexFatSanitizer::discoverAccesses(
   else if (auto *A = dyn_cast<AtomicCmpXchgInst>(I))
     Scalar(A->getPointerOperand(), A->getNewValOperand()->getType(), true);
   else if (auto *T = dyn_cast<MemTransferInst>(I)) {
-    Add(T->getDest(), T->getLength(), true, 0);
-    Add(T->getSource(), T->getLength(), false, 0);
+    Add(T->getDest(), T->getLength(), true);
+    Add(T->getSource(), T->getLength(), false);
   } else if (auto *S = dyn_cast<MemSetInst>(I))
-    Add(S->getDest(), S->getLength(), true, 0);
+    Add(S->getDest(), S->getLength(), true);
 }
 
 // A constant-offset access within the requested allocation remains in the
@@ -1727,27 +1699,20 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   return Modified || BoundsIRGeneration != 0;
 }
 
-bool FlexFatSanitizer::runFunction(Function &F) {
-  if (F.isDeclaration() || F.empty())
-    return false;
-  return instrumentFunction(F);
-}
-
 bool FlexFatSanitizer::run() {
-  LLVM_DEBUG(dbgs() << "[FlexFat] run() Mode=" << (int)Options.Mode << "\n");
   LLVM_DEBUG(dbgs() << "[FlexFat] Running on module: " << M.getName() << "\n");
 
   bool Modified = false;
   SmallPtrSet<Function *, 16> TemporalFunctions;
   for (Function &F : M) {
     if (Options.InternalModuleSetupOnly_) {
-      // Scalar-late instrumentation runs as a function pass. Invalidate its
-      // prospective callees here, while it is safe to modify other functions.
+      // Remove attributes that would become invalid after temporal checks
+      // are added, before the optimizer can use them to eliminate accesses.
       if (Options.TemporalTBI && shouldInstrumentFunction(F)) {
         TemporalFunctions.insert(&F);
         Modified |= invalidateTemporalAttributes(F);
       }
-    } else if (runFunction(F)) {
+    } else if (instrumentFunction(F)) {
       Modified = true;
       if (Options.TemporalTBI)
         TemporalFunctions.insert(&F);
@@ -1855,25 +1820,12 @@ bool FlexFatSanitizer::run() {
 
 } // anonymous namespace
 
-static void runFlexFatCleanup(Function &F, FunctionAnalysisManager &AM,
-                              const FFOptions &Options) {
-  if (Options.InternalSkipOptimizations_ || Options.InternalModuleSetupOnly_ ||
-      Options.Cleanup == FFOptions::PostCleanup::None)
-    return;
-  AM.invalidate(F, PreservedAnalyses::none());
-  FunctionPassManager FPM;
-  FPM.addPass(EarlyCSEPass(true));
-  FPM.addPass(InstCombinePass());
-  FPM.addPass(SimplifyCFGPass());
-  FPM.run(F, AM);
-}
-
 FlexFatSanitizerPass::FlexFatSanitizerPass(
     const FlexFatSanitizerOptions &Options)
-    : Options(resolveFlexFatSanitizerOptions(Options)) {}
+    : Options(Options) {}
 
 PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
-                                            ModuleAnalysisManager &AM) {
+                                            ModuleAnalysisManager &) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
   if (Options.TemporalTBI &&
       Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow) {
@@ -1882,34 +1834,9 @@ PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
     return PreservedAnalyses::all();
   }
 #endif
-  auto &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
   FlexFatSanitizer Sanitizer(M, Options);
   if (!Sanitizer.run())
     return PreservedAnalyses::all();
-  for (Function &F : M)
-    if (!F.isDeclaration())
-      runFlexFatCleanup(F, FAM, Options);
 
-  return PreservedAnalyses::none();
-}
-
-FlexFatSanitizerFunctionPass::FlexFatSanitizerFunctionPass(
-    const FlexFatSanitizerOptions &Options)
-    : Options(resolveFlexFatSanitizerOptions(Options)) {}
-
-PreservedAnalyses
-FlexFatSanitizerFunctionPass::run(Function &F, FunctionAnalysisManager &AM) {
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  if (Options.TemporalTBI &&
-      Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow) {
-    F.getContext().emitError(
-        "FlexFat TBI shadow storage requires a POW2 build");
-    return PreservedAnalyses::all();
-  }
-#endif
-  FlexFatSanitizer Sanitizer(*F.getParent(), Options);
-  if (!Sanitizer.runFunction(F))
-    return PreservedAnalyses::all();
-  runFlexFatCleanup(F, AM, Options);
   return PreservedAnalyses::none();
 }

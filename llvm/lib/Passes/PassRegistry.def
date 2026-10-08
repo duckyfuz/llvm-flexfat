@@ -220,9 +220,7 @@ MODULE_PASS_WITH_PARAMS(
     "flexfat", "FlexFatSanitizerPass",
     [](FlexFatSanitizerOptions Opts) { return FlexFatSanitizerPass(Opts); },
     parseFlexFatPassOptions,
-    "recover;whole-access;tbi;tbi-storage=shadow;tbi-storage=last-byte;tbi-storage=prior-byte;"
-    "instrumentation-point=scalar-late;instrumentation-point=optimizer-last;"
-    "post-cleanup=none;post-cleanup=early-cse;mode=fast;mode=safe;mode=optimized")
+    "recover;whole-access;tbi;tbi-storage=shadow;tbi-storage=last-byte;tbi-storage=prior-byte")
 MODULE_PASS_WITH_PARAMS(
     "internalize", "InternalizePass",
     [](SmallVector<std::string, 0> PreservedGVs) {

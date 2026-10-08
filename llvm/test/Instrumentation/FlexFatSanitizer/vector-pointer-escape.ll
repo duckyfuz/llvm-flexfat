@@ -1,4 +1,4 @@
-; RUN: opt -passes='default<O3>,flexfat<mode=optimized>,verify' -disable-output %s
+; RUN: opt -passes='default<O3>,flexfat,function(early-cse<memssa>,instcombine,simplifycfg),verify' -disable-output %s
 ; RUN: opt -passes='flexfat,verify' -S %s | FileCheck %s
 ; RUN: opt -passes='flexfat,flexfat,verify' -S %s | FileCheck %s
 ; RUN: opt -passes='flexfat,default<O2>,verify' -disable-output %s

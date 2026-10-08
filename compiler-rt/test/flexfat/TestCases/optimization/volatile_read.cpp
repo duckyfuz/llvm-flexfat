@@ -1,11 +1,7 @@
 // RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
-// RUN: %clangxx_flexfat_safe -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
 // RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
-// RUN: %clangxx_flexfat_safe -mllvm -flexfat-check-whole-access -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
 
-// Baseline: both tested modes detect this OOB read because the result is used.
-// Contrast with mode_diff_pure_call.cpp, where default-fast can remove a dead
-// load before instrumentation.
+// A volatile heap read remains observable and is checked at O0 and O2.
 
 #include <cstdio>
 #include <cstdlib>

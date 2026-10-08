@@ -1,5 +1,5 @@
 // RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe -mllvm -flexfat-check-whole-access -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // OOB write past a 48-byte slot must be reported.
 // This exercises the non-pow2 magic-multiply path.
@@ -15,7 +15,7 @@ int main() {
   // Write 8 bytes starting at offset 44.
   // Bytes 44-51 cross the 48-byte slot boundary.
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
-  double *val = (double *)(p + 44);
+  volatile double *val = (volatile double *)(p + 44);
   *val = 1.0;
 
   free(p);

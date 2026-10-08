@@ -22,57 +22,20 @@ struct FlexFatSanitizerOptions {
   /// default checks only the pointer position used by the access.
   bool CheckWholeAccess = false;
 
-  enum class FlexFatMode {
-    Fast, /// Instrument at the selected later extension point.
-    Safe, /// Instrument at PipelineStartEP and the selected later point.
-    Optimized, /// Instrument at OptimizerLastEP, then clean up generated IR.
-  };
-  FlexFatMode Mode = FlexFatMode::Fast;
-
   enum class Alignment { Left, Right };
   Alignment AllocationAlignment = Alignment::Left;
 
-  enum class InstrumentationPoint { ScalarLate, OptimizerLast };
-  InstrumentationPoint Point = InstrumentationPoint::ScalarLate;
-  enum class PostCleanup { None, EarlyCSE };
-  PostCleanup Cleanup = PostCleanup::None;
-  /// Apply a mode preset before explicit placement and cleanup overrides.
-  void setMode(FlexFatMode NewMode) {
-    Mode = NewMode;
-    Point = InstrumentationPoint::ScalarLate;
-    Cleanup = PostCleanup::None;
-    if (Mode == FlexFatMode::Optimized) {
-      Point = InstrumentationPoint::OptimizerLast;
-      Cleanup = PostCleanup::EarlyCSE;
-    }
-  }
   bool InternalSkipOptimizations_ = false;
-
-  bool InternalBarrierOnly_ = false;
   bool InternalModuleSetupOnly_ = false;
 };
 
-/// Apply explicitly supplied hidden command-line placement and cleanup controls.
-LLVM_ABI FlexFatSanitizerOptions
-resolveFlexFatSanitizerOptions(FlexFatSanitizerOptions Options);
-
+/// Emit FlexFat checks. Clang schedules this at OptimizerLastEP and follows
+/// it with EarlyCSE, InstCombine, and SimplifyCFG when optimization is enabled.
 class FlexFatSanitizerPass : public PassInfoMixin<FlexFatSanitizerPass> {
 public:
   LLVM_ABI
   FlexFatSanitizerPass(const FlexFatSanitizerOptions &Options);
   LLVM_ABI PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
-  static bool isRequired() { return true; }
-
-private:
-  FlexFatSanitizerOptions Options;
-};
-
-class FlexFatSanitizerFunctionPass
-    : public PassInfoMixin<FlexFatSanitizerFunctionPass> {
-public:
-  LLVM_ABI explicit FlexFatSanitizerFunctionPass(
-      const FlexFatSanitizerOptions &Options);
-  LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
   static bool isRequired() { return true; }
 
 private:

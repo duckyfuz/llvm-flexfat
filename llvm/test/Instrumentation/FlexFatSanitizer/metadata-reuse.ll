@@ -57,7 +57,7 @@ define i8 @loaded_root(ptr %slot) {
   ret i8 %sum
 }
 
-; Ordinary allocation results are already slot bases in fast/safe mode.  A
+; Ordinary allocation results are already slot bases with left alignment.  A
 ; fallback pointer still selects sentinel metadata when the size is loaded.
 define i8 @allocation_root(i64 %a, i64 %b) {
 ; CHECK-LABEL: @allocation_root(

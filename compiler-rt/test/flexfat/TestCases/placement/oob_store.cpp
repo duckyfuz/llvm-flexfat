@@ -1,6 +1,8 @@
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-mode=fast -mllvm -flexfat-check-whole-access %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-LATE-CATCH
+// RUN: %clangxx_flexfat -O0 -mllvm -flexfat-check-whole-access %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
+// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-check-whole-access %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=MISS
 
-// Whole-access checking catches the store crossing the slot boundary.
+// The store is checked at O0. At O3 its effects are discarded before
+// OptimizerLastEP because the allocation is freed without being read.
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,5 +18,5 @@ int main() {
   std::puts("DONE");
 }
 
-// CHECK-EARLY-MISS: DONE
-// CHECK-LATE-CATCH: FLEXFAT ERROR: out-of-bounds error detected!
+// MISS: DONE
+// CATCH: FLEXFAT ERROR: out-of-bounds error detected!

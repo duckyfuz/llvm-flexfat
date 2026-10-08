@@ -90,6 +90,7 @@
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/JumpThreading.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/Debugify.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <limits>
@@ -107,18 +108,6 @@ namespace llvm {
 static cl::opt<bool> ClSanitizeOnOptimizerEarlyEP(
     "sanitizer-early-opt-ep", cl::Optional,
     cl::desc("Insert sanitizers on OptimizerEarlyEP."));
-
-static cl::opt<FlexFatSanitizerOptions::FlexFatMode> FlexFatMode(
-    "flexfat-mode", cl::init(FlexFatSanitizerOptions::FlexFatMode::Fast),
-    cl::desc("Controls FlexFat instrumentation timing"),
-    cl::values(
-        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Fast, "fast",
-                   "Instrument at ScalarOptimizerLateEP"),
-        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Safe, "safe",
-                   "Instrument at PipelineStartEP and ScalarOptimizerLateEP"),
-        clEnumValN(FlexFatSanitizerOptions::FlexFatMode::Optimized, "optimized",
-                   "Instrument at OptimizerLastEP, then run MemorySSA EarlyCSE, "
-                   "InstCombine and SimplifyCFG")));
 
 static cl::opt<FlexFatSanitizerOptions::Alignment> FlexFatAlignment(
     "flexfat-alignment", cl::init(FlexFatSanitizerOptions::Alignment::Left),
@@ -855,47 +844,30 @@ static void addSanitizers(const Triple &TargetTriple,
                                 : FlexFatSanitizerOptions::TBIStorage::LastByte;
     if (!FlexFatOpts.TemporalTBI)
       FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    FlexFatOpts.setMode(FlexFatMode);
     FlexFatOpts.AllocationAlignment = FlexFatAlignment;
     FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
 
-    FlexFatOpts = resolveFlexFatSanitizerOptions(FlexFatOpts);
     FlexFatSanitizerOptions SetupOpts = FlexFatOpts;
     SetupOpts.InternalModuleSetupOnly_ = true;
     PB.registerPipelineStartEPCallback(
         [SetupOpts](ModulePassManager &MPM, OptimizationLevel) {
           MPM.addPass(FlexFatSanitizerPass(SetupOpts));
         });
-    if (FlexFatOpts.Point ==
-        FlexFatSanitizerOptions::InstrumentationPoint::ScalarLate)
-      PB.registerScalarOptimizerLateEPCallback(
-          [FlexFatOpts](FunctionPassManager &FPM,
-                        OptimizationLevel Level) mutable {
-            FlexFatOpts.InternalSkipOptimizations_ =
-                Level == OptimizationLevel::O0;
-            FPM.addPass(FlexFatSanitizerFunctionPass(FlexFatOpts));
-          });
-    else
-      PB.registerOptimizerLastEPCallback(
-          [FlexFatOpts](ModulePassManager &MPM, OptimizationLevel Level,
-                        ThinOrFullLTOPhase) mutable {
-            FlexFatOpts.InternalSkipOptimizations_ =
-                Level == OptimizationLevel::O0;
-            MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
-          });
-
-    if (FlexFatOpts.Mode == FlexFatSanitizerOptions::FlexFatMode::Safe) {
-      // Safe: instrument once at PipelineStartEP so early-inlined dead
-      // computations are still checked, then instrument at scalar-late again to
-      // catch optimizer-introduced accesses. The pass tags its own IR so the
-      // later run skips already-instrumented accesses.
-      PB.registerPipelineStartEPCallback([FlexFatOpts](
-                                             ModulePassManager &MPM,
-                                             OptimizationLevel Level) mutable {
-        FlexFatOpts.InternalSkipOptimizations_ = Level == OptimizationLevel::O0;
-        MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
-      });
-    }
+    // Instrument the final optimized IR, then simplify the generated checks.
+    PB.registerOptimizerLastEPCallback(
+        [FlexFatOpts](ModulePassManager &MPM, OptimizationLevel Level,
+                      ThinOrFullLTOPhase) mutable {
+          FlexFatOpts.InternalSkipOptimizations_ =
+              Level == OptimizationLevel::O0;
+          MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
+          if (Level != OptimizationLevel::O0) {
+            FunctionPassManager Cleanup;
+            Cleanup.addPass(EarlyCSEPass(true));
+            Cleanup.addPass(InstCombinePass());
+            Cleanup.addPass(SimplifyCFGPass());
+            MPM.addPass(createModuleToFunctionPassAdaptor(std::move(Cleanup)));
+          }
+        });
   }
 }
 

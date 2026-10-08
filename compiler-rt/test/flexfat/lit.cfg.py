@@ -43,15 +43,11 @@ def build_invocation(flags):
 # Base flags
 flexfat_base = ["-fsanitize=flexfat"]
 
-# safe mode (fast mode is the default)
-flexfat_safe = flexfat_base + ["-mllvm", "-flexfat-mode=safe"]
-
 # right-align mode: allocations are biased toward the high end of the slot
 # while preserving the platform's default malloc alignment.
 flexfat_right_align = flexfat_base + ["-mllvm", "-flexfat-alignment=right"]
 
 config.substitutions.append(("%clangxx_flexfat ", build_invocation(flexfat_base)))
-config.substitutions.append(("%clangxx_flexfat_safe ", build_invocation(flexfat_safe)))
 config.substitutions.append(("%clangxx_flexfat_right_align ", build_invocation(flexfat_right_align)))
 
 # Recover mode versions
@@ -59,12 +55,6 @@ config.substitutions.append(
     (
         "%clangxx_flexfat_recover ",
         build_invocation(flexfat_base + ["-mllvm", "-flexfat-recover=true"]),
-    )
-)
-config.substitutions.append(
-    (
-        "%clangxx_flexfat_safe_recover ",
-        build_invocation(flexfat_safe + ["-mllvm", "-flexfat-recover=true"]),
     )
 )
 
