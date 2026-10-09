@@ -1,4 +1,3 @@
-// RUN: %clangxx_flexfat_right_align -mllvm -flexfat-mode=safe -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat_right_align -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 // Documents the known trade-off of right-align mode: underflows into the left

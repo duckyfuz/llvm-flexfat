@@ -1,4 +1,3 @@
-// RUN: %clangxx_flexfat_right_align -mllvm -flexfat-mode=safe -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat_right_align -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat_right_align -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat_right_align -O0 %s -o %t && %run %t 2>&1 | FileCheck %s

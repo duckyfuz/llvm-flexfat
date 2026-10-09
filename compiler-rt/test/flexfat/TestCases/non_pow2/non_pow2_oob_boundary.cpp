@@ -1,6 +1,6 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t | FileCheck %s
 // RUN: %clangxx_flexfat -O2 %s -o %t && %run %t | FileCheck %s
-// RUN: %clangxx_flexfat_safe -O1 %s -o %t && %run %t | FileCheck %s
+// RUN: %clangxx_flexfat -O1 %s -o %t && %run %t | FileCheck %s
 
 // Exact one-past escape is valid regardless of optimization or pass placement.
 //

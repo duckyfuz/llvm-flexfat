@@ -1,7 +1,7 @@
-// RUN: %clangxx_flexfat_safe_recover -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe_recover -O1 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe_recover -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe_recover -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O1 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 // memcpy OOB write in recover mode must warn and continue.
 
@@ -18,6 +18,8 @@ int main() {
 
   // CHECK: FLEXFAT WARNING: out-of-bounds error detected!
   memcpy(dst, payload, 32);
+  // Keep the write observable until late instrumentation.
+  asm volatile("" : : "r"(dst) : "memory");
 
   // Execution should continue in recover mode.
   // CHECK: after memcpy

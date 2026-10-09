@@ -1,4 +1,4 @@
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-mode=fast %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
+// RUN: %clangxx_flexfat -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
 
 // Compare an OOB read that both placements currently miss at -O3.
 

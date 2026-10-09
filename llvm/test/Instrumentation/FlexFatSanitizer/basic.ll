@@ -11,10 +11,11 @@ define i32 @test_load(ptr %p) {
 ; CHECK: %flexfat.address.valid = icmp ult i64 %flexfat.root.int, 281474976710656
 ; CHECK: %flexfat.region = select i1 %flexfat.address.valid, i64 %flexfat.region.raw, i64 0
 ; CHECK-NOT: sub i64 {{.*}}, 17592186044416
-; CHECK: %flexfat.base = inttoptr
-; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %q to i64
 ; CHECK: getelementptr inbounds i64, ptr {{.*}}, i64 %flexfat.region
 ; CHECK: load i64
+; CHECK: %flexfat.base = inttoptr
+; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %q to i64
+; CHECK-NOT: load i64
 ; CHECK: icmp uge i64
 ; CHECK: call void @__flexfat_report_oob
 ; WHOLE-LABEL: @test_load

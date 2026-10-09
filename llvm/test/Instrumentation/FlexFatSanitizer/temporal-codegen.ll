@@ -2,6 +2,8 @@
 ; RUN: opt -passes='flexfat<tbi>,default<O2>,verify' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --implicit-check-not='udiv' --implicit-check-not='sdiv' --implicit-check-not='__flexfat_check_temporal'
 ; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=CUSTOM %}
 ; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=prior-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=shadow>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
@@ -13,20 +15,28 @@ define i8 @read_byte(ptr %p) {
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
-; CHECK: ldarb
+; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
+; CHECK: {{ldrb|ldarb}}
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
+; CHECK: b.{{eq|ne|lo|ls}}
+; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; CHECK: ldrb w0, [x0]
 ; CHECK-NEXT: ret
-; CHECK: bl __flexfat_report_temporal
+; CHECK: bl __flexfat_report_temporal_v3
 ; CUSTOM-LABEL: read_byte:
 ; CUSTOM: umulh
 ; CUSTOM: mul
 ; CUSTOM: ldarb
 ; POW2-LABEL: read_byte:
-; POW2: lsr x{{[0-9]+}}, x{{[0-9]+}}, x{{[0-9]+}}
-; POW2: ldarb
+; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
+; POW2: ldrb
+; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
+; POW2: cmp
+; POW2-NEXT: b.{{ne|lo|ls}}
+; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
+; POW2: ldrb w0, [x0]
   %v = load volatile i8, ptr %p, !flexfat.instrumented !0
   ret i8 %v
 }

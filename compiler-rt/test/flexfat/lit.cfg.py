@@ -1,5 +1,6 @@
 import lit.formats
 import os
+import shlex
 
 # Setup config name.
 config.name = "FlexFatSanitizer" + getattr(config, "name_suffix", "")
@@ -7,7 +8,6 @@ config.name = "FlexFatSanitizer" + getattr(config, "name_suffix", "")
 # Setup source root.
 config.test_source_root = os.path.dirname(__file__)
 config.suffixes = [".c", ".cpp"]
-config.excludes = ["Inputs"]
 
 # Teach lit that these are shell tests (// RUN: ... lines).
 # When loaded via the build-dir site config, lit.common.configured sets this;
@@ -33,6 +33,7 @@ def _find_clang():
 
 
 clang = _find_clang()
+config.substitutions.append(("%clang ", " " + clang + " "))
 
 
 def build_invocation(flags):
@@ -42,15 +43,11 @@ def build_invocation(flags):
 # Base flags
 flexfat_base = ["-fsanitize=flexfat"]
 
-# safe mode (fast mode is the default)
-flexfat_safe = flexfat_base + ["-mllvm", "-flexfat-mode=safe"]
-
 # right-align mode: allocations are biased toward the high end of the slot
 # while preserving the platform's default malloc alignment.
 flexfat_right_align = flexfat_base + ["-mllvm", "-flexfat-alignment=right"]
 
 config.substitutions.append(("%clangxx_flexfat ", build_invocation(flexfat_base)))
-config.substitutions.append(("%clangxx_flexfat_safe ", build_invocation(flexfat_safe)))
 config.substitutions.append(("%clangxx_flexfat_right_align ", build_invocation(flexfat_right_align)))
 
 # Recover mode versions
@@ -58,12 +55,6 @@ config.substitutions.append(
     (
         "%clangxx_flexfat_recover ",
         build_invocation(flexfat_base + ["-mllvm", "-flexfat-recover=true"]),
-    )
-)
-config.substitutions.append(
-    (
-        "%clangxx_flexfat_safe_recover ",
-        build_invocation(flexfat_safe + ["-mllvm", "-flexfat-recover=true"]),
     )
 )
 
@@ -86,3 +77,18 @@ config.substitutions.append(
 if (getattr(config, "target_arch", "") == "aarch64" and
         getattr(config, "target_os", "") == "Linux"):
     config.available_features.add("flexfat-tbi")
+
+# Uninstrumented runtime checks need the same geometry as the tested runtime.
+if "flexfat-tbi" in config.available_features:
+    runtime_build = os.path.join(config.compiler_rt_obj_root, "lib", "flexfat")
+    config_flags = [
+        "-DFLEXFAT_TEMPORAL_TBI",
+        "-I" + os.path.join(config.compiler_rt_src_root, "lib"),
+    ]
+    if getattr(config, "flexfat_custom_config", False):
+        config_flags += ["-DFLEXFAT_CUSTOM_CONFIG", "-I" + runtime_build]
+    config.substitutions.append(
+        ("%flexfat_config_flags", " ".join(shlex.quote(flag) for flag in config_flags)))
+    config.substitutions.append(
+        ("%flexfat_tbi_runtime", shlex.quote(os.path.join(
+            config.compiler_rt_libdir, "libclang_rt.flexfat_tbi_last_byte.a"))))

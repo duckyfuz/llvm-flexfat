@@ -1,3 +1,7 @@
+// REQUIRES: flexfat-tbi
+// RUN: %clang -fno-builtin -c %s -o %t.o
+// RUN: %clangxx_flexfat_tbi %t.o -Wl,--wrap=dlsym -o %t && %run %t
+
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>

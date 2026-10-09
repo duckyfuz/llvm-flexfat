@@ -1,7 +1,7 @@
-// RUN: %clangxx_flexfat_safe_recover -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe_recover -O1 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe_recover -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe_recover -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O1 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat_recover -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 // memset OOB write in recover mode must warn and continue.
 
@@ -17,6 +17,8 @@ int main() {
   // memset of 32 bytes into a 16-byte slot overflows by 16 bytes.
   // CHECK: FLEXFAT WARNING: out-of-bounds error detected!
   memset(dst, 0, 32);
+  // Keep the write observable until late instrumentation.
+  asm volatile("" : : "r"(dst) : "memory");
 
   // CHECK: after memset
   printf("after memset\n");

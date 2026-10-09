@@ -15,6 +15,9 @@ from lit.llvm.subst import FindTool
 
 # Configuration file for the 'lit' test runner.
 
+if getattr(config, "flexfat_custom_config", False):
+    config.available_features.add("flexfat-custom-config")
+
 # name: The name of this test suite.
 config.name = "Clang"
 

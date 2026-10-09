@@ -10,7 +10,7 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 ; CHECK: @llvm.global_ctors =
 ; CHECK: @llvm.used =
 
-declare void @__flexfat_report_temporal(i64, i64, i32, i32, i32) memory(none) speculatable
+declare void @__flexfat_report_temporal_v3(i64, i64, i32, i32) memory(none) speculatable
 declare ptr @malloc(i64)
 declare void @may_free(ptr)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
@@ -20,12 +20,12 @@ declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 ; Spatial elimination at the allocation root must not remove temporal checks.
 define i32 @allocated() {
 ; CHECK-LABEL: define i32 @allocated
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 4, i32 1, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 4, i32 1, i32 {{.*}})
 ; CHECK: store i32 7, ptr %p
 ; CHECK: call void @may_free
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 4, i32 0, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 4, i32 0, i32 {{.*}})
 ; CHECK: %v = load i32, ptr %p
-; CHECK-NOT: call void @__flexfat_report_temporal
+; CHECK-NOT: call void @__flexfat_report_temporal_v3
   %p = call ptr @malloc(i64 16)
   store i32 7, ptr %p
   call void @may_free(ptr %p)
@@ -36,22 +36,22 @@ define i32 @allocated() {
 define void @coverage(ptr %p, ptr %q, i64 %n) {
 ; CHECK-LABEL: define void @coverage
 ; CHECK: and i64 {{.*}}, 72057594037927935
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 16, i32 0, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 16, i32 0, i32 {{.*}})
 ; CHECK: load <4 x i32>, ptr %p
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 16, i32 1, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 16, i32 1, i32 {{.*}})
 ; CHECK: store <4 x i32> %v, ptr %q
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 4, i32 1, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 4, i32 1, i32 {{.*}})
 ; CHECK: atomicrmw
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 4, i32 1, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 4, i32 1, i32 {{.*}})
 ; CHECK: cmpxchg
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 %n, i32 1, i32 {{.*}}, i32 {{.*}})
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 %n, i32 0, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 1, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 0, i32 {{.*}})
 ; CHECK: call void @llvm.memcpy
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 %n, i32 1, i32 {{.*}}, i32 {{.*}})
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 %n, i32 0, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 1, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 0, i32 {{.*}})
 ; CHECK: call void @llvm.memmove
 ; CHECK-NOT: load atomic i8
-; CHECK-NOT: call void @__flexfat_report_temporal
+; CHECK-NOT: call void @__flexfat_report_temporal_v3
 ; CHECK: call void @llvm.memset
   %v = load <4 x i32>, ptr %p
   store <4 x i32> %v, ptr %q
@@ -66,7 +66,7 @@ define void @coverage(ptr %p, ptr %q, i64 %n) {
 define void @loop(ptr %p, i1 %again) {
 ; CHECK-LABEL: define void @loop
 ; CHECK: body:
-; CHECK: call void @__flexfat_report_temporal
+; CHECK: call void @__flexfat_report_temporal_v3
 ; CHECK: store volatile
 ; CHECK: br i1 %again, label %body
   br label %body
@@ -90,9 +90,9 @@ define ptr @pointer_value(ptr %p, ptr %q, i1 %cond) {
 ; An existing spatial marker must not suppress a missing temporal check.
 define i8 @already_spatial(ptr %p) {
 ; CHECK-LABEL: define i8 @already_spatial
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 1, i32 0, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 1, i32 0, i32 {{.*}})
 ; CHECK: %v = load i8
-; CHECK-NOT: call void @__flexfat_report_temporal
+; CHECK-NOT: call void @__flexfat_report_temporal_v3
   %v = load i8, ptr %p, !flexfat.instrumented !0
   ret i8 %v
 }
@@ -101,7 +101,7 @@ define i8 @already_spatial(ptr %p) {
 define ptr @phi_value(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: define ptr @phi_value
 ; CHECK: %phi = phi ptr [ %p, %left ], [ %q, %right ]
-; CHECK: call void @__flexfat_report_temporal(i64 {{.*}}, i64 8, i32 0, i32 {{.*}}, i32 {{.*}})
+; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 8, i32 0, i32 {{.*}})
 ; CHECK: %value = load ptr, ptr %phi
 ; CHECK: ret ptr %value
   br i1 %cond, label %left, label %right
@@ -115,5 +115,5 @@ join:
   ret ptr %value
 }
 
-; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_v2
-; CHECK: call void @__flexfat_tbi_abi_v2()
+; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_{{custom_v1|pow2_v2}}
+; CHECK: call void @__flexfat_tbi_abi_last_byte_{{custom_v1|pow2_v2}}()

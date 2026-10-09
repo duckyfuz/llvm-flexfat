@@ -24,22 +24,21 @@ extern "C" {
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_init();
 
 // Implemented only by the Linux AArch64 temporal runtime.
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1();
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v2();
-// v2: zero-based managed class index; initialized before readiness and immutable
-// thereafter. Each field is 64 bits on the supported TBI platform.
-struct FlexFatTemporalRegionV2 {
-  uptr first_slot_number;
-  uptr slot_count;
-  uptr metadata_base;
-};
-extern SANITIZER_INTERFACE_ATTRIBUTE FlexFatTemporalRegionV2
-    __flexfat_temporal_regions_v2[];
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v2();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_pow2_v3();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v1();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_pow2_v2();
+#ifndef FLEXFAT_CUSTOM_CONFIG
+// POW2 v7 uses the 32–48 TiB direct shadow and modulo-256 generations.
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7();
+#endif
+// v3 immutable biases live at kTablesBase + 2 * kTablesOffset. The generation
+// byte is addressed by wrapping integer addition of bias and absolute slot.
 SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
-__flexfat_report_temporal(uptr tagged_ptr, uptr access_size,
-                         __sanitizer::u32 operation,
-                         __sanitizer::u32 observed_generation,
-                         __sanitizer::u32 slot_valid);
+__flexfat_report_temporal_v3(uptr tagged_ptr, uptr access_size,
+                             __sanitizer::u32 operation,
+                             __sanitizer::u32 observed_generation);
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_check_temporal(
     uptr tagged_ptr, uptr access_size, int operation);
 

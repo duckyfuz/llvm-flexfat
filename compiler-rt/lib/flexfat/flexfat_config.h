@@ -60,10 +60,21 @@ inline uptr TagPointer(uptr ptr, unsigned tag) {
 
 inline bool CheckBoundsImpl(uptr ptr, uptr access_size, uptr base,
                             uptr alloc_size) {
+#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+  --alloc_size;
+#endif
   uptr offset = ptr - base;
   if (access_size > alloc_size)
     return false;
   return offset <= alloc_size - access_size;
+}
+
+inline uptr UsableClassSize(uptr size) {
+#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+  return size - 1;
+#else
+  return size;
+#endif
 }
 
 //===----------------------------------------------------------------------===//

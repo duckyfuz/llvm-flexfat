@@ -1,5 +1,5 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_safe -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // memset OOB write must be reported in fatal mode.
 
@@ -14,6 +14,8 @@ int main() {
   // memset of 32 bytes into a 16-byte slot overflows by 16 bytes.
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   memset(dst, 0, 32);
+  // Keep the write observable until late instrumentation.
+  asm volatile("" : : "r"(dst) : "memory");
 
   free(guard);
   free(dst);

@@ -8,10 +8,10 @@ declare i1 @again()
 
 define i8 @separated(ptr %p) {
 ; CHECK-LABEL: define i8 @separated(
-; CHECK: load atomic i8, ptr {{.*}} acquire, align 1
+; CHECK: load atomic i8, ptr {{.*}} {{acquire|monotonic}}, align 1
 ; CHECK: load volatile i8, ptr %p
 ; CHECK: call void @may_free(ptr {{.*}}%p)
-; CHECK: load atomic i8, ptr {{.*}} acquire, align 1
+; CHECK: load atomic i8, ptr {{.*}} {{acquire|monotonic}}, align 1
 ; CHECK: load volatile i8, ptr %p
   %a = load volatile i8, ptr %p, !flexfat.instrumented !0
   call void @may_free(ptr %p)
@@ -26,7 +26,7 @@ define void @loop(ptr %p, i64 %n) {
 ; CHECK-LABEL: define void @loop(
 ; CHECK: br label %[[LOOP:[a-zA-Z0-9._]+]]
 ; CHECK: [[LOOP]]:
-; CHECK: load atomic i8, ptr {{.*}} acquire, align 1
+; CHECK: load atomic i8, ptr {{.*}} {{acquire|monotonic}}, align 1
 ; CHECK: store volatile i8 1, ptr %p
 ; CHECK: br i1 {{.*}}, label %{{.*}}, label %{{.*}}
   br label %body

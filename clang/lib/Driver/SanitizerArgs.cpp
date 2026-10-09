@@ -691,8 +691,9 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
   Kinds |= Default;
   TemporalTBI = Args.hasFlag(options::OPT_fsanitize_flexfat_tbi,
                             options::OPT_fno_sanitize_flexfat_tbi, false);
-  // The LLVM spelling must also select the matching runtime at link time.
-  // Explicit FlexFat controls take precedence over generic sanitizer flags.
+  // Resolve LLVM storage assignments in command-line order so the selected
+  // runtime and the backend's ABI always agree.
+  const Arg *LLVMStorageArg = nullptr;
   for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
     // Match LLVM's option parser, which accepts one or two leading dashes.
     StringRef Value = A->getValue();
@@ -704,6 +705,34 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       TemporalTBI = true;
     else if (Value == "flexfat-tbi=false" || Value == "flexfat-tbi=0")
       TemporalTBI = false;
+    else if (Value.consume_front("flexfat-tbi-storage=")) {
+      if (Value == "shadow")
+        Storage = TBIStorage::Shadow;
+      else if (Value == "last-byte")
+        Storage = TBIStorage::LastByte;
+      else if (Value == "prior-byte")
+        Storage = TBIStorage::PriorByte;
+      // LLVM diagnoses invalid values when it parses the forwarded option.
+      LLVMStorageArg = A;
+    } else if (Value == "flexfat-tbi-last-byte" ||
+             Value == "flexfat-tbi-last-byte=true" ||
+             Value == "flexfat-tbi-last-byte=1") {
+      Storage = TBIStorage::LastByte;
+      LLVMStorageArg = A;
+    } else if (Value == "flexfat-tbi-last-byte=false" ||
+               Value == "flexfat-tbi-last-byte=0") {
+      Storage = TBIStorage::LastByte;
+      LLVMStorageArg = A;
+    } else if (Value == "flexfat-tbi-prior-byte" ||
+               Value == "flexfat-tbi-prior-byte=true" ||
+               Value == "flexfat-tbi-prior-byte=1") {
+      Storage = TBIStorage::PriorByte;
+      LLVMStorageArg = A;
+    } else if (Value == "flexfat-tbi-prior-byte=false" ||
+               Value == "flexfat-tbi-prior-byte=0") {
+      Storage = TBIStorage::LastByte;
+      LLVMStorageArg = A;
+    }
   }
   if (TemporalTBI && DiagnoseErrors) {
     if (!(Kinds & SanitizerKind::FlexFat))
@@ -715,6 +744,10 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       D.Diag(diag::err_drv_unsupported_opt_for_target)
           << "-fsanitize-flexfat-tbi" << Triple.str();
   }
+  if (LLVMStorageArg && !TemporalTBI && DiagnoseErrors)
+    D.Diag(diag::err_drv_argument_only_allowed_with)
+        << LLVMStorageArg->getAsString(Args)
+        << "-fsanitize-flexfat-tbi";
 
   // We disable the vptr sanitizer if it was enabled by group expansion but RTTI
   // is disabled.
@@ -1350,8 +1383,15 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
     GPUSanitize = true;
   }
 
-  if (TemporalTBI)
+  if (TemporalTBI) {
     CmdArgs.push_back("-fsanitize-flexfat-tbi");
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back(Storage == TBIStorage::LastByte
+                          ? "-flexfat-tbi-storage=last-byte"
+                      : Storage == TBIStorage::PriorByte
+                          ? "-flexfat-tbi-storage=prior-byte"
+                          : "-flexfat-tbi-storage=shadow");
+  }
 
   // Translate available CoverageFeatures to corresponding clang-cc1 flags.
   // Do it even if Sanitizers.empty() since some forms of coverage don't require
