@@ -214,6 +214,11 @@ private:
   bool instrumentMemoryRange(Instruction *I, Value *Ptr, Value *Size,
                              CheckKind Kind);
   bool instrumentPointerEscape(Instruction *I, Value *Ptr, CheckKind Kind);
+  // Check-only pointer and path predicate. Never change the program's store.
+  DenseMap<Value *, std::pair<Value *, Value *>> StoreEscapeOperands;
+  DenseMap<Value *, Value *> StoreEscapeBoundsSources;
+  bool EscapeIRModified = false;
+  std::pair<Value *, Value *> getStoreEscapeOperands(Value *Ptr);
   bool instrumentPointerCheck(Instruction *I, Value *Ptr,
                               uint64_t FixedAccessSize, Value *DynAccessSize,
                               CheckKind Kind);
@@ -786,6 +791,17 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
   if (auto It = Bounds.find(Ptr); It != Bounds.end())
     return It->second;
 
+  // Sanitizing an undefined path must not recover a fresh allocation base
+  // from an already-offset pointer. Resolve lazily, after the parallel PHI
+  // graph is complete, and retain the derived pointer's source bounds.
+  if (auto It = StoreEscapeBoundsSources.find(Ptr);
+      It != StoreEscapeBoundsSources.end()) {
+    BoundsRecord Result = getBounds(It->second);
+    Result.CheckedPointer = Ptr;
+    Bounds[Ptr] = Result;
+    return Result;
+  }
+
   auto makeRecord = [Ptr](Value *Base, BaseKind Kind,
                           std::optional<uint64_t> StaticUpperBound = 0) {
     return BoundsRecord{Ptr, Base, Kind, StaticUpperBound};
@@ -1226,6 +1242,110 @@ bool FlexFatSanitizer::instrumentMemoryRange(Instruction *I, Value *Ptr,
   return true;
 }
 
+std::pair<Value *, Value *>
+FlexFatSanitizer::getStoreEscapeOperands(Value *Ptr) {
+  if (auto It = StoreEscapeOperands.find(Ptr); It != StoreEscapeOperands.end())
+    return It->second;
+  LLVMContext &Ctx = Ptr->getContext();
+  auto *True = ConstantInt::getTrue(Ctx);
+  auto *False = ConstantInt::getFalse(Ctx);
+  auto *Null = ConstantPointerNull::get(cast<PointerType>(Ptr->getType()));
+
+  // Only follow explicit undefined origins. Loads, calls and freeze results
+  // are ordinary pointers whose escape checks must remain enabled.
+  SmallPtrSet<Value *, 16> Seen;
+  auto HasUndefined = [&](auto &&Self, Value *V) -> bool {
+    if (!Seen.insert(V).second)
+      return false;
+    if (isa<UndefValue>(V) || isa<PoisonValue>(V))
+      return true;
+    if (auto *Phi = dyn_cast<PHINode>(V)) {
+      for (Value *Incoming : Phi->incoming_values())
+        if (Self(Self, Incoming))
+          return true;
+    } else if (auto *Select = dyn_cast<SelectInst>(V)) {
+      return Self(Self, Select->getTrueValue()) ||
+             Self(Self, Select->getFalseValue());
+    } else if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+      return Self(Self, GEP->getPointerOperand());
+    } else if (isa<BitCastInst>(V) || isa<AddrSpaceCastInst>(V)) {
+      return Self(Self, cast<Instruction>(V)->getOperand(0));
+    }
+    return false;
+  };
+  if (!HasUndefined(HasUndefined, Ptr))
+    return {Ptr, True};
+  if (isa<UndefValue>(Ptr) || isa<PoisonValue>(Ptr))
+    return {Null, False};
+
+  // A safe parallel pointer graph keeps speculative bounds recovery away
+  // from undef/poison as well. Merely guarding the final comparison would not
+  // prevent a poison-derived metadata-table load earlier in the function.
+  if (auto *Phi = dyn_cast<PHINode>(Ptr)) {
+    auto Insert = Phi->getParent()->getFirstNonPHIIt();
+    auto *Defined =
+        PHINode::Create(Type::getInt1Ty(Ctx), Phi->getNumIncomingValues(),
+                        "flexfat.escape.defined", Insert);
+    auto *Safe = PHINode::Create(Ptr->getType(), Phi->getNumIncomingValues(),
+                                 "flexfat.escape.pointer", Insert);
+    markNoSanitize(Defined);
+    markNoSanitize(Safe);
+    EscapeIRModified = true;
+    StoreEscapeOperands[Ptr] = {Safe, Defined};
+    for (unsigned N = 0; N != Phi->getNumIncomingValues(); ++N) {
+      Defined->addIncoming(False, Phi->getIncomingBlock(N));
+      Safe->addIncoming(Null, Phi->getIncomingBlock(N));
+    }
+    for (unsigned N = 0; N != Phi->getNumIncomingValues(); ++N) {
+      auto [Incoming, IsDefined] =
+          getStoreEscapeOperands(Phi->getIncomingValue(N));
+      Defined->setIncomingValue(N, IsDefined);
+      Safe->setIncomingValue(N, Incoming);
+    }
+    return {Safe, Defined};
+  }
+  auto *Inst = cast<Instruction>(Ptr);
+  IRBuilder<> B(Inst->getNextNode());
+  B.SetNoSanitizeMetadata();
+  Value *Safe;
+  Value *Defined;
+  if (auto *Select = dyn_cast<SelectInst>(Ptr)) {
+    auto [T, TD] = getStoreEscapeOperands(Select->getTrueValue());
+    auto [F, FD] = getStoreEscapeOperands(Select->getFalseValue());
+    // Freeze only the check's condition: poison/undef must neither reach a
+    // branch nor make speculative bounds recovery unsafe. Share the choice
+    // so the check pointer and its definedness predicate select the same arm.
+    Value *Condition =
+        B.CreateFreeze(Select->getCondition(), "flexfat.escape.condition");
+    EscapeIRModified |= Condition != Select->getCondition();
+    Safe = B.CreateSelect(Condition, T, F, "flexfat.escape.pointer");
+    Defined = B.CreateSelect(Condition, TD, FD, "flexfat.escape.defined");
+    // IRBuilder may fold either select to an existing value.
+    EscapeIRModified |= isa<Instruction>(Safe) && Safe != T && Safe != F;
+    EscapeIRModified |= isa<Instruction>(Defined) && Defined != TD &&
+                        Defined != FD;
+  } else {
+    auto [Operand, IsDefined] = getStoreEscapeOperands(Inst->getOperand(0));
+    auto *Clone = Inst->clone();
+    Clone->setOperand(0, Operand);
+    // The substituted null pointer need not satisfy the original GEP's
+    // inbounds/no-wrap promises on an undefined path.
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(Clone))
+      GEP->setNoWrapFlags(GEPNoWrapFlags::none());
+    B.Insert(Clone, "flexfat.escape.derived");
+    EscapeIRModified = true;
+    markNoSanitize(Clone);
+    Safe = B.CreateSelect(IsDefined, Clone, Null, "flexfat.escape.pointer");
+    // Constant predicates can fold this to Clone or Null; neither needs an
+    // alias (and Null must never inherit a particular allocation's bounds).
+    if (Safe != Clone && Safe != Null)
+      StoreEscapeBoundsSources[Safe] = Clone;
+    Defined = IsDefined;
+  }
+  StoreEscapeOperands[Ptr] = {Safe, Defined};
+  return {Safe, Defined};
+}
+
 bool FlexFatSanitizer::instrumentPointerEscape(Instruction *I, Value *Ptr,
                                                CheckKind Kind) {
   if (auto *VT = dyn_cast<VectorType>(Ptr->getType())) {
@@ -1328,7 +1448,25 @@ bool FlexFatSanitizer::instrumentPointerEscape(Instruction *I, Value *Ptr,
     Lane->addIncoming(Next, Latch->getParent());
     return true;
   }
-  if (!instrumentPointerCheck(I, Ptr, 0, nullptr, Kind))
+  Instruction *CheckBefore = I;
+  if (Kind == CheckKind::StoreEscape) {
+    // Retain the original store's marker even if its escape check is skipped
+    // or inserted at a conditional block's terminator.
+    markInstrumented(I);
+    auto [Safe, Defined] = getStoreEscapeOperands(Ptr);
+    if (auto *C = dyn_cast<ConstantInt>(Defined)) {
+      if (C->isZero())
+        return false;
+    } else {
+      // This block contains only the escape check. The original destination
+      // check and store execute on both paths.
+      CheckBefore = SplitBlockAndInsertIfThen(Defined, I, /*Unreachable=*/false);
+      EscapeIRModified = true;
+      markNoSanitize(CheckBefore);
+    }
+    Ptr = Safe;
+  }
+  if (!instrumentPointerCheck(CheckBefore, Ptr, 0, nullptr, Kind))
     return false;
   NumInstrumentedEscapes++;
   return true;
@@ -1346,7 +1484,7 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
   else if (auto *SI = dyn_cast<StoreInst>(I)) {
     Prepare(SI->getPointerOperand());
     if (SI->getValueOperand()->getType()->isPointerTy())
-      Prepare(SI->getValueOperand());
+      Prepare(getStoreEscapeOperands(SI->getValueOperand()).first);
   } else if (auto *RMW = dyn_cast<AtomicRMWInst>(I))
     Prepare(RMW->getPointerOperand());
   else if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(I))
@@ -1552,6 +1690,9 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
     return false;
 
   Bounds.clear();
+  StoreEscapeOperands.clear();
+  StoreEscapeBoundsSources.clear();
+  EscapeIRModified = false;
   RecoveredBases.clear();
   RecoveredBaseOrigins.clear();
   SafeTableIndices.clear();
@@ -1696,7 +1837,7 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
       Modified |= instrumentTemporal(Access);
   if (Modified && Options.TemporalTBI)
     invalidateTemporalAttributes(F);
-  return Modified || BoundsIRGeneration != 0;
+  return Modified || BoundsIRGeneration != 0 || EscapeIRModified;
 }
 
 bool FlexFatSanitizer::run() {
