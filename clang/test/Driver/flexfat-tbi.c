@@ -1,3 +1,18 @@
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=1 %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm --flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm --flexfat-tbi=0 %s 2>&1 | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=false -mllvm --flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm --flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=false -mllvm -flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -mllvm -flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
+// RUN: not %clang -target x86_64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=false -mllvm -flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm -flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
+// RUN: not %clang -target x86_64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
 // RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=TBI
 // RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize-flexfat-tbi -fsanitize-flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=TBI
 // RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -fno-sanitize-flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=PLAIN

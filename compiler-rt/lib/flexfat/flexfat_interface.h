@@ -25,6 +25,21 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_init();
 
 // Implemented only by the Linux AArch64 temporal runtime.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v2();
+// v2: zero-based managed class index; initialized before readiness and immutable
+// thereafter. Each field is 64 bits on the supported TBI platform.
+struct FlexFatTemporalRegionV2 {
+  uptr first_slot_number;
+  uptr slot_count;
+  uptr metadata_base;
+};
+extern SANITIZER_INTERFACE_ATTRIBUTE FlexFatTemporalRegionV2
+    __flexfat_temporal_regions_v2[];
+SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
+__flexfat_report_temporal(uptr tagged_ptr, uptr access_size,
+                         __sanitizer::u32 operation,
+                         __sanitizer::u32 observed_generation,
+                         __sanitizer::u32 slot_valid);
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_check_temporal(
     uptr tagged_ptr, uptr access_size, int operation);
 
@@ -41,7 +56,7 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_check_temporal(
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_set_recover(int recover);
 
 // Called from a compiler-generated module constructor when
-// -flexfat-mode=right-align is active. Instructs the allocator to bias objects
+// -flexfat-alignment=right is active. Instructs the allocator to bias objects
 // toward the high end of their size-class slot while preserving the default
 // malloc alignment. This can improve detection of some small rightward
 // overflows, but the reserved trailing byte and alignment constraint keep the

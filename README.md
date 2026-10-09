@@ -48,9 +48,24 @@ with `scripts/flexfat/configure_llvm.sh`, followed by
 `scripts/flexfat/run_flexfat.sh pow2` or
 `scripts/flexfat/run_flexfat.sh custom`.
 
-Use `-fsanitize=flexfat` to instrument an application. The optional hidden
-LLVM controls are `-mllvm -flexfat-mode=<fast|safe|right-align>` and
-`-mllvm -flexfat-placement=<optimizer-early|scalar-late|optimizer-last>`.
+Use `-fsanitize=flexfat` to instrument an application. Controls:
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `-mllvm -flexfat-mode=` | `fast`, `safe` | `fast` |
+| `-mllvm -flexfat-alignment=` | `left`, `right` | `left` |
+| `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
+| `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
+| `-mllvm -flexfat-recover=` | `true`, `false` | `false` |
+
+The existing Clang TBI and sanitizer recovery flags remain supported. Explicit
+`-flexfat-tbi` and `-flexfat-recover` settings override them.
+
+Fast mode instruments at ScalarOptimizerLateEP. Safe mode additionally
+instruments at PipelineStartEP. Placement is internal and has no command-line
+option. Alignment is independent of mode; for example, combine
+`-mllvm -flexfat-mode=safe -mllvm -flexfat-alignment=right`.
+
 Set `FLEXFAT_SIZES_CFG` to select a custom size-class configuration and
 `FLEXFAT_OPTIONS` to provide runtime options such as `exitcode=6`.
 
@@ -70,7 +85,7 @@ allocations additionally reserve worst-case alignment padding. Exact class-size
 requests therefore move to the next class (doubling slot size in POW2).
 The largest managed ordinary request is the largest class minus one byte;
 alignment padding can reduce that limit further. Larger requests and exhausted
-regions use matched system allocation/free fallback. Right-align mode rounds
+regions use matched system allocation/free fallback. Right alignment rounds
 the offset down while retaining the trailing byte and malloc alignment.
 
 Rebuild the compiler and runtime together when changing this policy. Previously

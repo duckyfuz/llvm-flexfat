@@ -38,6 +38,18 @@
 
 using namespace __sanitizer;
 
+#ifdef FLEXFAT_TEMPORAL_TBI
+static_assert(sizeof(FlexFatTemporalRegionV2) == 24);
+static_assert(alignof(FlexFatTemporalRegionV2) == 8);
+static_assert(offsetof(FlexFatTemporalRegionV2, first_slot_number) == 0);
+static_assert(offsetof(FlexFatTemporalRegionV2, slot_count) == 8);
+static_assert(offsetof(FlexFatTemporalRegionV2, metadata_base) == 16);
+extern "C" {
+SANITIZER_INTERFACE_ATTRIBUTE FlexFatTemporalRegionV2
+    __flexfat_temporal_regions_v2[__flexfat::kNumSizeClasses];
+}
+#endif
+
 namespace __flexfat {
 
 // Initialization is published only after mappings and interceptors are ready.
@@ -50,7 +62,7 @@ bool IsReady() {
 // interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
 bool flexfat_recover = false;
 
-// Set to true when -flexfat-mode=right-align is active. Instructs Allocate()
+// Set to true when -flexfat-alignment=right is active. Instructs Allocate()
 // to bias objects toward the high end of their size-class slot while still
 // preserving the default malloc alignment guarantee. This can improve detection
 // of some right-side overflows, but the reserved trailing byte and alignment
@@ -92,51 +104,50 @@ static FreeBlock *free_lists[kMaxSizeClasses];
 static StaticSpinMutex region_locks[kMaxSizeClasses];
 
 #ifdef FLEXFAT_TEMPORAL_TBI
-struct TemporalRegion {
-  uptr first;
-  uptr count;
-  atomic_uint16_t *entries;
-};
-static TemporalRegion temporal_regions[kMaxSizeClasses];
-
+// Zero means never allocated. Generations 1..255 advance only on free;
+// there is no independent liveness tracking. A matching forged tag can pass
+// for a freed slot, and stale tags can match again after generation wraparound.
+static_assert(sizeof(atomic_uint8_t) == 1,
+              "Temporal metadata must occupy one byte per slot");
 static void InitTemporal() {
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    auto &r = temporal_regions[i];
-    r.first = region_next_alloc[i];
-    r.count = (GetRegionStart(i) + kRegionSize - r.first) / SizeClassToSize(i);
-    bytes += r.count * sizeof(atomic_uint16_t);
+    auto &r = __flexfat_temporal_regions_v2[i];
+    uptr size = SizeClassToSize(i);
+    r.first_slot_number = region_next_alloc[i] / size;
+    r.slot_count = (GetRegionStart(i) + kRegionSize - region_next_alloc[i]) / size;
+    bytes += r.slot_count * sizeof(atomic_uint8_t);
   }
   // Demand-paged, non-fixed mapping, after every fixed spatial reservation.
-  auto *entries = static_cast<atomic_uint16_t *>(
+  auto *entries = static_cast<atomic_uint8_t *>(
       MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    temporal_regions[i].entries = entries;
-    entries += temporal_regions[i].count;
+    __flexfat_temporal_regions_v2[i].metadata_base = (uptr)entries;
+    entries += __flexfat_temporal_regions_v2[i].slot_count;
   }
 }
 
-static atomic_uint16_t *TemporalEntry(uptr raw, uptr &base) {
+static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
   uptr region = GetRegionIndex(raw);
   if (region >= kNumSizeClasses)
     return nullptr;
   uptr size = SizeClassToSize(region);
   base = raw - raw % size;
-  const auto &r = temporal_regions[region];
-  if (base < r.first || (base - r.first) % size ||
-      (base - r.first) / size >= r.count)
+  const auto &r = __flexfat_temporal_regions_v2[region];
+  uptr index = raw / size - r.first_slot_number;
+  if (index >= r.slot_count)
     return nullptr;
-  return r.entries + (base - r.first) / size;
+  return reinterpret_cast<atomic_uint8_t *>(r.metadata_base) + index;
 }
 
 struct TemporalState {
   uptr base = 0;
-  atomic_uint16_t *entry = nullptr;
-  unsigned bits = 0;
+  atomic_uint8_t *entry = nullptr;
+  unsigned generation = 0;
 
   bool Matches(uptr ptr) const {
     unsigned tag = PointerTag(ptr);
-    return entry && tag && (bits & 256) && (bits & 255) == tag;
+    return entry && tag && generation == tag;
   }
 };
 
@@ -144,27 +155,25 @@ static TemporalState LoadTemporalState(uptr ptr) {
   TemporalState state;
   state.entry = TemporalEntry(Untag(ptr), state.base);
   if (state.entry)
-    state.bits = atomic_load(state.entry, memory_order_acquire);
+    state.generation = atomic_load(state.entry, memory_order_acquire);
   return state;
 }
 
 // Reporting may allocate while symbolizing. Never hold an allocator lock here.
 static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
-                                    const TemporalState &state) {
+                                    const TemporalState &state, bool slot_valid) {
   const char *ops[] = {"read", "write", "free", "realloc"};
-  const char *reason = !state.entry ? "invalid slot geometry"
-                       : !state.bits ? "never allocated"
+  const char *reason = !slot_valid ? "invalid slot geometry"
+                       : !state.generation ? "never allocated"
                        : !PointerTag(ptr) ? "zero managed tag"
-                       : !(state.bits & 256) ? "dead slot"
                        : "generation mismatch";
   Printf("FLEXFAT ERROR: temporal violation\n"
          "  operation = %s, tagged address = 0x%zx, raw slot base = 0x%zx\n"
-         "  current generation = %u, pointer tag = %u, live = %u, access size = %zu\n"
+         "  current generation = %u, pointer tag = %u, access size = %zu\n"
          "  metadata = %s, reason = %s\n",
          operation >= 0 && operation < 4 ? ops[operation] : "unknown",
-         ptr, state.base, state.bits & 255, PointerTag(ptr),
-         !!(state.bits & 256), access_size,
-         state.entry ? "available" : "unavailable (invalid slot geometry)",
+         ptr, state.base, state.generation, PointerTag(ptr), access_size,
+         slot_valid ? "available" : "unavailable (invalid slot geometry)",
          reason);
   GET_STACK_TRACE_FATAL_HERE;
   stack.Print();
@@ -176,7 +185,7 @@ static void ValidateTemporal(uptr ptr, uptr access_size, int operation) {
     return;
   TemporalState state = LoadTemporalState(ptr);
   if (!state.Matches(ptr))
-    ReportTemporal(ptr, access_size, operation, state);
+    ReportTemporal(ptr, access_size, operation, state, state.entry != nullptr);
 }
 
 static void EnableTaggedAddresses() {
@@ -389,9 +398,11 @@ static void *AllocateImpl(uptr size, uptr alignment) {
   uptr base;
   auto *entry = TemporalEntry(slot_base, base);
   CHECK(entry);
-  unsigned previous = atomic_load(entry, memory_order_relaxed) & 255;
-  unsigned generation = previous == 255 ? 1 : previous + 1;
-  atomic_store(entry, u16(generation | 256), memory_order_release);
+  unsigned generation = atomic_load(entry, memory_order_acquire);
+  if (!generation) {
+    generation = 1;
+    atomic_store(entry, u8(generation), memory_order_release);
+  }
   user = TagPointer(user, generation);
 #endif
   return (void *)user;
@@ -433,7 +444,9 @@ void Deallocate(void *ptr) {
     state = LoadTemporalState((uptr)ptr);
     valid = state.Matches((uptr)ptr);
     if (valid)
-      atomic_store(state.entry, u16(state.bits & 255), memory_order_release);
+      atomic_store(state.entry,
+                   u8(state.generation == 255 ? 1 : state.generation + 1),
+                   memory_order_release);
 #endif
     if (valid) {
       // Invalidate before overwriting the slot with the raw free-list link.
@@ -444,7 +457,7 @@ void Deallocate(void *ptr) {
   }
 #ifdef FLEXFAT_TEMPORAL_TBI
   if (!valid)
-    ReportTemporal((uptr)ptr, 0, 2, state);
+    ReportTemporal((uptr)ptr, 0, 2, state, state.entry != nullptr);
 #endif
 }
 
@@ -574,6 +587,18 @@ void __flexfat_free(void *ptr) { __flexfat::Deallocate(ptr); }
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v1() {
   __flexfat_init();
   CHECK(__flexfat::IsReady());
+}
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v2() {
+  __flexfat_tbi_abi_v1();
+}
+SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
+__flexfat_report_temporal(uptr ptr, uptr size, u32 operation,
+                          u32 observed_generation, u32 slot_valid) {
+  // Reconstruct only diagnostic geometry. Never reread mutable generation state.
+  __flexfat::TemporalState state;
+  __flexfat::TemporalEntry(__flexfat::Untag(ptr), state.base);
+  state.generation = observed_generation;
+  __flexfat::ReportTemporal(ptr, size, operation, state, slot_valid != 0);
 }
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_check_temporal(uptr ptr, uptr size, int operation) {

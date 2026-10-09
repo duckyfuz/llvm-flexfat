@@ -6,10 +6,17 @@
 // RUN: not %t write 2>&1 | FileCheck %s --check-prefix=WRITE
 // RUN: not %t double-free 2>&1 | FileCheck %s --check-prefix=FREE
 // RUN: not %t realloc 2>&1 | FileCheck %s --check-prefix=REALLOC
+// RUN: %t next-generation
+// RUN: %t wrap-reuse
+// RUN: not %t wrap-free 2>&1 | FileCheck %s --check-prefix=READ
 // READ: operation = read
+// READ: reason = generation mismatch
 // WRITE: operation = write
+// WRITE: reason = generation mismatch
 // FREE: operation = free
+// FREE: reason = generation mismatch
 // REALLOC: operation = realloc
+// REALLOC: reason = generation mismatch
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -23,6 +30,7 @@ extern "C" uintptr_t __flexfat_get_size(uintptr_t);
 extern "C" uintptr_t __flexfat_get_offset(uintptr_t);
 extern "C" uintptr_t __flexfat_get_usable_size(uintptr_t);
 extern "C" void __flexfat_check_temporal(uintptr_t, uintptr_t, int);
+extern "C" void __flexfat_report_temporal(uintptr_t, uintptr_t, unsigned, unsigned, unsigned);
 static uintptr_t raw(void *p) { return (uintptr_t)p & 0x00ffffffffffffffULL; }
 static unsigned tag(void *p) { return (uintptr_t)p >> 56; }
 __attribute__((noinline)) static char *opaque(char *p) {
@@ -30,6 +38,11 @@ __attribute__((noinline)) static char *opaque(char *p) {
 }
 __attribute__((noinline)) static int read_byte(char *p) { return *(volatile char *)p; }
 __attribute__((noinline)) static void write_byte(char *p) { *(volatile char *)p = 9; }
+__attribute__((noinline)) static void zero_ranges(char *p, size_t n) {
+  __builtin_memset(p, 0, n);
+  __builtin_memcpy(p, p, n);
+  __builtin_memmove(p, p, n);
+}
 static char *before_main;
 __attribute__((constructor)) static void startup() {
   before_main = (char *)malloc(31); write_byte(before_main);
@@ -46,23 +59,39 @@ int main(int argc, char **argv) {
   if (argc > 1) {
     const char *mode = argv[1];
     if (!strcmp(mode, "zero-tag")) return read_byte((char *)raw(p));
-    if (!strcmp(mode, "geometry") || !strcmp(mode, "geometry-tail")) {
+    if (!strncmp(mode, "geometry", 8)) {
+      bool tail = strstr(mode, "tail");
+      bool legacy = strstr(mode, "legacy");
+      uintptr_t geometry_tag = strstr(mode, "zero") ? 0 : (1ULL << 56);
       for (unsigned n = 33; n < 1000; n += 16) {
         char *q = (char *)malloc(n);
         uintptr_t region = raw(q) & ~((1ULL << 38) - 1);
         uintptr_t size = __flexfat_get_size((uintptr_t)q);
-        if (!strcmp(mode, "geometry") && region % size)
-          __flexfat_check_temporal((1ULL << 56) | region, 1, 0);
+        if (!tail && region % size) {
+          uintptr_t bad = geometry_tag | region;
+          if (legacy) __flexfat_check_temporal(bad, 1, 0);
+          else return read_byte((char *)bad);
+        }
         uintptr_t end = region + (1ULL << 38);
-        if (!strcmp(mode, "geometry-tail") && end % size)
-          __flexfat_check_temporal((1ULL << 56) | (end - 1), 1, 0);
+        if (tail && end % size) {
+          uintptr_t bad = geometry_tag | (end - 1);
+          if (legacy) __flexfat_check_temporal(bad, 1, 0);
+          else return read_byte((char *)bad);
+        }
         free(q);
       }
       abort(); // Custom configuration must have a region with prefix padding.
     }
-    if (!strcmp(mode, "never")) {
+    if (!strcmp(mode, "report-observation")) {
+      // Metadata now says the next generation, but report the supplied zero.
+      uintptr_t saved = (uintptr_t)p;
+      free(p);
+      __flexfat_report_temporal(saved, 1, 0, 0, 1);
+      abort();
+    }
+    if (!strcmp(mode, "never") || !strcmp(mode, "never-zero")) {
       uintptr_t next = (base & 0x00ffffffffffffffULL) + 100 * __flexfat_get_size((uintptr_t)p);
-      __flexfat_check_temporal((1ULL << 56) | next, 1, 0); return 0;
+      return read_byte((char *)(next | (!strcmp(mode, "never") ? (1ULL << 56) : 0)));
     }
     if (!strcmp(mode, "realloc-failure")) {
       // SIZE_MAX cannot be satisfied by libc, independently of overcommit.
@@ -81,9 +110,30 @@ int main(int argc, char **argv) {
       pthread_t t; assert(!pthread_create(&t, nullptr, release, p));
       assert(!pthread_join(t, nullptr)); return read_byte(p);
     }
+    if (!strcmp(mode, "wrap-free") || !strcmp(mode, "wrap-reuse")) {
+      uintptr_t slot = raw(p);
+      while (tag(p) != 255) {
+        free(p); p = opaque((char *)malloc(23)); assert(raw(p) == slot);
+      }
+      free(p);
+      if (!strcmp(mode, "wrap-free")) return read_byte(p);
+      char *q = opaque((char *)malloc(23));
+      assert(raw(q) == slot && tag(q) == 1);
+      write_byte(q); assert(read_byte(q) == 9); free(q); return 0;
+    }
     free(p);
+    if (!strcmp(mode, "next-generation")) {
+      unsigned next = tag(p) == 255 ? 1 : tag(p) + 1;
+      // Generation matching has no independent liveness check. Only call the
+      // checker: never dereference or free this deliberately forged pointer.
+      __flexfat_check_temporal(raw(p) | (uintptr_t(next) << 56), 1, 0);
+      char *q = opaque((char *)malloc(23));
+      assert(raw(q) == raw(p) && tag(q) == next);
+      write_byte(q); assert(read_byte(q) == 9); free(q); return 0;
+    }
     if (!strcmp(mode, "reuse") || !strcmp(mode, "stale-free") || !strcmp(mode, "stale-realloc")) {
-      char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) != tag(p));
+      char *q = opaque((char *)malloc(23)); assert(raw(q) == raw(p)); assert(tag(q) == (tag(p) == 255 ? 1 : tag(p) + 1));
+      write_byte(q); assert(read_byte(q) == 9);
     }
     if (!strcmp(mode, "write")) write_byte(p);
     else if (!strcmp(mode, "double-free") || !strcmp(mode, "stale-free")) free(p);
@@ -99,6 +149,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(mode, "strndup")) { char *q = strndup(p, 1); asm volatile("" : : "r"(q) : "memory"); }
     else if (!strcmp(mode, "posix")) return posix_memalign((void **)p, 64, 16);
     else if (!strcmp(mode, "zero-length")) {
+      volatile size_t zero = 0;
+      zero_ranges(p, zero);
       memset(p, 0, 0); memcpy(p, p, 0); memmove(p, p, 0);
       char *q = strndup(p, 0); assert(q && !q[0]); free(q); return 0;
     } else return read_byte(p);

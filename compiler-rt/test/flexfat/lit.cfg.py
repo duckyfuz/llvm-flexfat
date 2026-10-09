@@ -47,7 +47,7 @@ flexfat_safe = flexfat_base + ["-mllvm", "-flexfat-mode=safe"]
 
 # right-align mode: allocations are biased toward the high end of the slot
 # while preserving the platform's default malloc alignment.
-flexfat_right_align = flexfat_base + ["-mllvm", "-flexfat-mode=right-align"]
+flexfat_right_align = flexfat_base + ["-mllvm", "-flexfat-alignment=right"]
 
 config.substitutions.append(("%clangxx_flexfat ", build_invocation(flexfat_base)))
 config.substitutions.append(("%clangxx_flexfat_safe ", build_invocation(flexfat_safe)))
@@ -57,13 +57,13 @@ config.substitutions.append(("%clangxx_flexfat_right_align ", build_invocation(f
 config.substitutions.append(
     (
         "%clangxx_flexfat_recover ",
-        build_invocation(flexfat_base + ["-fsanitize-recover=flexfat"]),
+        build_invocation(flexfat_base + ["-mllvm", "-flexfat-recover=true"]),
     )
 )
 config.substitutions.append(
     (
         "%clangxx_flexfat_safe_recover ",
-        build_invocation(flexfat_safe + ["-fsanitize-recover=flexfat"]),
+        build_invocation(flexfat_safe + ["-mllvm", "-flexfat-recover=true"]),
     )
 )
 
@@ -82,7 +82,7 @@ if getattr(config, "flexfat_custom_config", False):
     config.available_features.add("flexfat-custom-config")
 
 config.substitutions.append(
-    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-fsanitize-flexfat-tbi"])))
+    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-mllvm", "-flexfat-tbi=true"])))
 if (getattr(config, "target_arch", "") == "aarch64" and
         getattr(config, "target_os", "") == "Linux"):
     config.available_features.add("flexfat-tbi")

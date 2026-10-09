@@ -13,6 +13,8 @@ root = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
+parser.add_argument('--skip-timings', action='store_true',
+                    help='run correctness checks without performance measurements')
 args = parser.parse_args()
 results = []
 
@@ -22,14 +24,15 @@ def run(cmd, failure=None):
     if failure is None:
         assert p.returncode == 0, (cmd, p.returncode, p.stdout, p.stderr)
     else:
-        assert p.returncode != 0 and failure in p.stderr, (cmd, p.returncode, p.stderr)
+        expected = [failure] if isinstance(failure, str) else failure
+        assert p.returncode != 0 and all(s in p.stderr for s in expected), (cmd, p.returncode, p.stderr)
     return p.stdout
 
 for build in args.builds:
     build = build.resolve()
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
-    common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi']
+    common = ['-fsanitize=flexfat', '-mllvm', '-flexfat-tbi=true']
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
@@ -46,44 +49,72 @@ for build in args.builds:
     for i, size in enumerate(sizes):
         start = region_base + (i << region_log)
         first = ((start + size - 1) // size) * size
-        metadata_bytes += ((start + (1 << region_log) - first) // size) * 2
+        metadata_bytes += ((start + (1 << region_log) - first) // size)
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
         exe = d/'test'
         variants = [(['-O0'], 'O0'), (['-O2'], 'O2'),
                     (['-O2', '-mllvm', '-flexfat-mode=safe'], 'safe'),
-                    (['-O2', '-mllvm', '-flexfat-mode=right-align'], 'right-align'),
-                    (['-O2', '-mllvm', '-flexfat-placement=optimizer-early'], 'early'),
-                    (['-O2', '-mllvm', '-flexfat-placement=optimizer-last'], 'last'),
-                    (['-O2', '-fsanitize-recover=flexfat'], 'recover')]
+                    (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right-align'),
+                    (['-O2', '-mllvm', '-flexfat-mode=safe', '-mllvm', '-flexfat-alignment=right'], 'safe-right'),
+                    (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover')]
         failures = {
-            'read': 'read', 'write': 'write', 'reuse': 'read',
+            'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
             'stale-realloc': 'realloc', 'realloc-zero': 'realloc',
-            'zero-tag': 'read', 'never': 'read', 'thread': 'read',
+            'zero-tag': 'read', 'never': 'read', 'never-zero': 'read',
+            'report-observation': 'read', 'thread': 'read',
             'memset': 'write', 'memcpy-src': 'read', 'memcpy-dst': 'write',
             'memmove': 'write', 'strdup': 'read', 'strndup': 'read', 'posix': 'write'}
         for flags, name in variants:
             run([cxx, *common, *flags, '-fno-builtin', '-pthread',
                  root/'TestCases/temporal/lifecycle.cpp', '-o', exe])
-            for mode in ['', 'zero-length', 'realloc-failure', 'fallback']:
+            for mode in ['', 'zero-length', 'realloc-failure', 'fallback',
+                         'next-generation', 'wrap-reuse']:
                 run([exe, *([mode] if mode else [])]); checks += 1
             for mode, operation in failures.items():
-                run([exe, mode], 'operation = ' + operation); checks += 1
+                reason = {'zero-tag': 'zero managed tag', 'never': 'never allocated',
+                          'never-zero': 'never allocated',
+                          'report-observation': 'never allocated'}.get(
+                    mode, 'generation mismatch')
+                run([exe, mode], ['operation = ' + operation, 'reason = ' + reason]); checks += 1
             if custom:
-                run([exe, 'geometry'], 'unavailable (invalid slot geometry)'); checks += 1
-                run([exe, 'geometry-tail'], 'unavailable (invalid slot geometry)'); checks += 1
+                for mode in ['geometry', 'geometry-tail', 'geometry-zero', 'geometry-tail-zero',
+                             'geometry-legacy', 'geometry-tail-legacy']:
+                    run([exe, mode], 'unavailable (invalid slot geometry)'); checks += 1
             print(build.name, name, 'passed', flush=True)
+
+        # Arithmetic uses the exported descriptors and the actual fixed tables.
+        arithmetic_obj = d/'arithmetic.o'
+        config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
+        if custom:
+            config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
+                             '-I'+str(build/'lib/Transforms/Instrumentation')]
+        run([cxx, '-O2', *config_flags, '-c', root/'Inputs/tbi-slot-arithmetic.cpp',
+             '-o', arithmetic_obj])
+        run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
+
+        # An object following the old ABI still links and checks with v2 runtime.
+        old_obj = d/'v1.o'
+        run([cc, '-O2', '-fno-builtin', '-ffunction-sections', '-fdata-sections',
+             '-c', root/'Inputs/tbi-v1-object.c', '-o', old_obj])
+        run([cc, *common, old_obj, '-Wl,--gc-sections', '-o', exe])
+        run([exe]); run([exe, 'stale'], 'generation mismatch'); checks += 2
 
         # Empty object retains the ABI contract even with section GC.
         empty = d/'empty.c'; empty.write_text('int main(void) { return 0; }\n')
         obj = d/'empty.o'
         run([cc, *common, '-O2', '-ffunction-sections', '-fdata-sections', '-c', empty, '-o', obj])
         run([cc, *common, obj, '-Wl,--gc-sections', '-o', exe]); run([exe])
-        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v1')
-        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v1')
-        checks += 3
+        run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], '__flexfat_tbi_abi_v2')
+        run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], '__flexfat_tbi_abi_v2')
+        # A minimal v1-only runtime cannot satisfy even an empty v2 object.
+        old_runtime = d/'old-runtime.c'
+        old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n')
+        run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
+            '__flexfat_tbi_abi_v2')
+        checks += 4
         launcher = d/'launcher'
         run([cc, root/'Inputs/tbi-init-failure.c', '-o', launcher])
         run([launcher, exe], 'initialization failed: PR_SET_TAGGED_ADDR_CTRL, errno=1'); checks += 1
@@ -113,7 +144,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
         run([exe]); run([exe, 'stale'], 'operation = read'); checks += 2
 
         timings = {}
-        for tbi in [False, True]:
+        for tbi in ([] if args.skip_timings else [False, True]):
             run([cc, '-O2', '-fsanitize=flexfat', *(['-fsanitize-flexfat-tbi'] if tbi else []),
                  root/'Inputs/tbi-benchmark.c', '-o', exe])
             for workload in ['allocations', 'accesses']:
