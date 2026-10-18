@@ -3856,6 +3856,31 @@ static SDValue emitComparison(SDValue LHS, SDValue RHS, ISD::CondCode CC,
   // register to WZR/XZR if it ends up being unused.
   unsigned Opcode = AArch64ISD::SUBS;
 
+  // A narrow equality against the high bits of an i64 can use a shifted
+  // 64-bit CMP. Zero extending the other operand is free for W-register
+  // definitions (in particular, zero-extending byte loads).
+  if (VT == MVT::i32 && isIntEqualitySetCC(CC)) {
+    auto WidenShift = [&](SDValue Narrow, SDValue Other) -> SDValue {
+      if (Narrow.getOpcode() != ISD::TRUNCATE || !Narrow.hasOneUse())
+        return SDValue();
+      SDValue Shift = Narrow.getOperand(0);
+      if (Shift.getOpcode() != ISD::SRL ||
+          Shift.getValueType() != MVT::i64 || !Shift.hasOneUse())
+        return SDValue();
+      auto *Amount = dyn_cast<ConstantSDNode>(Shift.getOperand(1));
+      if (!Amount || Amount->getZExtValue() < 32)
+        return SDValue();
+      SDValue Extended = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, Other);
+      return DAG.getNode(AArch64ISD::SUBS, DL,
+                         DAG.getVTList(MVT::i64, FlagsVT), Extended, Shift)
+          .getValue(1);
+    };
+    if (SDValue Flags = WidenShift(LHS, RHS))
+      return Flags;
+    if (SDValue Flags = WidenShift(RHS, LHS))
+      return Flags;
+  }
+
   if (isCMN(RHS, CC, DAG)) {
     // Can we combine a (CMP op1, (sub 0, op2) into a CMN instruction ?
     Opcode = AArch64ISD::ADDS;
