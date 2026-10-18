@@ -708,6 +708,8 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
     else if (Value.consume_front("flexfat-tbi-storage=")) {
       if (Value == "shadow")
         Storage = TBIStorage::Shadow;
+      else if (Value == "packed-shadow")
+        Storage = TBIStorage::PackedShadow;
       else if (Value == "last-byte")
         Storage = TBIStorage::LastByte;
       else if (Value == "prior-byte")
@@ -1390,6 +1392,8 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
                           ? "-flexfat-tbi-storage=last-byte"
                       : Storage == TBIStorage::PriorByte
                           ? "-flexfat-tbi-storage=prior-byte"
+                      : Storage == TBIStorage::PackedShadow
+                          ? "-flexfat-tbi-storage=packed-shadow"
                           : "-flexfat-tbi-storage=shadow");
   }
 

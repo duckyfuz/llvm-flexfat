@@ -106,6 +106,19 @@ if(COMPILER_RT_HAS_FLEXFAT)
         DEFS ${FLEXFAT_COMMON_DEFINITIONS} FLEXFAT_TEMPORAL_TBI=1
         DEPS ${FLEXFAT_DEPS}
         PARENT_TARGET flexfat)
+      if(NOT FLEXFAT_SIZES_CFG)
+        add_compiler_rt_runtime(clang_rt.flexfat_tbi_packed_shadow
+          STATIC ARCHS aarch64
+          SOURCES ${FLEXFAT_SOURCES}
+          ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
+          OBJECT_LIBS RTInterception RTSanitizerCommon RTSanitizerCommonLibc
+                      RTSanitizerCommonSymbolizer RTSanitizerCommonSymbolizerInternal
+          CFLAGS ${FLEXFAT_CFLAGS}
+          DEFS ${FLEXFAT_COMMON_DEFINITIONS} FLEXFAT_TEMPORAL_TBI=1
+               FLEXFAT_TBI_PACKED_SHADOW=1
+          DEPS ${FLEXFAT_DEPS}
+          PARENT_TARGET flexfat)
+      endif()
       add_compiler_rt_runtime(clang_rt.flexfat_tbi_last_byte
         STATIC ARCHS aarch64
         SOURCES ${FLEXFAT_SOURCES}

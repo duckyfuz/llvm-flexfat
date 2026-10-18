@@ -44,6 +44,11 @@
 // RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte -mllvm -flexfat-tbi-prior-byte -mllvm -flexfat-tbi-prior-byte=false %s 2>&1 | FileCheck %s --check-prefix=LAST
 // RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-prior-byte -mllvm -flexfat-tbi-storage=last-byte %s 2>&1 | FileCheck %s --check-prefix=LAST
 // RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=prior-byte -mllvm -flexfat-tbi-storage=shadow %s 2>&1 | FileCheck %s --check-prefix=SHADOW
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow %s 2>&1 | FileCheck %s --check-prefix=PACKED
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=shadow -mllvm -flexfat-tbi-storage=packed-shadow %s 2>&1 | FileCheck %s --check-prefix=PACKED
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow -mllvm -flexfat-tbi-storage=shadow %s 2>&1 | FileCheck %s --check-prefix=SHADOW
+// PACKED: "-flexfat-tbi-storage=packed-shadow"
+// PACKED: libclang_rt.flexfat_tbi_packed_shadow
 // LAST: "-flexfat-tbi-storage=last-byte"
 // LAST: libclang_rt.flexfat_tbi_last_byte
 // PRIOR: "-flexfat-tbi-storage=prior-byte"

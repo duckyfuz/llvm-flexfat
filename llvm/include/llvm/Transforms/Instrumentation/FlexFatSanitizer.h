@@ -16,7 +16,7 @@ class Module;
 struct FlexFatSanitizerOptions {
   bool Recover = false;
   bool TemporalTBI = false;
-  enum class TBIStorage { Shadow, LastByte, PriorByte };
+  enum class TBIStorage { Shadow, PackedShadow, LastByte, PriorByte };
   TBIStorage Storage = TBIStorage::LastByte;
   /// Check the complete width of scalar accesses.  The LowFat-compatible
   /// default checks only the pointer position used by the access.

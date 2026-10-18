@@ -117,12 +117,26 @@ static uptr *TemporalBiases() {
 }
 #endif
 #ifndef FLEXFAT_CUSTOM_CONFIG
-// A zero recovered base addresses the sentinel. Managed slot bases address
-// the first 16-byte granule of their slot in the direct shadow.
+// Both shadow layouts use this anchor as the foreign-pointer zero sentinel.
+// Direct shadow uses slot_base >> 4; packed shadow uses a negative slot offset.
 static constexpr uptr kTemporalShadowOffset = 0x200000000000ULL;
+#ifdef FLEXFAT_TBI_PACKED_SHADOW
+// Classes occupy [anchor - 512 MiB, anchor); the separate final page is the
+// foreign-pointer zero sentinel. Four bytes before the anchor are unused.
+static constexpr uptr kTemporalShadowDataBytes = 1ULL << 29;
+static constexpr uptr kTemporalShadowBytes = kTemporalShadowDataBytes + 4096;
+static_assert(kRegionSizeLog == 32 && kMinSizeLog == 4 && kNumSizeClasses == 27,
+              "Packed shadow requires the POW2 v1 geometry");
+static_assert(kTemporalShadowOffset - kTemporalShadowDataBytes >=
+                  kTablesBase + 4 * kTablesOffset,
+              "Packed shadow overlaps spatial tables");
+static_assert(kTemporalShadowOffset + 4096 <= kUserAddressLimit,
+              "Packed shadow exceeds the user address range");
+#else
 static constexpr uptr kTemporalShadowBytes = 1ULL << 44;
 static_assert(kTemporalShadowOffset + kTemporalShadowBytes <= kUserAddressLimit,
               "POW2 direct shadow exceeds the user address range");
+#endif
 #endif
 static_assert(sizeof(uptr) == 8, "TBI biases are 64-bit integers");
 static_assert((kUserAddressLimit >> kRegionSizeLog) * sizeof(uptr) <=
@@ -130,8 +144,7 @@ static_assert((kUserAddressLimit >> kRegionSizeLog) * sizeof(uptr) <=
               "TBI bias table exceeds reserved capacity");
 static void InitTemporal() {
 #ifndef FLEXFAT_CUSTOM_CONFIG
-  // One byte per 16-byte granule is addressable, but only the first granule
-  // of each slot stores a generation. A zero base reaches the sentinel page.
+  // Reserve the selected shadow layout without committing unused pages.
   auto map_shadow = [](uptr address, uptr bytes) {
     if (!MemoryRangeIsAvailable(address, address + bytes - 1) ||
         !MmapFixedNoReserve(address, bytes, "flexfat_temporal_shadow")) {
@@ -139,7 +152,12 @@ static void InitTemporal() {
       Die();
     }
   };
+#ifdef FLEXFAT_TBI_PACKED_SHADOW
+  map_shadow(kTemporalShadowOffset - kTemporalShadowDataBytes,
+             kTemporalShadowBytes);
+#else
   map_shadow(kTemporalShadowOffset, kTemporalShadowBytes);
+#endif
 #else
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
@@ -184,8 +202,15 @@ static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
   return reinterpret_cast<atomic_uint8_t *>(base + size - 1);
 #else
 #ifndef FLEXFAT_CUSTOM_CONFIG
+#ifdef FLEXFAT_TBI_PACKED_SHADOW
+  const unsigned shift = unsigned(region + kMinSizeLog);
+  const s64 biased = s64(raw & 0xffffffffULL) - s64(1ULL << 33);
+  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset +
+                                           uptr(biased >> shift));
+#else
   return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset +
                                              (base >> kMinSizeLog));
+#endif
 #else
   return reinterpret_cast<atomic_uint8_t *>(
       TemporalBiases()[raw >> kRegionSizeLog] + slot);
@@ -756,7 +781,11 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3() {
   CHECK(__flexfat::IsReady());
 }
 #else
+#ifdef FLEXFAT_TBI_PACKED_SHADOW
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_packed_shadow_pow2_v1() {
+#else
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7() {
+#endif
   __flexfat_init();
   CHECK(__flexfat::IsReady());
 }

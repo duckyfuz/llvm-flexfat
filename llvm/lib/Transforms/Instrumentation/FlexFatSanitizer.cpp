@@ -169,7 +169,8 @@ private:
   const uint64_t TablesBase;
   bool usesInSlotTags() const {
     return Options.TemporalTBI &&
-           Options.Storage != FlexFatSanitizerOptions::TBIStorage::Shadow;
+           (Options.Storage == FlexFatSanitizerOptions::TBIStorage::LastByte ||
+            Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte);
   }
   DenseMap<Value *, BoundsRecord> Bounds;
   DenseMap<Value *, Value *> RecoveredBases;
@@ -691,9 +692,36 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
     return;
   }
 #ifndef FLEXFAT_CUSTOM_CONFIG
-  Value *Address = B.CreateAdd(B.CreateLShr(G.Base, B.getInt64(4)),
-                               B.getInt64(kTemporalShadowOffset),
-                               "flexfat.metadata.address");
+  Value *Address;
+  if (Options.Storage == FlexFatSanitizerOptions::TBIStorage::PackedShadow) {
+    // One byte per slot, concatenating the POW2 classes below the anchor.
+    // For slot shift s, prefix = 2^29 - (2^33 >> s). Combining that prefix
+    // with the within-region slot index gives a single signed shift.
+    Value *Class = B.CreateSub(B.CreateLShr(G.Raw, B.getInt64(32)),
+                               B.getInt64(ManagedTableBegin));
+    Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
+                                  B.getInt64(0));
+    Value *Within = B.CreateAnd(G.Raw, B.getInt64(0xffffffffULL));
+    Value *Biased = B.CreateSub(Within, B.getInt64(1ULL << 33));
+    Value *Offset = B.CreateAShr(Biased, Shift);
+    // Clamp foreign shifts above to avoid poison, then select the zero
+    // sentinel at the anchor. Keep the anchor outside the select so the
+    // offset can feed a register-offset byte load. An integer add is folded
+    // into the select by InstCombine, preventing this addressing mode when
+    // spatial and temporal checks end up in separate blocks. This GEP is
+    // deliberately not inbounds: the negative offset wraps to the packed
+    // mapping below the anchor.
+    Value *SafeOffset = B.CreateSelect(G.Managed, Offset, B.getInt64(0));
+    Value *Anchor = B.CreateIntToPtr(B.getInt64(kTemporalShadowOffset),
+                                    B.getPtrTy());
+    G.Entry = B.CreateGEP(B.getInt8Ty(), Anchor, SafeOffset,
+                          "flexfat.metadata");
+    return;
+  } else {
+    Address = B.CreateAdd(B.CreateLShr(G.Base, B.getInt64(4)),
+                          B.getInt64(kTemporalShadowOffset),
+                          "flexfat.metadata.address");
+  }
   G.Entry = B.CreateIntToPtr(Address, B.getPtrTy(), "flexfat.metadata");
 #else
   Value *Slot =
@@ -1871,7 +1899,7 @@ bool FlexFatSanitizer::run() {
                 TemporalFunctions.contains(Callee))
               Modified |= invalidateTemporalAttributes(*CB);
 
-  // In-slot layouts have distinct link ABIs from shadow and each other.
+  // Storage layouts have distinct link ABIs from each other.
   using TBIStorage = FlexFatSanitizerOptions::TBIStorage;
   const auto Storage = Options.Storage;
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -1889,11 +1917,15 @@ bool FlexFatSanitizer::run() {
   const char *CtorName =
       Storage == TBIStorage::PriorByte ? "__flexfat_tbi_ctor_prior_byte_pow2_v3"
       : Storage == TBIStorage::LastByte ? "__flexfat_tbi_ctor_last_byte_pow2_v2"
-                                        : "__flexfat_tbi_ctor_v7";
+      : Storage == TBIStorage::PackedShadow
+          ? "__flexfat_tbi_ctor_packed_shadow_pow2_v1"
+          : "__flexfat_tbi_ctor_v7";
   const char *ABIName =
       Storage == TBIStorage::PriorByte  ? "__flexfat_tbi_abi_prior_byte_pow2_v3"
       : Storage == TBIStorage::LastByte ? "__flexfat_tbi_abi_last_byte_pow2_v2"
-                                        : "__flexfat_tbi_abi_v7";
+      : Storage == TBIStorage::PackedShadow
+          ? "__flexfat_tbi_abi_packed_shadow_pow2_v1"
+          : "__flexfat_tbi_abi_v7";
 #endif
   if (Options.TemporalTBI && !M.getFunction(CtorName)) {
     auto &Ctx = M.getContext();
@@ -1969,9 +2001,12 @@ PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
                                             ModuleAnalysisManager &) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
   if (Options.TemporalTBI &&
-      Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow) {
+      (Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow ||
+       Options.Storage == FlexFatSanitizerOptions::TBIStorage::PackedShadow)) {
     M.getContext().emitError(
-        "FlexFat TBI shadow storage requires a POW2 build");
+        Options.Storage == FlexFatSanitizerOptions::TBIStorage::PackedShadow
+            ? "FlexFat TBI packed-shadow storage requires a POW2 build"
+            : "FlexFat TBI shadow storage requires a POW2 build");
     return PreservedAnalyses::all();
   }
 #endif

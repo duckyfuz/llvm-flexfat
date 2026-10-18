@@ -130,6 +130,8 @@ static cl::opt<FlexFatSanitizerOptions::TBIStorage> FlexFatTBIStorage(
     cl::desc("Select FlexFat TBI generation storage"),
     cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow, "shadow",
                           "Shadow storage"),
+               clEnumValN(FlexFatSanitizerOptions::TBIStorage::PackedShadow,
+                          "packed-shadow", "Packed per-slot shadow (POW2 only)"),
                clEnumValN(FlexFatSanitizerOptions::TBIStorage::LastByte,
                           "last-byte", "Final byte of each slot"),
                clEnumValN(FlexFatSanitizerOptions::TBIStorage::PriorByte,

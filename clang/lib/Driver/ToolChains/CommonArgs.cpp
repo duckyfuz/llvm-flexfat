@@ -1729,7 +1729,9 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
       StaticRuntimes.push_back("scudo_standalone_cxx");
   }
   if (SanArgs.needsFlexFatRt())
-    StaticRuntimes.push_back(SanArgs.needsFlexFatTBIPriorByteRt()
+    StaticRuntimes.push_back(SanArgs.needsFlexFatTBIPackedShadowRt()
+                                 ? "flexfat_tbi_packed_shadow"
+                             : SanArgs.needsFlexFatTBIPriorByteRt()
                                  ? "flexfat_tbi_prior_byte"
                              : SanArgs.needsFlexFatTBILastByteRt()
                                  ? "flexfat_tbi_last_byte"

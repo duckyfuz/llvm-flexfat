@@ -14,7 +14,7 @@ parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
 parser.add_argument('--skip-timings', action='store_true',
                     help='retained for compatibility; this harness now runs correctness checks only')
-parser.add_argument('--storage', choices=['shadow', 'last-byte', 'prior-byte'],
+parser.add_argument('--storage', choices=['shadow', 'packed-shadow', 'last-byte', 'prior-byte'],
                     default='last-byte')
 args = parser.parse_args()
 results = []
@@ -41,8 +41,8 @@ for build in args.builds:
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
-    if custom and args.storage == 'shadow':
-        raise SystemExit('shadow TBI storage requires a POW2 build')
+    if custom and args.storage in ('shadow', 'packed-shadow'):
+        raise SystemExit(args.storage + ' TBI storage requires a POW2 build')
     if custom:
         header = (build/'lib/Transforms/Instrumentation/flexfat_config_generated.h').read_text()
         table = header.split('kFlexFatGenSizes[', 1)[1].split('};', 1)[0]
@@ -52,7 +52,8 @@ for build in args.builds:
     else:
         sizes = [1 << n for n in range(4, 31)]
         region_log, region_base = 32, 0x100000000000
-    abi = (('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
+    abi = ('__flexfat_tbi_abi_packed_shadow_pow2_v1' if args.storage == 'packed-shadow' else
+           ('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
             '__flexfat_tbi_abi_prior_byte_pow2_v3') if args.storage == 'prior-byte' else
            ('__flexfat_tbi_abi_last_byte_custom_v1' if custom else
             '__flexfat_tbi_abi_last_byte_pow2_v2') if args.storage == 'last-byte' else
@@ -64,10 +65,11 @@ for build in args.builds:
         metadata_bytes += ((start + (1 << region_log) - 1) // size - first + 1
                            if custom else (1 << region_log) // size)
     page = os.sysconf('SC_PAGE_SIZE')
-    reservation_bytes = (0 if args.storage != 'shadow' else
+    reservation_bytes = ((1 << 29) + page if args.storage == 'packed-shadow' else
+                         0 if args.storage != 'shadow' else
                          ((metadata_bytes + page - 1) // page) * page if custom
                          else 1 << 44)
-    if args.storage != 'shadow':
+    if args.storage not in ('shadow', 'packed-shadow'):
         metadata_bytes = 0
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
@@ -138,6 +140,13 @@ for build in args.builds:
                  '-o', arithmetic_obj])
             run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
 
+        if args.storage == 'packed-shadow':
+            arithmetic_obj = d/'packed-arithmetic.o'
+            run([cxx, '-O2', '-DFLEXFAT_TEMPORAL_TBI',
+                 '-I'+str(root.parent.parent/'lib'), '-c',
+                 root/'TestCases/temporal/packed-shadow.cpp', '-o', arithmetic_obj])
+            run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
+
         # Old TBI objects must be rebuilt: both old marker versions fail.
         old_obj = d/'v1.o'
         run([cc, '-O2', '-fno-builtin', '-ffunction-sections', '-fdata-sections',
@@ -154,6 +163,7 @@ for build in args.builds:
         if not custom:
             old_abis = ({'last-byte': ['__flexfat_tbi_abi_last_byte_pow2_v1'],
                          'prior-byte': ['__flexfat_tbi_abi_prior_byte_pow2_v2'],
+                         'packed-shadow': ['__flexfat_tbi_abi_v7'],
                          'shadow': ['__flexfat_tbi_abi_v3', '__flexfat_tbi_abi_v4',
                                     '__flexfat_tbi_abi_v6']}
                         [args.storage])
@@ -200,7 +210,7 @@ for build in args.builds:
         run([cc, startup, '-Wl,--whole-archive', runtime,
              '-Wl,--no-whole-archive', '-lpthread', '-ldl', '-lrt', '-lm', '-o', exe])
         run([exe]); checks += 1
-        if args.storage == 'shadow':
+        if args.storage in ('shadow', 'packed-shadow'):
             occupied = d/'occupied-shadow.c'
             occupied.write_text('''#include <sys/mman.h>
 #include <unistd.h>
@@ -271,17 +281,21 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
                 for mode in ['tag-byte', 'adjacent-tag', 'memset']:
                     run([exe, mode], 'out-of-bounds'); checks += 1
                 print(build.name, 'prior-byte', name, 'passed', flush=True)
-        if args.storage != 'shadow':
+        for other in ['shadow', 'packed-shadow', 'last-byte', 'prior-byte']:
+            if other == args.storage or (custom and other in ('shadow', 'packed-shadow')):
+                continue
             mixed = d/'mixed.o'
-            other = 'prior-byte' if args.storage == 'last-byte' else 'last-byte'
             run([cc, '-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
-                 '-mllvm', '-flexfat-tbi-storage=' + other, '-c',
-                 empty, '-o', mixed])
-            run([cc, *common, mixed, '-o', d/'mixed'],
-                ('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
-                 '__flexfat_tbi_abi_prior_byte_pow2_v3') if other == 'prior-byte' else
-                ('__flexfat_tbi_abi_last_byte_custom_v1' if custom else
-                 '__flexfat_tbi_abi_last_byte_pow2_v2'))
+                 '-mllvm', '-flexfat-tbi-storage=' + other, '-c', empty, '-o', mixed])
+            other_abi = {
+                'shadow': '__flexfat_tbi_abi_v7',
+                'packed-shadow': '__flexfat_tbi_abi_packed_shadow_pow2_v1',
+                'prior-byte': '__flexfat_tbi_abi_prior_byte_' +
+                              ('custom_v2' if custom else 'pow2_v3'),
+                'last-byte': '__flexfat_tbi_abi_last_byte_' +
+                             ('custom_v1' if custom else 'pow2_v2'),
+            }[other]
+            run([cc, *common, mixed, '-Wl,--gc-sections', '-o', d/'mixed'], other_abi)
             checks += 1
 
         results.append({'build': str(build), 'storage': args.storage, 'checks': checks,
