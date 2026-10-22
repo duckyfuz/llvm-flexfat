@@ -16,6 +16,8 @@ parser.add_argument('--skip-timings', action='store_true',
                     help='retained for compatibility; this harness now runs correctness checks only')
 parser.add_argument('--storage', choices=['shadow', 'packed-shadow', 'last-byte', 'prior-byte'],
                     default='last-byte')
+parser.add_argument('--ordinary-loads', action='store_true',
+                    help='exercise the ordinary inline generation-load experiment')
 args = parser.parse_args()
 results = []
 
@@ -38,6 +40,8 @@ for build in args.builds:
     cxx = build / 'bin/clang++'
     common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
               '-mllvm', '-flexfat-tbi-storage=' + args.storage]
+    if args.ordinary_loads:
+        common += ['-mllvm', '-flexfat-tbi-ordinary-loads=true']
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
@@ -297,6 +301,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
             checks += 1
 
         results.append({'build': str(build), 'storage': args.storage, 'checks': checks,
+                        'ordinary_inline_loads': args.ordinary_loads,
                         'metadata_entry_bytes': metadata_bytes,
                         'metadata_reservation_bytes': reservation_bytes,
                         'timings': {}})

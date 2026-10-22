@@ -1,4 +1,6 @@
 ; REQUIRES: !flexfat-custom-config
+; RUN: opt -flexfat-tbi-ordinary-loads -passes='flexfat<tbi;tbi-storage=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
+; RUN: opt -flexfat-tbi-ordinary-loads -passes='flexfat<tbi;tbi-storage=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
 ; RUN: opt -passes='flexfat<tbi;tbi-storage=shadow>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
 ; RUN: opt -passes='flexfat<tbi;tbi-storage=shadow>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
 ; RUN: opt -passes='flexfat<tbi;tbi-storage=shadow>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'

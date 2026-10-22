@@ -56,6 +56,9 @@ static cl::opt<bool> ClShareContainedGeometry(
     "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
     cl::desc(
         "Share temporal geometry for accesses proven within an allocation"));
+static cl::opt<bool> ClTBIOrdinaryLoads(
+    "flexfat-tbi-ordinary-loads", cl::Hidden, cl::init(false),
+    cl::desc("Use ordinary generation loads for TBI storage experiments"));
 STATISTIC(NumInstrumentedLoads, "Number of loads instrumented");
 STATISTIC(NumInstrumentedStores, "Number of stores instrumented");
 STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
@@ -1557,7 +1560,8 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
 
 // Emit a generation observation for each covered access. Shadow observations
 // are ordinary loads, like HWASan's, and may be reused by later optimization.
-// In-slot observations retain atomic ordering.
+// In-slot observations retain atomic ordering unless the ordinary-load
+// experiment is explicitly enabled.
 bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Instruction *I = Access.Inst;
   IRBuilder<> B(I);
@@ -1586,9 +1590,10 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   }
   auto *Generation = B.CreateLoad(B.getInt8Ty(), G.Entry, "flexfat.generation");
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  Generation->setAtomic(AtomicOrdering::Acquire);
+  if (!ClTBIOrdinaryLoads)
+    Generation->setAtomic(AtomicOrdering::Acquire);
 #else
-  if (usesInSlotTags())
+  if (usesInSlotTags() && !ClTBIOrdinaryLoads)
     Generation->setAtomic(AtomicOrdering::Monotonic);
 #endif
   Generation->setAlignment(Align(1));
