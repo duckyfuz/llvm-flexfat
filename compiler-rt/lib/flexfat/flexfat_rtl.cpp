@@ -26,6 +26,7 @@
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_mutex.h"
 #include <stddef.h>
+#include <pthread.h>
 #include "sanitizer_common/sanitizer_atomic.h"
 #ifdef FLEXFAT_TEMPORAL_TBI
 #if !defined(__aarch64__) || !defined(__linux__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || __SIZEOF_POINTER__ != 8
@@ -69,23 +70,25 @@ static constexpr uptr kMaxSizeClasses = kNumSizeClasses;
 // Region table - initialized in __flexfat_init
 RegionInfo kRegions[kMaxSizeClasses];
 
-// Pointers to the start of each mapped region
-static uptr region_bases[kMaxSizeClasses];
-
-// Bump pointer: next fresh address to allocate from in each region
-static uptr region_next_alloc[kMaxSizeClasses];
-
-// Segregated free lists: one singly-linked list per size class
-// Free blocks store a pointer to the next free block at their start
+// LowFat allocator state: the first word of a free slot is reserved.
 struct FreeBlock {
+#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+  // A second-word link would overwrite the generation in a 16-byte slot.
   FreeBlock *next;
+  uptr reserved;
+#else
+  uptr reserved;
+  FreeBlock *next;
+#endif
 };
-static FreeBlock *free_lists[kMaxSizeClasses];
-
-// Per-size-class spin mutexes protecting region_next_alloc and free_lists.
-// Using one lock per size class allows concurrent allocation across different
-// size classes, which is the common case in multi-threaded programs.
-static StaticSpinMutex region_locks[kMaxSizeClasses];
+struct RegionAllocator {
+  pthread_mutex_t mutex;
+  FreeBlock *freelist;
+  uptr freeptr;
+  uptr endptr;
+  uptr accessptr;
+};
+static RegionAllocator region_allocators[kMaxSizeClasses];
 
 #ifdef FLEXFAT_TEMPORAL_TBI
 // POW2 generations wrap modulo 256; custom generations use 1..255.
@@ -396,163 +399,9 @@ static void InitTables() {
   }
 }
 
-static void InitRegionTable() {
-  for (uptr i = 0; i < kNumSizeClasses; i++) {
-    uptr size = SizeClassToSize(i);
-    kRegions[i].size = size;
-    kRegions[i].alignment = size;
-    free_lists[i] = nullptr;
-  }
-}
+// Ported LowFat allocation and page-management implementation.
+#include "flexfat_lowfat_allocator.inc"
 
-// Initialize memory regions using mmap
-// Each region is mapped at a fixed address for the corresponding size class
-static bool InitMemoryRegions() {
-#ifdef FLEXFAT_TBI_PRIOR_BYTE
-  // Every later region has a mapped byte immediately before it: the reserved
-  // final byte of the preceding region. Map the corresponding byte before the
-  // first region too, so base - 1 is safe even for its unallocated first slot.
-  const uptr page = GetPageSizeCached();
-  if (!MmapFixedNoReserve(kRegionBase - page, page,
-                          "flexfat_prior_byte_guard") ||
-      !MprotectReadOnly(kRegionBase - page, page))
-    return false;
-#endif
-  for (uptr i = 0; i < kNumSizeClasses; i++) {
-    uptr region_start = GetRegionStart(i);
-
-    // Reserve the region without committing physical memory
-    // MmapFixedNoReserve maps memory but doesn't allocate physical pages until
-    // they're accessed
-    bool success =
-        MmapFixedNoReserve(region_start, kRegionSize, "flexfat_region");
-
-    if (!success)
-      return false;
-
-    region_bases[i] = region_start;
-
-    // The first allocation must be aligned to the object size relative to
-    // absolute zero. This is required for the magic-number fixed point math to
-    // securely compute object bases.
-    uptr size = kRegions[i].size;
-    uptr offset = region_start % size;
-    uptr initial_alloc = region_start;
-    if (offset != 0)
-      initial_alloc += (size - offset);
-
-#ifdef FLEXFAT_TBI_PRIOR_BYTE
-    // The first aligned slot is a mapped prefix. Its trailing byte holds the
-    // first allocatable slot's generation, so base - 1 stays inside the region.
-    initial_alloc += size;
-#endif
-
-    region_next_alloc[i] = initial_alloc;
-  }
-
-  return true;
-}
-
-// Allocate from a FlexFat region
-// First checks the free list, then falls back to bump allocation.
-// Thread-safe: protected by per-size-class spin mutex.
-//
-// Returns a malloc-aligned address within the slot, leaving room for the
-// requested object and its one-past pointer. The
-// bounds check (ptr - GetBase(ptr)) < class_size is still correct: GetBase()
-// recovers slot_base via reciprocal multiplication since slot_base is always
-// class-aligned, and any
-// access past slot_base+class_size fails the check.
-//
-// The free list always stores slot bases, including for aligned allocations.
-static void *AllocateImpl(uptr size, uptr alignment) {
-  if (size == 0)
-    size = 1;
-
-  // Keep the requested object's one-past pointer strictly inside the slot.
-  if (size == ~(uptr)0)
-    return nullptr;
-  uptr class_request = size + 1;
-  if (alignment) {
-    if (alignment - 1 > ~(uptr)0 - class_request)
-      return nullptr;
-    class_request += alignment - 1;
-  }
-
-  uptr class_index = SizeClassIndex(class_request);
-  if (class_index >= kNumSizeClasses)
-    return nullptr;
-
-  uptr alloc_size = SizeClassToSize(class_index);
-
-  SpinMutexLock lock(&region_locks[class_index]);
-
-  uptr slot_base;
-
-  // 1. Try free list first (stores slot bases)
-  FreeBlock *block = free_lists[class_index];
-  if (block) {
-    free_lists[class_index] = block->next;
-    slot_base = (uptr)block;
-    // Clear the payload and free-list link while preserving an in-slot tag.
-    internal_memset(block, 0, UsableClassSize(alloc_size));
-  } else {
-    // 2. Fall back to bump allocation
-    uptr region_end = GetRegionStart(class_index) + kRegionSize;
-    uptr addr = region_next_alloc[class_index];
-
-    if (addr + alloc_size > region_end) {
-      // Interceptors perform matched system-allocation fallback.  Returning an
-      // InternalAlloc pointer here would later send it to libc free().
-      return nullptr;
-    }
-
-    region_next_alloc[class_index] = addr + alloc_size;
-    slot_base = addr;
-  }
-
-  // Explicit aligned allocations may return an interior pointer.
-  uptr user = slot_base;
-  if (alignment)
-    user = RoundUpTo(slot_base, alignment);
-#ifdef FLEXFAT_TEMPORAL_TBI
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
-  // The allocator already knows the valid slot base and class size.
-#ifdef FLEXFAT_TBI_PRIOR_BYTE
-  auto *entry = reinterpret_cast<atomic_uint8_t *>(slot_base - 1);
-#else
-  auto *entry = reinterpret_cast<atomic_uint8_t *>(slot_base + alloc_size - 1);
-#endif
-#else
-  uptr base;
-  auto *entry = TemporalEntry(slot_base, base);
-  CHECK(entry);
-#endif
-  unsigned generation = atomic_load(entry, kTemporalLoadOrder);
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  if (!generation) {
-    generation = 1;
-    atomic_store(entry, u8(generation), memory_order_release);
-  }
-#endif
-  user = TagPointer(user, generation);
-#endif
-  return (void *)user;
-}
-
-void *Allocate(uptr size) { return AllocateImpl(size, 0); }
-
-void *AllocateAligned(uptr size, uptr alignment) {
-  CHECK(IsPowerOfTwo(alignment));
-  return AllocateImpl(size, alignment);
-}
-
-// Free a FlexFat allocation by pushing its slot base onto the free list.
-// Thread-safe: protected by per-size-class spin mutex.
-//
-// We always push the slot base (GetBase(ptr)) rather than ptr itself so that
-// freed slots can be reused with a different right-align offset for a new
-// request size, and so the free list is consistent regardless of mode.
 void Deallocate(void *ptr) {
   if (!ptr)
     return;
@@ -562,8 +411,8 @@ void Deallocate(void *ptr) {
   CHECK(IsFlexFatPointer(addr));
 
   uptr region = GetRegionIndex(addr);
-  // Recover the slot base: in right-align mode ptr is offset within the slot;
-  // in normal mode GetBase(addr) == addr since allocations are class-aligned.
+  // Aligned allocation can return an interior pointer, as in LowFat.
+  // The free list always receives the recovered slot base.
   uptr slot_base = GetBase(addr);
 
 #ifdef FLEXFAT_TEMPORAL_TBI
@@ -571,7 +420,7 @@ void Deallocate(void *ptr) {
 #endif
   bool valid = true;
   {
-    SpinMutexLock lock(&region_locks[region]);
+    RegionLock lock(region_allocators[region]);
 #ifdef FLEXFAT_TEMPORAL_TBI
 #if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
     state.base = slot_base;
@@ -607,8 +456,9 @@ void Deallocate(void *ptr) {
     if (valid) {
       // Invalidate before overwriting the slot with the raw free-list link.
       FreeBlock *block = (FreeBlock *)slot_base;
-      block->next = free_lists[region];
-      free_lists[region] = block;
+      ReleaseSlotPages(slot_base, SizeClassToSize(region));
+      block->next = region_allocators[region].freelist;
+      region_allocators[region].freelist = block;
     }
   }
 #ifdef FLEXFAT_TEMPORAL_TBI
