@@ -21,10 +21,12 @@ define i8 @argument_gep_chain(ptr %p, i64 %a, i64 %b) {
 ; CHECK: %flexfat.base = inttoptr
 ; CHECK: %q1 = getelementptr i8, ptr %p, i64 %a
 ; CHECK-NOT: load i64
-; CHECK: icmp uge i64 {{.*}}, %[[SIZE]]
+; CHECK: %[[BOUND1:.*]] = sub i64 %[[SIZE]], 1
+; CHECK: icmp uge i64 {{.*}}, %[[BOUND1]]
 ; CHECK: %q2 = getelementptr i8, ptr %q1, i64 %b
 ; CHECK-NOT: load i64
-; CHECK: icmp uge i64 {{.*}}, %[[SIZE]]
+; CHECK: %[[BOUND2:.*]] = sub i64 %[[SIZE]], 1
+; CHECK: icmp uge i64 {{.*}}, %[[BOUND2]]
 ; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
 ; CUSTOM-LABEL: @argument_gep_chain(
 ; CUSTOM: %[[MUL128:.*]] = mul i128

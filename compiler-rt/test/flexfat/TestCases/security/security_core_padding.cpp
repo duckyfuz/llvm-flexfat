@@ -14,10 +14,10 @@ int main() {
   p[0] = 'a';
   p[16] = 'b';
 
-  // Access past requested bounds (17), but within allocation padding (32).
-  // FlexFat enforces allocation-level bounds, so this should pass.
+  // Access past requested bounds (17), but within usable class capacity (31).
+  // Class padding remains accessible, excluding the reserved trailing byte.
   p[17] = 'c';
-  p[31] = 'z';
+  p[30] = 'z';
 
   printf("Padding access: ok\n");
   // CHECK: Padding access: ok

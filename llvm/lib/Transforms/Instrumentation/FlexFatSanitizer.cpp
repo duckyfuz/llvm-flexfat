@@ -412,7 +412,9 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     uint64_t FixedAccessSize,
                                     Value *DynAccessSize,
                                     Instruction *InsertBefore, CheckKind Kind) {
-  Value *AccessBound = usesInSlotTags() && !isEscapeCheck(Kind)
+  // The allocator reserves a trailing byte in every mode. Keep it available
+  // for legal one-past escapes, but exclude it from memory accesses.
+  Value *AccessBound = !isEscapeCheck(Kind)
                            ? IRB.CreateSub(AllocSize, IRB.getInt64(1))
                            : AllocSize;
   Value *IsOOB = nullptr;
@@ -1182,9 +1184,6 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
     bool IsStaticallyValid =
         isEscapeCheck(Kind) ? FixedAccessSize <= *PtrBounds.StaticUpperBound
                             : FixedAccessSize < *PtrBounds.StaticUpperBound;
-    if (!usesInSlotTags() && FixedAccessSize &&
-        FixedAccessSize == *PtrBounds.StaticUpperBound)
-      IsStaticallyValid = true;
     if (IsStaticallyValid)
       return false;
   }
@@ -1237,7 +1236,7 @@ bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
   bool IsWrite =
       isa<StoreInst>(I) || isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I);
   if (AccessSize.isScalable()) {
-    if (!usesInSlotTags() || getBounds(Ptr).Kind == BaseKind::NonFlexFat)
+    if (getBounds(Ptr).Kind == BaseKind::NonFlexFat)
       return false;
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();

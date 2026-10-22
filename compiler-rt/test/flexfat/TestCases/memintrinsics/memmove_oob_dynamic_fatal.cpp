@@ -18,8 +18,8 @@ int main(int argc, char **argv) {
 
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   // CHECK: operation = read
-  // CHECK: size      = 16
-  // CHECK: overflow  = +1
+  // CHECK: size      = 15
+  // CHECK: overflow  = +2
   memmove(dst, src, size);
 
   free(dst);

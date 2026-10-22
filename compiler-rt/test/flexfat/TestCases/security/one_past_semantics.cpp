@@ -87,7 +87,8 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc > 1 && std::strcmp(argv[1], "boundary") == 0) {
-    saved = p + opaqueSize(available);
+    // The reserved byte itself is a valid one-past escape. Cross the slot.
+    saved = p + opaqueSize(available) + opaqueSize(1);
     return 0;
   }
   if (argc > 1 && std::strcmp(argv[1], "beyond") == 0) {
