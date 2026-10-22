@@ -76,7 +76,6 @@ for build in args.builds:
         d = Path(directory)
         exe = d/'test'
         variants = [(['-O'+level], 'O'+level) for level in ['0', '2', '3']] + [
-                    (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right-align'),
                     (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover')]
         failures = {
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
@@ -248,8 +247,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
             if custom:
                 config_flags += ['-DFLEXFAT_CUSTOM_CONFIG',
                                  '-I'+str(build/'lib/Transforms/Instrumentation')]
-            for flags, name in [(['-O0'], 'O0'), (['-O2'], 'O2'),
-                                (['-O2', '-mllvm', '-flexfat-alignment=right'], 'right')]:
+            for flags, name in [(['-O0'], 'O0'), (['-O2'], 'O2')]:
                 run([cxx, *common, *flags, *config_flags, '-fno-builtin', case, '-o', exe])
                 run([exe]); run([exe, 'onepast']); run([exe, 'maps'])
                 run([exe, 'wide']); checks += 4

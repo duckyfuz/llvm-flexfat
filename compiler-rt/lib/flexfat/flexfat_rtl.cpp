@@ -56,16 +56,6 @@ bool IsReady() {
 // interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
 bool flexfat_recover = false;
 
-// Set to true when -flexfat-alignment=right is active. Instructs Allocate()
-// to bias objects toward the high end of their size-class slot while still
-// preserving the default malloc alignment guarantee. This can improve detection
-// of some right-side overflows, but the reserved trailing byte and alignment
-// keep the object's right edge strictly inside the slot.
-bool flexfat_right_align = false;
-
-// malloc() must return a pointer suitably aligned for any object type.
-static constexpr uptr kMallocAlignment = alignof(max_align_t);
-
 // Maximum number of size classes across both modes.
 // In POW2-only mode kNumSizeClasses=27; with a custom config it can be up to
 // FLEXFAT_MAX_ARRAY_SIZE. We size the static arrays at compile time using
@@ -467,15 +457,14 @@ static bool InitMemoryRegions() {
 // First checks the free list, then falls back to bump allocation.
 // Thread-safe: protected by per-size-class spin mutex.
 //
-// In right-align mode, returns the highest malloc-aligned address within the
-// slot that leaves room for the requested object and its one-past pointer. The
+// Returns a malloc-aligned address within the slot, leaving room for the
+// requested object and its one-past pointer. The
 // bounds check (ptr - GetBase(ptr)) < class_size is still correct: GetBase()
 // recovers slot_base via reciprocal multiplication since slot_base is always
 // class-aligned, and any
 // access past slot_base+class_size fails the check.
 //
-// The free list always stores slot bases (not right-aligned pointers) so that
-// freed blocks can be reused with a different offset for a new request size.
+// The free list always stores slot bases, including for aligned allocations.
 static void *AllocateImpl(uptr size, uptr alignment) {
   if (size == 0)
     size = 1;
@@ -522,13 +511,10 @@ static void *AllocateImpl(uptr size, uptr alignment) {
     slot_base = addr;
   }
 
-  // In right-align mode, preserve malloc alignment by rounding the available
-  // slack down to the nearest alignment boundary before shifting the pointer.
+  // Explicit aligned allocations may return an interior pointer.
   uptr user = slot_base;
   if (alignment)
     user = RoundUpTo(slot_base, alignment);
-  else if (flexfat_right_align)
-    user += RoundDownTo(alloc_size - size - 1, kMallocAlignment);
 #ifdef FLEXFAT_TEMPORAL_TBI
 #if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
   // The allocator already knows the valid slot base and class size.
@@ -670,11 +656,6 @@ extern "C" {
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_set_recover(int recover) {
   __flexfat::flexfat_recover = (recover != 0);
-}
-
-SANITIZER_INTERFACE_ATTRIBUTE
-void __flexfat_set_right_align(int right_align) {
-  __flexfat::flexfat_right_align = (right_align != 0);
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE

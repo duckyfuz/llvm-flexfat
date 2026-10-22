@@ -1,7 +1,7 @@
-// RUN: %clangxx_flexfat_right_align -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 
-// Right-align mode must still satisfy the default malloc alignment guarantee.
+// Allocations must satisfy the default malloc alignment guarantee.
 
 #include <stddef.h>
 #include <cstdio>

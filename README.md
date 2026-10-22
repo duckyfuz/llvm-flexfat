@@ -52,7 +52,6 @@ Use `-fsanitize=flexfat` to instrument an application. Controls:
 
 | Setting | Values | Default |
 | --- | --- | --- |
-| `-mllvm -flexfat-alignment=` | `left`, `right` | `left` |
 | `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-recover=` | `true`, `false` | `false` |
@@ -139,7 +138,6 @@ InstCombine, and SimplifyCFG to simplify generated checks. At `-O0`, the
 instrumentation still runs, but cleanup and contained-allocation geometry
 sharing are skipped. Accesses removed by earlier optimization cannot be
 checked. There are no mode, placement, or cleanup-selection flags.
-Use `-mllvm -flexfat-alignment=right` to select right alignment independently.
 
 Set `FLEXFAT_SIZES_CFG` to select a custom size-class configuration and
 `FLEXFAT_OPTIONS` to provide runtime options such as `exitcode=6`.
@@ -160,8 +158,12 @@ allocations additionally reserve worst-case alignment padding. Exact class-size
 requests therefore move to the next class (doubling slot size in POW2).
 The largest managed ordinary request is the largest class minus one byte;
 alignment padding can reduce that limit further. Larger requests and exhausted
-regions use matched system allocation/free fallback. Right alignment rounds
-the offset down while retaining the trailing byte and malloc alignment.
+regions use matched system allocation/free fallback. Ordinary allocations
+start at the slot base.
+
+Right-align placement has been removed, including the `-flexfat-alignment`
+option and `__flexfat_set_right_align` runtime entry point. Rebuild previously
+compiled modules that used that option.
 
 Rebuild the compiler and runtime together when changing this policy. Previously
 linked exact-fit runtimes do not satisfy the strict escape check invariant.

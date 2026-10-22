@@ -32,7 +32,6 @@ DECLARE_REAL(void *, malloc, uptr size)
 
 namespace __flexfat {
 extern bool flexfat_recover;
-extern bool flexfat_right_align;
 } // namespace __flexfat
 
 // DlsymAlloc handles allocations that happen before our runtime is initialized
@@ -159,8 +158,8 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     if (!new_ptr)
       return nullptr;
     // Copy old data. For FlexFat pointers, cap the copy to the bytes reachable
-    // from the returned pointer to the end of the slot. In right-align mode
-    // the user pointer may be shifted within the slot, so copying from the
+    // from the returned pointer to the end of the slot. Aligned allocations
+    // may return an interior pointer, so copying from the
     // slot base would corrupt the preserved contents.
     uptr copy_size = size;
     uptr old_class_size = __flexfat::GetSize((uptr)ptr);

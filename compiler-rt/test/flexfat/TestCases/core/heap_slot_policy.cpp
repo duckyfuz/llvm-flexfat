@@ -1,9 +1,6 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t | FileCheck %s
 // RUN: %clangxx_flexfat -O2 %s -o %t && %run %t | FileCheck %s
 // RUN: %clangxx_flexfat -O3 %s -o %t && %run %t | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O0 %s -o %t && %run %t | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O2 %s -o %t && %run %t | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O3 %s -o %t && %run %t | FileCheck %s
 
 #include <cassert>
 #include <cerrno>

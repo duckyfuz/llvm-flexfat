@@ -495,9 +495,6 @@ bool FlexFatSanitizer::isAllocationResult(Value *Ptr) const {
 }
 
 bool FlexFatSanitizer::isDirectAllocationBase(Value *Ptr) const {
-  if (Options.AllocationAlignment == FlexFatSanitizerOptions::Alignment::Right)
-    return false;
-
   auto *CB = dyn_cast<CallBase>(Ptr);
   if (!CB)
     return false;
@@ -1956,31 +1953,6 @@ bool FlexFatSanitizer::run() {
     BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Ctor);
     IRBuilder<> CtorBuilder(BB);
     CtorBuilder.CreateCall(SetRecoverFn,
-                           {ConstantInt::get(Type::getInt32Ty(Ctx), 1)});
-    CtorBuilder.CreateRetVoid();
-    appendToGlobalCtors(M, Ctor, /*Priority=*/0);
-    Modified = true;
-  }
-
-  // Emit a module constructor that calls __flexfat_set_right_align(1) so the
-  // runtime allocator right-aligns objects within their size-class slot.
-  // Right-aligning places the object's right edge at the slot boundary,
-  // making off-by-one overflows detectable at the cost of a left-side
-  // blind spot of (class_size - requested_size) bytes.
-  if (Options.AllocationAlignment ==
-          FlexFatSanitizerOptions::Alignment::Right &&
-      !M.getFunction("__flexfat_set_right_align_ctor")) {
-    LLVMContext &Ctx = M.getContext();
-    FunctionType *SetRightAlignTy =
-        FunctionType::get(Type::getVoidTy(Ctx), {Type::getInt32Ty(Ctx)}, false);
-    FunctionCallee SetRightAlignFn =
-        M.getOrInsertFunction("__flexfat_set_right_align", SetRightAlignTy);
-    Function *Ctor = Function::Create(
-        FunctionType::get(Type::getVoidTy(Ctx), false),
-        GlobalValue::InternalLinkage, "__flexfat_set_right_align_ctor", &M);
-    BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Ctor);
-    IRBuilder<> CtorBuilder(BB);
-    CtorBuilder.CreateCall(SetRightAlignFn,
                            {ConstantInt::get(Type::getInt32Ty(Ctx), 1)});
     CtorBuilder.CreateRetVoid();
     appendToGlobalCtors(M, Ctor, /*Priority=*/0);

@@ -13,17 +13,14 @@
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t copy 2>&1 | FileCheck %s
 // RUN: not %run %t set 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O0 %s -o %t
 // RUN: not %run %t read 2>&1 | FileCheck %s
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t copy 2>&1 | FileCheck %s
 // RUN: not %run %t set 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O2 %s -o %t
 // RUN: not %run %t read 2>&1 | FileCheck %s
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t copy 2>&1 | FileCheck %s
 // RUN: not %run %t set 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O3 %s -o %t
 // RUN: not %run %t read 2>&1 | FileCheck %s
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t copy 2>&1 | FileCheck %s
