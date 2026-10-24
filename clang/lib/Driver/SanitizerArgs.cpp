@@ -63,7 +63,8 @@ static const SanitizerMask RecoverableByDefault =
     SanitizerKind::Vptr;
 static const SanitizerMask Unrecoverable = SanitizerKind::Unreachable |
                                            SanitizerKind::Return |
-                                           SanitizerKind::AllocToken;
+                                           SanitizerKind::AllocToken |
+                                           SanitizerKind::FlexFat;
 static const SanitizerMask AlwaysRecoverable = SanitizerKind::KernelAddress |
                                                SanitizerKind::KernelHWAddress |
                                                SanitizerKind::KCFI;
@@ -814,14 +815,6 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       D, Args, DiagnoseErrors, RecoverableByDefault, AlwaysRecoverable,
       Unrecoverable, options::OPT_fsanitize_recover_EQ,
       options::OPT_fno_sanitize_recover_EQ);
-  for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
-    StringRef Value = A->getValue();
-    if (Value == "-flexfat-recover" || Value == "-flexfat-recover=true" ||
-        Value == "-flexfat-recover=1")
-      RecoverableKinds |= SanitizerKind::FlexFat;
-    else if (Value == "-flexfat-recover=false" || Value == "-flexfat-recover=0")
-      RecoverableKinds &= ~SanitizerKind::FlexFat;
-  }
   RecoverableKinds &= Kinds;
 
   TrappingKinds &= Kinds;

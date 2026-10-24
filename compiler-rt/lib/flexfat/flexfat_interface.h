@@ -5,12 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file declares the FlexFat Sanitizer runtime interface functions.
-// The runtime library must define these functions so the instrumented program
-// can call them.
-//
-//===----------------------------------------------------------------------===//
+
 #ifndef FLEXFAT_INTERFACE_H
 #define FLEXFAT_INTERFACE_H
 
@@ -20,23 +15,17 @@ using __sanitizer::uptr;
 
 extern "C" {
 
-// Initialize the FlexFat Sanitizer runtime. Called early during program startup.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_init();
 
-// Implemented only by the Linux AArch64 temporal runtime.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v2();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_pow2_v3();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v1();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_pow2_v2();
 #ifndef FLEXFAT_CUSTOM_CONFIG
-// POW2 v7 uses the 32–48 TiB direct shadow and modulo-256 generations.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7();
-// Packed POW2 v1 stores one byte per slot in the 512 MiB below 32 TiB.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_packed_shadow_pow2_v1();
 #endif
-// v3 immutable biases live at kTablesBase + 2 * kTablesOffset. The generation
-// byte is addressed by wrapping integer addition of bias and absolute slot.
 SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
 __flexfat_report_temporal_v3(uptr tagged_ptr, uptr access_size,
                              __sanitizer::u32 operation,
@@ -44,47 +33,19 @@ __flexfat_report_temporal_v3(uptr tagged_ptr, uptr access_size,
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_check_temporal(
     uptr tagged_ptr, uptr access_size, int operation);
 
-// Report an out-of-bounds error.
-// ptr: The pointer that caused the violation
-// base: The base address of the allocation
-// bound: The size of the allocation
-// Report a fatal out-of-bounds access and terminate.
-// ptr: the offending pointer, base: base of the allocation,
-// bound: size of the allocation, is_write: 1=write 0=read
+SANITIZER_INTERFACE_ATTRIBUTE NORETURN void
+__flexfat_report_oob(uptr ptr, uptr base, uptr bound, int is_write);
 
-// Called from a compiler-generated module constructor to communicate
-// -fsanitize-recover=flexfat to the runtime interceptors.
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_set_recover(int recover);
-
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_report_oob(uptr ptr, uptr base,
-                                                    uptr bound, int is_write);
-
-// Warn about an out-of-bounds error without terminating.
-// ptr: the offending pointer, base: base of the allocation,
-// bound: size of the allocation, is_write: 1=write 0=read
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_warn_oob(uptr ptr, uptr base,
-                                                  uptr bound, int is_write);
-
-// Get the base address of an allocation from a pointer.
-// Returns the base address, or 0 if the pointer is not within a FlexFat region.
 SANITIZER_INTERFACE_ATTRIBUTE uptr __flexfat_get_base(uptr ptr);
 
-// Get the size (bound) of an allocation from a pointer.
-// Returns the allocation size, or (uptr)-1 if the pointer is not within a FlexFat region.
 SANITIZER_INTERFACE_ATTRIBUTE uptr __flexfat_get_size(uptr ptr);
 
-// Get the offset from the base address of an allocation.
-// Returns the offset, or 0 if the pointer is not within a FlexFat region.
 SANITIZER_INTERFACE_ATTRIBUTE uptr __flexfat_get_offset(uptr ptr);
 
-// Get the remaining usable size in the allocation from a pointer.
-// Returns (size - offset), or (uptr)-1 if the pointer is not within a FlexFat region.
 SANITIZER_INTERFACE_ATTRIBUTE uptr __flexfat_get_usable_size(uptr ptr);
 
-// Allocate/Deallocate from FlexFat regions.
 SANITIZER_INTERFACE_ATTRIBUTE void *__flexfat_malloc(uptr size);
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_free(void *ptr);
-
 
 }  // extern "C"
 

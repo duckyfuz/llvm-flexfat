@@ -45,14 +45,6 @@ flexfat_base = ["-fsanitize=flexfat"]
 
 config.substitutions.append(("%clangxx_flexfat ", build_invocation(flexfat_base)))
 
-# Recover mode versions
-config.substitutions.append(
-    (
-        "%clangxx_flexfat_recover ",
-        build_invocation(flexfat_base + ["-mllvm", "-flexfat-recover=true"]),
-    )
-)
-
 # Only Darwin and Linux are supported.
 if getattr(config, "target_os", "Unknown") not in ["Darwin", "Linux"]:
     # When running directly (no site config), target_os may be unset; don't

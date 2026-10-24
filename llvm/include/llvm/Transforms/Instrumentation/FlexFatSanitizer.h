@@ -14,7 +14,6 @@ namespace llvm {
 class Module;
 
 struct FlexFatSanitizerOptions {
-  bool Recover = false;
   bool TemporalTBI = false;
   enum class TBIStorage { Shadow, PackedShadow, LastByte, PriorByte };
   TBIStorage Storage = TBIStorage::LastByte;

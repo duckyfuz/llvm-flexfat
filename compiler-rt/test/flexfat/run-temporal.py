@@ -21,13 +21,10 @@ parser.add_argument('--ordinary-loads', action='store_true',
 args = parser.parse_args()
 results = []
 
-def run(cmd, failure=None, warning=None):
+def run(cmd, failure=None):
     p = subprocess.run([str(c) for c in cmd], text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, timeout=90)
-    if warning:
-        assert p.returncode >= 0 and warning in p.stderr and 'FLEXFAT ERROR' not in p.stderr, (
-            cmd, p.returncode, p.stderr)
-    elif failure is None:
+    if failure is None:
         assert p.returncode == 0, (cmd, p.returncode, p.stdout, p.stderr)
     else:
         expected = [failure] if isinstance(failure, str) else failure
@@ -79,8 +76,7 @@ for build in args.builds:
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
         exe = d/'test'
-        variants = [(['-O'+level], 'O'+level) for level in ['0', '2', '3']] + [
-                    (['-O2', '-mllvm', '-flexfat-recover=true'], 'recover')]
+        variants = [(['-O'+level], 'O'+level) for level in ['0', '2', '3']]
         failures = {
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
@@ -258,17 +254,6 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
                 for mode in ['byte', 'memset', 'adjacent-tag']:
                     run([exe, mode], 'out-of-bounds'); checks += 1
                 print(build.name, 'last-byte', name, 'passed', flush=True)
-            run([cxx, *common, '-O2', '-fsanitize-recover=flexfat',
-                 *config_flags, '-fno-builtin', case, '-o', exe])
-            run([exe, 'wide']); checks += 1
-            for mode in ['byte', 'adjacent-tag']:
-                run([exe, mode], warning='FLEXFAT WARNING'); checks += 1
-            run([exe, 'memset'], 'out-of-bounds'); checks += 1
-            p = subprocess.run([str(exe), 'recover-other'], text=True,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=90)
-            assert p.returncode == 0 and 'FLEXFAT WARNING' in p.stderr, (p.returncode, p.stderr)
-            checks += 1
 
         if args.storage == 'prior-byte':
             case = root/'TestCases/temporal/prior_byte.cpp'

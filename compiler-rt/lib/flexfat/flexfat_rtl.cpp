@@ -6,14 +6,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file is the main file of the FlexFat Sanitizer runtime library.
-//
-// FlexFat pointers encode allocation bounds information directly in the pointer
-// value through careful memory layout. This allows O(1) bounds checking without
-// maintaining separate metadata.
-//
-//===----------------------------------------------------------------------===//
 
 #include "flexfat_allocator.h"
 #include "flexfat_config.h"
@@ -53,22 +45,7 @@ bool IsReady() {
   return atomic_load(&init_state, memory_order_acquire) == unsigned(InitState::Ready);
 }
 
-// Set to true when -fsanitize-recover=flexfat is active. Controls whether
-// interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
-bool flexfat_recover = false;
-
-// Maximum number of size classes across both modes.
-// In POW2-only mode kNumSizeClasses=27; with a custom config it can be up to
-// FLEXFAT_MAX_ARRAY_SIZE. We size the static arrays at compile time using
-// whichever is larger so the same translation unit works in both modes.
-#ifdef FLEXFAT_CUSTOM_CONFIG
-static constexpr uptr kMaxSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
-#else
-static constexpr uptr kMaxSizeClasses = kNumSizeClasses;
-#endif
-
-// Region table - initialized in __flexfat_init
-RegionInfo kRegions[kMaxSizeClasses];
+RegionInfo kRegions[kNumSizeClasses];
 
 // LowFat allocator state: the first word of a free slot is reserved.
 struct FreeBlock {
@@ -88,7 +65,7 @@ struct RegionAllocator {
   uptr endptr;
   uptr accessptr;
 };
-static RegionAllocator region_allocators[kMaxSizeClasses];
+static RegionAllocator region_allocators[kNumSizeClasses];
 
 #ifdef FLEXFAT_TEMPORAL_TBI
 // POW2 generations wrap modulo 256; custom generations use 1..255.
@@ -330,15 +307,11 @@ static void InitializeFlags() {
   {
     CommonFlags cf;
     cf.CopyFrom(*common_flags());
-    cf.exitcode = 1;           // Fatal OOB exits with code 1 by default
-    cf.abort_on_error = false; // Use the exitcode path, not SIGABRT, so output
-                               // is flushed before the process exits
+    cf.exitcode = 1;
+    cf.abort_on_error = false;
     OverrideCommonFlags(cf);
   }
 
-  // Register all common flags with a parser and read FLEXFAT_OPTIONS.
-  //    Allow overriding flags at runtime, e.g.:
-  //    FLEXFAT_OPTIONS=exitcode=42:verbosity=1 ./my_program
   FlagParser parser;
   RegisterCommonFlags(&parser);
   parser.ParseStringFromEnv("FLEXFAT_OPTIONS");
@@ -467,46 +440,9 @@ void Deallocate(void *ptr) {
 #endif
 }
 
-static void PrintOobHeader(const char *level, uptr ptr, uptr base, uptr bound,
-                           int is_write) {
-  // Compute the signed overflow: how many bytes past the end of the allocation
-  // the access reached. 0 means exactly at the boundary.
-  sptr overflow = (sptr)(ptr) - (sptr)(base + bound);
-  const char *op = is_write ? "write" : "read";
-
-  Printf("FLEXFAT %s: out-of-bounds error detected!\n", level);
-  Printf("          operation = %s\n", op);
-  Printf("          pointer   = 0x%zx (heap)\n", ptr);
-  Printf("          base      = 0x%zx\n", base);
-  Printf("          size      = %zu\n", bound);
-  const char *sign = (overflow >= 0) ? "+" : "";
-  Printf("          overflow  = %s%zd\n", sign, (long)overflow);
-  Printf("\n");
-}
-
-static void PrintErrorAndDie(uptr ptr, uptr base, uptr bound, int is_write,
-                             const StackTrace &stack) {
-  PrintOobHeader("ERROR", ptr, base, bound, is_write);
-  stack.Print();
-  Die();
-}
-
-static void PrintWarning(uptr ptr, uptr base, uptr bound, int is_write,
-                         const StackTrace &stack) {
-  PrintOobHeader("WARNING", ptr, base, bound, is_write);
-  stack.Print();
-}
-
 } // namespace __flexfat
 
-// ---------------------- Interface Functions ----------------------
-
 extern "C" {
-
-SANITIZER_INTERFACE_ATTRIBUTE
-void __flexfat_set_recover(int recover) {
-  __flexfat::flexfat_recover = (recover != 0);
-}
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_init() {
@@ -538,16 +474,20 @@ void __flexfat_init() {
   atomic_store(&init_state, unsigned(InitState::Ready), memory_order_release);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+SANITIZER_INTERFACE_ATTRIBUTE NORETURN
 void __flexfat_report_oob(uptr ptr, uptr base, uptr bound, int is_write) {
-  GET_STACK_TRACE_FATAL_HERE;
-  __flexfat::PrintErrorAndDie(ptr, base, bound, is_write, stack);
-}
+  sptr overflow = (sptr)ptr - (sptr)(base + bound);
 
-SANITIZER_INTERFACE_ATTRIBUTE
-void __flexfat_warn_oob(uptr ptr, uptr base, uptr bound, int is_write) {
+  Printf("FLEXFAT ERROR: out-of-bounds error detected!\n");
+  Printf("          operation = %s\n", is_write ? "write" : "read");
+  Printf("          pointer   = 0x%zx (heap)\n", ptr);
+  Printf("          base      = 0x%zx\n", base);
+  Printf("          size      = %zu\n", bound);
+  Printf("          overflow  = %s%zd\n\n", overflow >= 0 ? "+" : "",
+         (long)overflow);
   GET_STACK_TRACE_FATAL_HERE;
-  __flexfat::PrintWarning(ptr, base, bound, is_write, stack);
+  stack.Print();
+  Die();
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE

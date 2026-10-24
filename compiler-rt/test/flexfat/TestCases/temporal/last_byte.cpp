@@ -68,8 +68,7 @@ int main(int argc, char **argv) {
     fclose(maps);
   }
   char *q = opaque((char *)malloc(15));
-  if (argc > 1 && (!strcmp(argv[1], "adjacent-tag") ||
-                   !strcmp(argv[1], "recover-other"))) {
+  if (argc > 1 && !strcmp(argv[1], "adjacent-tag")) {
     char *slots[256];
     for (char *&slot : slots)
       slot = opaque((char *)malloc(15));
@@ -78,10 +77,7 @@ int main(int argc, char **argv) {
       uintptr_t after = (uintptr_t)slots[i] & 0x00ffffffffffffffULL;
       if (after == before + 16 &&
           ((uintptr_t)slots[i] >> 56) == ((uintptr_t)slots[i - 1] >> 56)) {
-        if (!strcmp(argv[1], "adjacent-tag"))
-          *(volatile char *)opaque((char *)((uintptr_t)slots[i] - 1)) = 0;
-        else
-          *(volatile char *)(slots[i] - 2) = 1;
+        *(volatile char *)opaque((char *)((uintptr_t)slots[i] - 1)) = 0;
         return 0;
       }
     }

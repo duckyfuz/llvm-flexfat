@@ -1,5 +1,7 @@
 ; RUN: opt < %s -passes=flexfat -S | FileCheck %s
 ; RUN: opt < %s -passes='flexfat<whole-access>' -S | FileCheck %s --check-prefix=WHOLE
+; RUN: not opt < %s -passes='flexfat<recover>' -disable-output 2>&1 | FileCheck %s --check-prefix=UNRECOVERABLE
+; UNRECOVERABLE: invalid FlexFatSanitizer pass parameter 'recover'
 target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
 
 ; A bare input pointer at offset zero is statically elided like LowFat.  Use a
@@ -18,6 +20,7 @@ define i32 @test_load(ptr %p) {
 ; CHECK-NOT: load i64
 ; CHECK: icmp uge i64
 ; CHECK: call void @__flexfat_report_oob
+; CHECK-NEXT: unreachable
 ; WHOLE-LABEL: @test_load
 ; WHOLE: icmp ugt i64 4, {{.*}}
 ; WHOLE: call void @__flexfat_report_oob

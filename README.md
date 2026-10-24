@@ -42,128 +42,65 @@ chat](https://discord.gg/xS7Z362),
 
 ## FlexFat prototype
 
-This checkout contains the FlexFat pointer-bounds-checking sanitizer prototype.
-When used in the CP4106 workspace, build and test it from the workspace root
-with `scripts/flexfat/configure_llvm.sh`, followed by
-`scripts/flexfat/run_flexfat.sh pow2` or
-`scripts/flexfat/run_flexfat.sh custom`.
+Build and test from the CP4106 workspace root:
 
-Use `-fsanitize=flexfat` to instrument an application. Controls:
+```sh
+scripts/flexfat/flexfat.sh pow2 configure build test
+scripts/flexfat/flexfat.sh custom configure build test
+```
+
+Enable instrumentation with `-fsanitize=flexfat`. Spatial and temporal errors
+are fatal.
 
 | Setting | Values | Default |
 | --- | --- | --- |
+| `-fsanitize-flexfat-tbi` / `-fno-sanitize-flexfat-tbi` | Enable / disable temporal checking | Off |
 | `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
-| `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
-| `-mllvm -flexfat-recover=` | `true`, `false` | `false` |
-| `-mllvm -flexfat-tbi-storage=` | `shadow`, `packed-shadow` (both POW2 only), `last-byte`, `prior-byte` | `last-byte` |
+| `-mllvm -flexfat-share-contained-geometry=` | `true`, `false` | `true`; skipped at `-O0` |
+| `-mllvm -flexfat-tbi-ordinary-loads=` | `true`, `false` | `false`; experimental |
+| `-mllvm -flexfat-tbi-storage=` | `last-byte`, `prior-byte`, `shadow`, `packed-shadow` | `last-byte` |
 
-The existing Clang TBI and sanitizer recovery flags remain supported. Explicit
-`-flexfat-tbi` and `-flexfat-recover` settings override them.
+TBI requires little-endian Linux AArch64 with 64-bit pointers and
+`-fsanitize=flexfat`. Explicit `-mllvm -flexfat-tbi=true/false` overrides the
+Clang TBI flags. Storage selection requires TBI; the final storage assignment
+wins. The legacy `-mllvm -flexfat-tbi-last-byte` and
+`-mllvm -flexfat-tbi-prior-byte` selectors remain supported; either selector
+set to `false` selects `last-byte`.
 
-The storage option requires `-fsanitize-flexfat-tbi`. The older
-`-mllvm -flexfat-tbi-last-byte` and `-mllvm -flexfat-tbi-prior-byte`
-spellings remain supported. Each storage assignment replaces the previous
-one; either compatibility flag set to `false` selects `last-byte`.
-In `last-byte` mode,
-the generation occupies the final byte of each size-class slot. That byte is
-excluded from usable capacity and runtime copies. Default scalar checks reject
-accesses starting at the reserved byte; a wider scalar access starting before
-it may overlap it. `-mllvm -flexfat-check-whole-access=true` checks the full
-scalar width, and memory intrinsics always check their full range. One-past
-pointers may point to the reserved byte. Last-byte and shadow objects have
-different link ABIs and must be built with the same storage choice.
-Uninstrumented code can overwrite an in-slot generation byte; use shadow
-storage when such writes are
-possible. Exercise the layouts with
-`compiler-rt/test/flexfat/run-temporal.py BUILD_DIR --storage=last-byte`
-(or `prior-byte`, or `shadow` / `packed-shadow` for a POW2 build).
+| TBI storage | Supported builds | Generation location |
+| --- | --- | --- |
+| `last-byte` | POW2, custom | Final byte of the slot |
+| `prior-byte` | POW2, custom | Byte immediately before the slot base |
+| `shadow` | POW2 | Direct shadow; 16 TiB virtual reservation |
+| `packed-shadow` | POW2 | Packed shadow; 512 MiB plus a sentinel page |
 
-POW2 TBI shadow storage derives a generation address from the slot base:
-`32 TiB + (slot_base >> 4)`. It reserves the zero-initialized 32–48 TiB
-virtual address range at startup. Only the first 16-byte granule of each
-slot stores its generation. Unmanaged pointers have a recovered base of zero,
-which addresses a shared zero entry. The reservation commits physical pages
-only as entries are written.
+Build the compiler and runtime with matching size classes and TBI storage.
+Set `-DFLEXFAT_SIZES_CFG=/path/to/sizes.cfg` at CMake configuration time for
+custom classes; unset or empty selects POW2. Custom sizes must start at 16,
+be strictly ascending multiples of 16, and pass the generator's geometry checks.
 
-In `packed-shadow` mode (POW2 only), one byte per slot is stored in tightly
-packed class ranges in `[K - 512 MiB, K)`, where `K = 32 TiB`. A separate
-zero sentinel page starts at `K`; the last four bytes before `K` are unused.
-For an untagged pointer `raw` and slot size `2^s`, the generation address is
-`K + (((int64_t)(raw & 0xffffffff) - 2^33) >> s)` (arithmetic shift).
-Foreign pointers use `K`. This reserves 512 MiB plus a sentinel page and
-commits pages on demand. It preserves ordinary shadow's allocation capacity,
-modulo-256 generations, spatial policy and generation loads. Additional address
-arithmetic trades runtime cost for a smaller metadata footprint. The runtime
-archive is `libclang_rt.flexfat_tbi_packed_shadow.a`; its distinct ABI rejects
-objects compiled for a different storage mode.
+Managed allocations reserve a trailing byte and use size-class bounds, so
+padding within a slot remains a detection blind spot. Default fixed-size
+access checks test the starting address; `-flexfat-check-whole-access=true`
+checks the full width. Memory intrinsics always check their full ranges.
+Uninstrumented writes can corrupt in-slot generations. Oversized allocations
+and exhausted regions fall back to the system allocator.
 
-In `prior-byte` mode, each slot's generation occupies the byte immediately
-before its base. The first aligned slot in every region is reserved so this
-byte is mapped for the first allocation. The final byte of an allocated slot
-may hold the following slot's generation and is excluded from usable capacity
-and the start of default point-checked accesses. A wider scalar access may
-overlap it unless whole-access checking is enabled. A zero-filled guard page
-precedes the first region;
-the reserved final byte of each later region provides a safe zero tag for its
-unallocated first slot. Once a slot base is recovered, the tag address is
-`base - 1`; recovering a base from an interior pointer still requires the
-size-class geometry. This mode has its own link ABI.
+POW2 generations wrap modulo 256; custom generations cycle through 1–255.
+There is no independent liveness tracking, so forged matching tags and
+wraparound can evade temporal checks. POW2 shadow observations are ordinary
+loads; in-slot observations are atomic unless ordinary loads are selected.
+Custom observations use acquire atomics unless ordinary loads are selected.
 
-FlexFat does not perform loop-specific geometry hoisting, loop versioning,
-or affine-range grouping. Loop accesses use ordinary spatial and temporal
-instrumentation. Proven contained-allocation geometry sharing and general IR
-cleanup remain available.
+Use `FLEXFAT_OPTIONS` for runtime settings, for example
+`FLEXFAT_OPTIONS=exitcode=42:symbolize=false ./program`.
 
-POW2 uses generations 0–255 in every TBI storage mode. Fresh slots start at
-zero, and free advances the generation modulo 256. Each covered access loads
-the generation and compares it directly with the pointer tag. Shadow checks
-use ordinary, non-volatile loads, like HWASan; later optimization may reuse or
-hoist these observations when legal. In-slot checks retain relaxed atomic
-loads. Allocator metadata updates remain atomic. Untagged foreign pointers
-match the zero sentinel; tagged foreign pointers fail. Generation wraparound
-can make an old tag match again,
-and zero-tag pointers into never-allocated slots can pass the temporal check.
-The POW2 ABI markers are `last_byte_pow2_v2`, `prior_byte_pow2_v3`, and `v7`
-(shadow); objects compiled with older generation rules must be rebuilt.
+Run native temporal acceptance checks with:
 
-Custom builds support last-byte and prior-byte storage. Metadata addresses
-use the recovered slot base and class size, without a 1:16 shadow layout or
-granule-alignment assumption. The existing size generator requires multiples
-of 16 for allocation alignment. Custom generations remain 1–255, with the existing managed
-region and zero-tag checks and partial-slot handling. Custom builds reject
-shadow selection.
-
-FlexFat instruments at OptimizerLastEP, then runs MemorySSA EarlyCSE,
-InstCombine, and SimplifyCFG to simplify generated checks. At `-O0`, the
-instrumentation still runs, but cleanup and contained-allocation geometry
-sharing are skipped. Accesses removed by earlier optimization cannot be
-checked. There are no mode, placement, or cleanup-selection flags.
-
-Set `FLEXFAT_SIZES_CFG` to select a custom size-class configuration and
-`FLEXFAT_OPTIONS` to provide runtime options such as `exitcode=6`.
+```sh
+python3 llvm-flexfat/compiler-rt/test/flexfat/run-temporal.py \
+  llvm-flexfat/build-flexfat-pow2 --storage=last-byte
+```
 
 The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
 participants to all modes of communication within the project.
-
-### FlexFat heap slot policy
-
-Managed heap allocations reserve at least one byte after the requested object.
-Pointer escapes at or beyond the allocation slot boundary report an error;
-legal requested-object one-past pointers remain inside the slot. Bounds are
-still recovered from addresses, without pointer metadata. Padding within a
-slot remains a spatial detection blind spot.
-
-Class selection uses the normalized request plus one byte, and aligned
-allocations additionally reserve worst-case alignment padding. Exact class-size
-requests therefore move to the next class (doubling slot size in POW2).
-The largest managed ordinary request is the largest class minus one byte;
-alignment padding can reduce that limit further. Larger requests and exhausted
-regions use matched system allocation/free fallback. Ordinary allocations
-start at the slot base.
-
-Right-align placement has been removed, including the `-flexfat-alignment`
-option and `__flexfat_set_right_align` runtime entry point. Rebuild previously
-compiled modules that used that option.
-
-Rebuild the compiler and runtime together when changing this policy. Previously
-linked exact-fit runtimes do not satisfy the strict escape check invariant.

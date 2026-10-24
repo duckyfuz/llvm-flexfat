@@ -134,10 +134,6 @@ static cl::opt<bool> FlexFatTBILastByte(
 static cl::opt<bool> FlexFatTBIPriorByte(
     "flexfat-tbi-prior-byte", cl::init(false),
     cl::desc("Store FlexFat TBI generations just before each slot base"));
-
-static cl::opt<bool> FlexFatRecover("flexfat-recover", cl::init(false),
-                                    cl::desc("Continue after a FlexFat error"));
-
 // Experiment to mark cold functions as optsize/minsize/optnone.
 // TODO: remove once this is exposed as a proper driver flag.
 static cl::opt<PGOOptions::ColdFuncOpt> ClPGOColdFuncAttr(
@@ -818,10 +814,6 @@ static void addSanitizers(const Triple &TargetTriple,
 
   if (LangOpts.Sanitize.has(SanitizerKind::FlexFat)) {
     FlexFatSanitizerOptions FlexFatOpts;
-    FlexFatOpts.Recover =
-        CodeGenOpts.SanitizeRecover.has(SanitizerKind::FlexFat);
-    if (FlexFatRecover.getNumOccurrences())
-      FlexFatOpts.Recover = FlexFatRecover;
     FlexFatOpts.TemporalTBI = FlexFatTBI.getNumOccurrences()
                                   ? FlexFatTBI
                                   : CodeGenOpts.SanitizeFlexFatTBI;

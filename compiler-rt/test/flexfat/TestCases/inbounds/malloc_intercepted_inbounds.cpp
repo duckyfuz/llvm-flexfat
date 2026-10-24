@@ -27,7 +27,6 @@ int main() {
 
   // CHECK: intercepted_inbounds: ok
   // CHECK-NOT: FLEXFAT ERROR
-  // CHECK-NOT: FLEXFAT WARNING
   printf("intercepted_inbounds: ok\n");
   return 0;
 }

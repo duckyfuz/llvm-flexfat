@@ -6,14 +6,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file implements the FlexFat Sanitizer instrumentation pass.
-//
-// FlexFat pointers encode allocation bounds information directly in the pointer
-// value through careful memory layout. This pass instruments memory accesses
-// to call runtime functions that verify bounds using this encoded information.
-//
-//===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Instrumentation/FlexFatSanitizer.h"
 #include "llvm/ADT/DenseMap.h"
@@ -42,8 +34,6 @@
 #include <algorithm>
 #include <optional>
 
-// When the build generates a custom size-class config, pull in the tables so
-// the pass can emit the right IR (AND vs. 128-bit magic multiply).
 #ifdef FLEXFAT_CUSTOM_CONFIG
 #include "flexfat_config_generated.h"
 #endif
@@ -65,7 +55,6 @@ STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
 STATISTIC(NumInstrumentedMemIntrinsics,
           "Number of mem intrinsics instrumented");
 STATISTIC(NumInstrumentedEscapes, "Number of pointer escapes instrumented");
-
 
 namespace {
 
@@ -144,7 +133,6 @@ struct SelectProvenance {
   std::optional<uint64_t> StaticUpperBound;
 };
 
-/// Helper class to instrument a module with FlexFat bounds checks.
 class FlexFatSanitizer {
 public:
   FlexFatSanitizer(Module &M, const FlexFatSanitizerOptions &Options)
@@ -194,10 +182,8 @@ private:
   unsigned BoundsIRGeneration = 0;
 
   FunctionCallee ReportOobFn = nullptr;
-  FunctionCallee WarnOobFn = nullptr;
 
   FunctionCallee getReportOobFn();
-  FunctionCallee getWarnOobFn();
 
   bool instrumentFunction(Function &F);
   void discoverAccesses(Instruction *I,
@@ -246,7 +232,6 @@ private:
   MDNode *getInstrumentedMetadata();
   MDNode *getNoSanitizeMetadata();
 
-  // Emit the OOB-check block given a pre-computed (Base, AllocSize, PtrInt).
   void emitOobCheck(IRBuilder<> &IRB, Value *PtrInt, Value *Base,
                     Value *AllocSize, uint64_t FixedAccessSize,
                     Value *DynAccessSize, Instruction *InsertBefore,
@@ -316,7 +301,6 @@ private:
 
 FunctionCallee FlexFatSanitizer::getReportOobFn() {
   if (!ReportOobFn) {
-    // void __flexfat_report_oob(uptr ptr, uptr base, uptr size, i8 is_write)
     Type *VoidTy = Type::getVoidTy(M.getContext());
     Type *I8Ty = Type::getInt8Ty(M.getContext());
     ReportOobFn = M.getOrInsertFunction(
@@ -332,46 +316,7 @@ FunctionCallee FlexFatSanitizer::getReportOobFn() {
   return ReportOobFn;
 }
 
-FunctionCallee FlexFatSanitizer::getWarnOobFn() {
-  if (!WarnOobFn) {
-    // void __flexfat_warn_oob(uptr ptr, uptr base, uptr size, i8 is_write)
-    Type *VoidTy = Type::getVoidTy(M.getContext());
-    Type *I8Ty = Type::getInt8Ty(M.getContext());
-    WarnOobFn = M.getOrInsertFunction(
-        "__flexfat_warn_oob",
-        FunctionType::get(VoidTy, {IntptrTy, IntptrTy, IntptrTy, I8Ty}, false));
-    if (auto *F = dyn_cast<Function>(WarnOobFn.getCallee())) {
-      F->addFnAttr(Attribute::NoUnwind);
-      F->setMemoryEffects(MemoryEffects::inaccessibleMemOnly());
-    }
-  }
-  return WarnOobFn;
-}
-
 #ifdef FLEXFAT_CUSTOM_CONFIG
-// ---------------------------------------------------------------------------
-// emitDynamicSlotMagic
-//
-// Given a runtime RegionIndex, emit IR that loads the per-class size and
-// magic from the embedded tables and returns (AllocSize, Base) as IntptrTy.
-//
-// Generated IR (conceptually):
-//
-//   %alloc_size = load i64, ptr getelementptr(__flexfat_gen_sizes, 0,
-//   %region_idx) %magic      = load i64, ptr
-//   getelementptr(__flexfat_gen_magics, 0, %region_idx)
-//
-//   ; Reciprocal fixed-point base recovery for every class
-//   %ptr128     = zext i64 %ptr to i128
-//   %magic128   = zext i64 %magic to i128
-//   %mul128     = mul i128 %ptr128, %magic128
-//   %idx128     = lshr i128 %mul128, 64
-//   %idx        = trunc i128 %idx128 to i64
-//   %candidate  = mul i64 %idx, %alloc_size
-//   %too_high   = icmp ugt i64 %candidate, %ptr
-//   %slot       = sub i64 %idx, (zext i1 %too_high to i64)
-//   %base       = mul i64 %slot, %alloc_size
-// ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
 FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
                                        Value *RegionIndex) {
@@ -382,7 +327,6 @@ FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
   Value *AllocSize64 = loadFromFixedTable(IRB, TablesBase + 0 * kTablesOffset,
                                           I64Ty, RegionIndex);
 
-  // Narrow to IntptrTy (which is i64 on 64-bit targets)
   Value *AllocSize = IRB.CreateZExtOrTrunc(AllocSize64, IntptrTy);
 
   // In custom-config mode we deliberately use the reciprocal-multiply path
@@ -409,7 +353,6 @@ FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
 
 #endif // FLEXFAT_CUSTOM_CONFIG
 
-// Emit the OOB-check block given a pre-computed (Base, AllocSize, PtrInt).
 void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     Value *Base, Value *AllocSize,
                                     uint64_t FixedAccessSize,
@@ -439,14 +382,13 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
   }
 
   Instruction *OobTerm =
-      SplitBlockAndInsertIfThen(IsOOB, InsertBefore, /*Unreachable=*/false);
+      SplitBlockAndInsertIfThen(IsOOB, InsertBefore, /*Unreachable=*/true);
   markNoSanitize(OobTerm);
   IRBuilder<> OobIRB(OobTerm);
   OobIRB.SetNoSanitizeMetadata();
-  FunctionCallee OobFn = Options.Recover ? getWarnOobFn() : getReportOobFn();
   Type *I8Ty = Type::getInt8Ty(M.getContext());
   Value *IsWriteVal = ConstantInt::get(I8Ty, isWriteCheck(Kind) ? 1 : 0);
-  OobIRB.CreateCall(OobFn, {PtrInt, Base, AccessBound, IsWriteVal});
+  OobIRB.CreateCall(getReportOobFn(), {PtrInt, Base, AccessBound, IsWriteVal});
 }
 
 bool FlexFatSanitizer::shouldSkipInstruction(const Instruction *I) const {
@@ -1761,8 +1703,6 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   llvm::erase_if(ToInstrument,
                  [this](Instruction *I) { return shouldSkipInstruction(I); });
 
-  // LowFat-style phase 2: resolve every provenance root and memoize one
-  // recovered allocation base before CFG-changing checks are inserted.
   for (Instruction *I : ToInstrument)
     if (!I->hasMetadata(LLVMContext::MD_nosanitize))
       prepareBounds(I);
@@ -1772,19 +1712,18 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   DT.recalculate(F);
   if (!Options.InternalSkipOptimizations_)
     prepareContainedGeometry(TemporalAccesses, DT);
-  if (!Options.Recover)
-    for (const AccessRecord &A : TemporalAccesses)
-      if (!AccessGeometry.count({A.Inst, A.Pointer}) &&
-          !shouldSkipInstruction(A.Inst)) {
-        BoundsRecord B = getBounds(A.Pointer);
-        if (B.Kind != BaseKind::NonFlexFat) {
-          Value *Root = RecoveredBaseOrigins.lookup(B.CompanionBase);
-          Value *GeometryRoot = Root ? Root : B.CompanionBase;
-          if (isa<Instruction>(GeometryRoot) || isa<Argument>(GeometryRoot))
-            SpatialGeometry[{A.Inst, A.Pointer}] =
-                getTemporalGeometry(GeometryRoot);
-        }
+  for (const AccessRecord &A : TemporalAccesses)
+    if (!AccessGeometry.count({A.Inst, A.Pointer}) &&
+        !shouldSkipInstruction(A.Inst)) {
+      BoundsRecord B = getBounds(A.Pointer);
+      if (B.Kind != BaseKind::NonFlexFat) {
+        Value *Root = RecoveredBaseOrigins.lookup(B.CompanionBase);
+        Value *GeometryRoot = Root ? Root : B.CompanionBase;
+        if (isa<Instruction>(GeometryRoot) || isa<Argument>(GeometryRoot))
+          SpatialGeometry[{A.Inst, A.Pointer}] =
+              getTemporalGeometry(GeometryRoot);
       }
+    }
   // Without a retained spatial check or an independent same-slot proof,
   // derive temporal metadata from the actual access pointer.
   for (const AccessRecord &A : TemporalAccesses)
@@ -1792,13 +1731,6 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
         !SpatialGeometry.count({A.Inst, A.Pointer}) &&
         (isa<Instruction>(A.Pointer) || isa<Argument>(A.Pointer)))
       (void)getTemporalGeometry(A.Pointer);
-  // Temporal discovery is independent of spatial elision. Prepare all
-  // provenance before inserting any check branches (including invoke splits).
-  if (Options.Recover)
-    for (const AccessRecord &Access : TemporalAccesses)
-      Modified |= instrumentTemporal(Access);
-
-  // LowFat-style phase 3: insert checks using the cached recovered bases.
   for (Instruction *I : ToInstrument) {
     if (I->hasMetadata(LLVMContext::MD_nosanitize))
       continue;
@@ -1861,9 +1793,8 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   }
   // A fatal spatial failure cannot continue into the temporal observation.
   // Its successful edge also proves that the companion base names this slot.
-  if (!Options.Recover)
-    for (const AccessRecord &Access : TemporalAccesses)
-      Modified |= instrumentTemporal(Access);
+  for (const AccessRecord &Access : TemporalAccesses)
+    Modified |= instrumentTemporal(Access);
   if (Modified && Options.TemporalTBI)
     invalidateTemporalAttributes(F);
   return Modified || BoundsIRGeneration != 0 || EscapeIRModified;
@@ -1940,27 +1871,6 @@ bool FlexFatSanitizer::run() {
     B.CreateRetVoid();
     appendToGlobalCtors(M, Ctor, 0);
     appendToUsed(M, {Ctor});
-    Modified = true;
-  }
-
-  // Emit a module constructor that calls __flexfat_set_recover(Recover) so the
-  // runtime interceptors (memset/memcpy/memmove) know whether to warn or abort.
-  // This runs before main() via .init_array / __mod_init_func.
-  if (Options.Recover && !M.getFunction("__flexfat_set_recover_ctor")) {
-    LLVMContext &Ctx = M.getContext();
-    FunctionType *SetRecoverTy =
-        FunctionType::get(Type::getVoidTy(Ctx), {Type::getInt32Ty(Ctx)}, false);
-    FunctionCallee SetRecoverFn =
-        M.getOrInsertFunction("__flexfat_set_recover", SetRecoverTy);
-    Function *Ctor = Function::Create(
-        FunctionType::get(Type::getVoidTy(Ctx), false),
-        GlobalValue::InternalLinkage, "__flexfat_set_recover_ctor", &M);
-    BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Ctor);
-    IRBuilder<> CtorBuilder(BB);
-    CtorBuilder.CreateCall(SetRecoverFn,
-                           {ConstantInt::get(Type::getInt32Ty(Ctx), 1)});
-    CtorBuilder.CreateRetVoid();
-    appendToGlobalCtors(M, Ctor, /*Priority=*/0);
     Modified = true;
   }
 

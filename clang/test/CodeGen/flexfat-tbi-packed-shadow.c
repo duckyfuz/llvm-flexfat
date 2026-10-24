@@ -20,9 +20,8 @@
 // CHECK: call void @__flexfat_report_temporal_v3
 // CHECK: call void @__flexfat_tbi_abi_packed_shadow_pow2_v1()
 // ASM-LABEL: read_byte:
-// ASM: csel x[[OFFSET:[0-9]+]], x{{[0-9]+}}, xzr, lo
-// ASM-NOT: add
 // ASM: b.hs
+// ASM: csel x[[OFFSET:[0-9]+]], x{{[0-9]+}}, xzr, lo
 // ASM-NOT: add
 // ASM: ldrb w[[GEN:[0-9]+]], [x[[OFFSET]], x{{[0-9]+}}]
 // ASM-NEXT: cmp x[[GEN]], x0, lsr #56

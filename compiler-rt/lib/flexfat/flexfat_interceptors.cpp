@@ -6,11 +6,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// Interceptors for malloc/free/calloc/realloc that route heap allocations
-// through the FlexFat allocator so all heap memory gets bounds-checked.
-//
-//===----------------------------------------------------------------------===//
 
 #include "flexfat_allocator.h"
 #include "flexfat_config.h"
@@ -29,10 +24,6 @@
 using namespace __sanitizer;
 
 DECLARE_REAL(void *, malloc, uptr size)
-
-namespace __flexfat {
-extern bool flexfat_recover;
-} // namespace __flexfat
 
 // DlsymAlloc handles allocations that happen before our runtime is initialized
 // (e.g., during dynamic linker symbol resolution). Uses a small static buffer.
@@ -309,16 +300,7 @@ static inline void check_bounds(const void *ptr, uptr access_size,
         report_ptr = start;
       }
     }
-    bool metadata_access = false;
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
-    uptr offset = start - base;
-    metadata_access = offset < size &&
-                      access_size > (size - 1) - offset;
-#endif
-    if (__flexfat::flexfat_recover && !metadata_access)
-      __flexfat_warn_oob(report_ptr, base, bound, is_write);
-    else
-      __flexfat_report_oob(report_ptr, base, bound, is_write);
+    __flexfat_report_oob(report_ptr, base, bound, is_write);
   }
 }
 
