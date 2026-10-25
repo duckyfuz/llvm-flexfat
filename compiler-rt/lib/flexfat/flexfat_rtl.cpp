@@ -71,17 +71,13 @@ static RegionAllocator region_allocators[kNumSizeClasses];
 // POW2 generations wrap modulo 256; custom generations use 1..255.
 // There is no independent liveness tracking. A matching forged tag can pass
 // for a freed slot, and stale tags can match again after generation wraparound.
-static_assert(sizeof(atomic_uint8_t) == 1,
-              "Temporal metadata must occupy one byte per slot");
-#ifdef FLEXFAT_CUSTOM_CONFIG
-static constexpr memory_order kTemporalLoadOrder = memory_order_acquire;
-#else
-static constexpr memory_order kTemporalLoadOrder = memory_order_relaxed;
-#endif
+// Generation bytes use ordinary accesses, like HWASan tags. Allocator
+// updates are serialized by RegionLock; tag observations do not synchronize
+// application accesses with a concurrent free.
 #if !defined(FLEXFAT_TBI_LAST_BYTE) && !defined(FLEXFAT_TBI_PRIOR_BYTE)
 #ifdef FLEXFAT_CUSTOM_CONFIG
 // Custom-mode foreign table entries address this immutable byte.
-static atomic_uint8_t temporal_sentinel;
+static u8 temporal_sentinel;
 static uptr *TemporalBiases() {
   return reinterpret_cast<uptr *>(kTablesBase + 2 * kTablesOffset);
 }
@@ -156,7 +152,7 @@ static void InitTemporal() {
 
 // Allocation operations require complete slots, unlike instrumentation's
 // addressable padding bytes. Arithmetic stays unsigned until the final cast.
-static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
+static u8 *TemporalEntry(uptr raw, uptr &base) {
   uptr region = GetRegionIndex(raw);
   if (region >= kNumSizeClasses)
     return nullptr;
@@ -167,22 +163,20 @@ static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
   if (base < start || base > end - size)
     return nullptr;
 #ifdef FLEXFAT_TBI_PRIOR_BYTE
-  return reinterpret_cast<atomic_uint8_t *>(base - 1);
+  return reinterpret_cast<u8 *>(base - 1);
 #elif defined(FLEXFAT_TBI_LAST_BYTE)
-  return reinterpret_cast<atomic_uint8_t *>(base + size - 1);
+  return reinterpret_cast<u8 *>(base + size - 1);
 #else
 #ifndef FLEXFAT_CUSTOM_CONFIG
 #ifdef FLEXFAT_TBI_PACKED_SHADOW
   const unsigned shift = unsigned(region + kMinSizeLog);
   const s64 biased = s64(raw & 0xffffffffULL) - s64(1ULL << 33);
-  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset +
-                                           uptr(biased >> shift));
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset + uptr(biased >> shift));
 #else
-  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset +
-                                             (base >> kMinSizeLog));
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset + (base >> kMinSizeLog));
 #endif
 #else
-  return reinterpret_cast<atomic_uint8_t *>(
+  return reinterpret_cast<u8 *>(
       TemporalBiases()[raw >> kRegionSizeLog] + slot);
 #endif
 #endif
@@ -190,7 +184,7 @@ static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
 
 struct TemporalState {
   uptr base = 0;
-  atomic_uint8_t *entry = nullptr;
+  u8 *entry = nullptr;
   unsigned generation = 0;
 
   bool Matches(uptr ptr) const {
@@ -204,11 +198,11 @@ struct TemporalState {
 };
 
 #ifndef FLEXFAT_CUSTOM_CONFIG
-static atomic_uint8_t *ForeignTemporalEntry() {
+static u8 *ForeignTemporalEntry() {
 #if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
-  return reinterpret_cast<atomic_uint8_t *>(&__flexfat_tbi_zero_sentinel);
+  return &__flexfat_tbi_zero_sentinel;
 #else
-  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset);
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset);
 #endif
 }
 #endif
@@ -221,7 +215,7 @@ static TemporalState LoadTemporalState(uptr ptr) {
     state.entry = ForeignTemporalEntry();
 #endif
   if (state.entry)
-    state.generation = atomic_load(state.entry, kTemporalLoadOrder);
+    state.generation = *state.entry;
   return state;
 }
 
@@ -406,27 +400,25 @@ void Deallocate(void *ptr) {
     if (slot_base >= min_base &&
         slot_base <= region_start + kRegionSize - slot_size) {
 #ifdef FLEXFAT_TBI_PRIOR_BYTE
-      state.entry = reinterpret_cast<atomic_uint8_t *>(slot_base - 1);
+      state.entry = reinterpret_cast<u8 *>(slot_base - 1);
 #else
-      state.entry = reinterpret_cast<atomic_uint8_t *>(
-          slot_base + slot_size - 1);
+      state.entry = reinterpret_cast<u8 *>(slot_base + slot_size - 1);
 #endif
-      state.generation = atomic_load(state.entry, kTemporalLoadOrder);
+      state.generation = *state.entry;
     }
 #else
     state = LoadTemporalState((uptr)ptr);
 #endif
     valid = state.Matches((uptr)ptr);
-    if (valid)
-      atomic_store(state.entry,
-#ifdef FLEXFAT_CUSTOM_CONFIG
-                   u8(state.generation == 255 ? 1 : state.generation + 1),
-#else
-                   u8(state.generation + 1),
-#endif
-                   memory_order_release);
 #endif
     if (valid) {
+#ifdef FLEXFAT_TEMPORAL_TBI
+#ifdef FLEXFAT_CUSTOM_CONFIG
+      *state.entry = u8(state.generation == 255 ? 1 : state.generation + 1);
+#else
+      *state.entry = u8(state.generation + 1);
+#endif
+#endif
       // Invalidate before overwriting the slot with the raw free-list link.
       FreeBlock *block = (FreeBlock *)slot_base;
       ReleaseSlotPages(slot_base, SizeClassToSize(region));
