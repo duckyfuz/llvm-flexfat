@@ -2,7 +2,7 @@
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/llvm/llvm-project/badge)](https://securityscorecards.dev/viewer/?uri=github.com/llvm/llvm-project)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8273/badge)](https://www.bestpractices.dev/projects/8273)
-[![libc++](https://github.com/llvm/llvm-project/actions/workflows/libcxx-build-and-test.yaml/badge.svg?branch=main&event=schedule)](https://github.com/llvm/llvm-project/actions/workflows/libcxx-build-and-test.yaml?query=event%3Aschedule)
+[![libc++](https://github.com/llvm/llvm-project/actions/workflows/libcxx-pr-conformance-tests.yaml/badge.svg?branch=main&event=schedule)](https://github.com/llvm/llvm-project/actions/workflows/libcxx-pr-conformance-tests.yaml?query=event%3Aschedule)
 
 Welcome to the LLVM project!
 
@@ -39,86 +39,6 @@ Join the [LLVM Discourse forums](https://discourse.llvm.org/), [Discord
 chat](https://discord.gg/xS7Z362),
 [LLVM Office Hours](https://llvm.org/docs/GettingInvolved.html#office-hours) or
 [Regular sync-ups](https://llvm.org/docs/GettingInvolved.html#online-sync-ups).
-
-## FlexFat prototype
-
-Build and test from the CP4106 workspace root:
-
-```sh
-scripts/flexfat/flexfat.sh pow2 configure build test
-scripts/flexfat/flexfat.sh custom configure build test
-```
-
-Enable instrumentation with `-fsanitize=flexfat`. Spatial and temporal errors
-are fatal.
-
-| Setting | Enable / select | Disable | Default |
-| --- | --- | --- | --- |
-| TBI and generation storage | `-fsanitize-flexfat-tbi=last-byte`, `prior-byte`, `shadow`, or `packed-shadow` | `-fsanitize-flexfat-tbi=off` | Off |
-| Whole-access checking | `-fsanitize-flexfat-check-whole-access` | `-fno-sanitize-flexfat-check-whole-access` | Off |
-| Contained geometry sharing | `-fsanitize-flexfat-share-contained-geometry` | `-fno-sanitize-flexfat-share-contained-geometry` | On; skipped at `-O0` |
-| Ordinary generation loads | `-fsanitize-flexfat-tbi-ordinary-loads` | `-fno-sanitize-flexfat-tbi-ordinary-loads` | Off; experimental |
-
-Selecting a storage mode enables TBI. All FlexFat settings require
-`-fsanitize=flexfat`; explicit geometry-sharing and generation-load settings
-also require active TBI. Ordinary generation loads can be enabled only for
-`last-byte` and `prior-byte`; shadow modes already use ordinary loads.
-Boolean settings use positive/negative flags, without `=true` or `=false`.
-Repeated settings use the final assignment. There are no FlexFat `-mllvm`
-configuration switches.
-
-TBI requires little-endian Linux AArch64 with 64-bit pointers.
-
-| TBI mode | Supported builds | Generation location |
-| --- | --- | --- |
-| `last-byte` | POW2, custom | Final byte of the slot |
-| `prior-byte` | POW2, custom | Byte immediately before the slot base |
-| `shadow` | POW2 | Direct shadow; 16 TiB virtual reservation |
-| `packed-shadow` | POW2 | Packed shadow; 512 MiB plus a sentinel page |
-
-```sh
-clang -O2 -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte program.c
-clang -O2 -fsanitize=flexfat -fsanitize-flexfat-tbi=packed-shadow \
-  -fsanitize-flexfat-check-whole-access program.c
-```
-
-Use the same TBI mode when compiling and linking separately.
-
-For LLVM IR tests, `opt` accepts `flexfat<tbi=MODE>` and the parameters
-`whole-access`, `share-contained-geometry`, and `tbi-ordinary-loads`, each
-with a `no-` counterpart. Defaults and temporal dependencies match Clang.
-
-```sh
-opt -passes='flexfat<tbi=last-byte;whole-access>' input.ll -S -o output.ll
-```
-
-Build the compiler and runtime with matching size classes and TBI storage.
-Set `-DFLEXFAT_SIZES_CFG=/path/to/sizes.cfg` at CMake configuration time for
-custom classes; unset or empty selects POW2. Custom sizes must start at 16,
-be strictly ascending multiples of 16, and pass the generator's geometry checks.
-
-Managed allocations reserve a trailing byte and use size-class bounds, so
-padding within a slot remains a detection blind spot. Default fixed-size
-access checks test the starting address; `-fsanitize-flexfat-check-whole-access`
-checks the full width. Memory intrinsics always check their full ranges.
-Uninstrumented writes can corrupt in-slot generations. Oversized allocations
-and exhausted regions fall back to the system allocator.
-
-POW2 generations wrap modulo 256; custom generations cycle through 1–255.
-There is no independent liveness tracking, so forged matching tags and
-wraparound can evade temporal checks. POW2 shadow observations are ordinary
-loads; in-slot observations are atomic unless ordinary loads are selected.
-Custom observations use acquire atomics unless ordinary loads are selected.
-
-Use `FLEXFAT_OPTIONS` for runtime settings, for example
-`FLEXFAT_OPTIONS=exitcode=42:symbolize=false ./program`.
-
-Run native temporal acceptance checks with:
-
-```sh
-python3 llvm-flexfat/compiler-rt/test/flexfat/run-temporal.py \
-  llvm-flexfat/build-flexfat-pow2 --tbi=last-byte
-```
 
 The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
 participants to all modes of communication within the project.
