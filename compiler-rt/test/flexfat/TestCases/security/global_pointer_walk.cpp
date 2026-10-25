@@ -13,18 +13,6 @@
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t copy 2>&1 | FileCheck %s
 // RUN: not %run %t set 2>&1 | FileCheck %s
-// RUN: not %run %t read 2>&1 | FileCheck %s
-// RUN: not %run %t write 2>&1 | FileCheck %s
-// RUN: not %run %t copy 2>&1 | FileCheck %s
-// RUN: not %run %t set 2>&1 | FileCheck %s
-// RUN: not %run %t read 2>&1 | FileCheck %s
-// RUN: not %run %t write 2>&1 | FileCheck %s
-// RUN: not %run %t copy 2>&1 | FileCheck %s
-// RUN: not %run %t set 2>&1 | FileCheck %s
-// RUN: not %run %t read 2>&1 | FileCheck %s
-// RUN: not %run %t write 2>&1 | FileCheck %s
-// RUN: not %run %t copy 2>&1 | FileCheck %s
-// RUN: not %run %t set 2>&1 | FileCheck %s
 
 #include <cassert>
 #include <cstdint>
@@ -49,8 +37,7 @@ int main(int Argc, char **Argv) {
   void *(*volatile Copy)(void *, const void *, size_t) = memcpy;
   void *(*volatile Set)(void *, int, size_t) = memset;
   char Byte = 0;
-  // Each reload loses the original companion base. The store at the exact
-  // slot boundary must report before recovery can switch to Second's slot.
+  // Reloading the global cursor loses provenance; the reserved byte must stop it.
   for (size_t I = 0; I != 2 * Slot; ++I) {
     char *P = Cursor;
     switch (Argv[1][0]) {

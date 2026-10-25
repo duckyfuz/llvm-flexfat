@@ -1,5 +1,5 @@
-// RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-realloc -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fno-builtin-realloc -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,7 +17,7 @@ int main() {
   if (size == (uptr)-1) return 2;
   if (size < 17) return 3;
 
-  p[16] = 'x';
+  static_cast<volatile char *>(static_cast<void *>(p))[16] = 'x';
 
   // CHECK: realloc_nullptr: ok
   printf("realloc_nullptr: ok\n");

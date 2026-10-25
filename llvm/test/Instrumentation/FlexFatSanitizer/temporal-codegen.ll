@@ -8,8 +8,6 @@
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
-; Isolate temporal code generation from spatial checks. The successful path
-; retains the tagged address in x0 and has neither a call nor diagnostic spills.
 define i8 @read_byte(ptr %p) {
 ; CHECK-LABEL: read_byte:
 ; CHECK-NOT: bl{{[ \t]}}

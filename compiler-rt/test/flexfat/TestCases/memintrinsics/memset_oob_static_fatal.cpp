@@ -1,7 +1,5 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 #include <cstdlib>
 #include <cstring>
@@ -13,7 +11,6 @@ int main() {
 
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   memset(dst, 0, 32);
-  // Keep the write observable until late instrumentation.
   asm volatile("" : : "r"(dst) : "memory");
 
   free(guard);

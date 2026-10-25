@@ -1,4 +1,7 @@
-// REQUIRES: aarch64-registered-target
+// RUN: not %clang_cc1 -fsanitize=flexfat -mllvm -flexfat-mode=fast -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang_cc1 -fsanitize=flexfat -mllvm -flexfat-instrumentation-point=optimizer-last -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang_cc1 -fsanitize=flexfat -mllvm -flexfat-post-cleanup=early-cse -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// REMOVED: Unknown command line argument
 // RUN: not %clang_cc1 -fsanitize=flexfat -mllvm -flexfat-recover=true -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=REMOVED-RECOVER
 // REMOVED-RECOVER: Unknown command line argument '-flexfat-recover=true'
 // RUN: not %clang_cc1 -fsanitize=flexfat -mllvm -flexfat-placement=scalar-late -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=BAD-PLACEMENT

@@ -1,7 +1,5 @@
-// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t subtraction && %run %t arena && %run %t deque && %run %t loop
-
-// Reduced forms of the benign exact-boundary idioms observed in 403.gcc,
-// 444.namd, 447.dealII, and 482.sphinx3.
+// RUN: %clangxx_flexfat -O3 %s -o %t && %run %t callee
+// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t subtraction && %run %t arena && %run %t deque && %run %t loop && %run %t callee
 
 #include <cstddef>
 #include <cstdlib>
@@ -19,6 +17,10 @@ __attribute__((noinline)) static void consume(char *p) {
   asm volatile("" : : "r"(p) : "memory");
 }
 
+__attribute__((noinline)) static void consumeEnd(char *base) {
+  consume(base + 16);
+}
+
 int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
@@ -27,6 +29,10 @@ int main(int argc, char **argv) {
   if (!base)
     return 1;
   char *end = base + size;
+  if (std::strcmp(argv[1], "callee") == 0) {
+    consumeEnd(base);
+    return 0;
+  }
   if (std::strcmp(argv[1], "subtraction") == 0)
     return subtractFrom(end, base) != static_cast<std::ptrdiff_t>(size);
   if (std::strcmp(argv[1], "arena") == 0) {

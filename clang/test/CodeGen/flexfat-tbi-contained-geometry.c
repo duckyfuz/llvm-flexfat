@@ -1,10 +1,11 @@
-// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte %s -o - | FileCheck %s --check-prefix=SHARED
-// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry %s -o - | FileCheck %s --check-prefix=SEPARATE
+// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry -### -c %s 2>&1 | FileCheck %s --check-prefix=FORWARD
+// FORWARD: "-fno-sanitize-flexfat-share-contained-geometry"
+// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte %s -o - | FileCheck %s --check-prefix=COMMON
+// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry %s -o - | FileCheck %s --check-prefix=COMMON
 
-// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry -fsanitize-flexfat-share-contained-geometry %s -o - | FileCheck %s --check-prefix=SHARED
+// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry -fsanitize-flexfat-share-contained-geometry %s -o - | FileCheck %s --check-prefix=COMMON
 
-// Cleanup may reuse generation observations even with geometry sharing
-// disabled. The runs also cover forwarding and last-option-wins behavior.
+// Spatial proofs can share geometry even when optional contained sharing is disabled.
 extern void *malloc(unsigned long);
 
 int contained(void) {
@@ -12,17 +13,11 @@ int contained(void) {
   return p[1] + p[2];
 }
 
-// SHARED-LABEL: define {{.*}} @contained(
-// SHARED: %[[META:flexfat.metadata.*]] = {{inttoptr|select}}
-// SHARED: load i8, ptr %[[META]]
-// SHARED: load volatile i32
-// SHARED-NOT: load i8
-// SHARED: load volatile i32
-// SHARED-NOT: load i8
-// SHARED: ret i32
-
-// SEPARATE-LABEL: define {{.*}} @contained(
-// SEPARATE: %flexfat.generation = load i8, ptr
-// SEPARATE: load volatile i32
-// SEPARATE: load volatile i32
-// SEPARATE: ret i32
+// COMMON-LABEL: define {{.*}} @contained(
+// COMMON: %[[META:flexfat.metadata.*]] = {{inttoptr|select}}
+// COMMON: load i8, ptr %[[META]]
+// COMMON: load volatile i32
+// COMMON-NOT: load i8
+// COMMON: load volatile i32
+// COMMON-NOT: load i8
+// COMMON: ret i32

@@ -19,7 +19,6 @@ foreach(arch ${FLEXFAT_TEST_ARCH})
   string(TOUPPER ${arch} ARCH_UPPER_CASE)
   set(CONFIG_NAME ${ARCH_UPPER_CASE}${OS_NAME}Config)
 
-  # Propagate custom-config flag to lit as a Python boolean literal.
   if(FLEXFAT_SIZES_CFG)
     set(FLEXFAT_CUSTOM_CONFIG_ENABLED "True")
   else()

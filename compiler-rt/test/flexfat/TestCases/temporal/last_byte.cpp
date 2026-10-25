@@ -37,8 +37,7 @@ int main(int argc, char **argv) {
   if (argc > 1 && !strcmp(argv[1], "byte"))
     return *(volatile char *)last;
   if (argc > 1 && !strcmp(argv[1], "wide")) {
-    // Default scalar checks test the starting byte. The wide read overlaps
-    // the reserved generation byte without starting at it.
+    // Default scalar checks validate the starting byte, not the full width.
     (void)*(volatile int *)(last - 3);
     return 0;
   }

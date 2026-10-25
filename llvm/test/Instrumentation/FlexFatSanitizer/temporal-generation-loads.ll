@@ -1,3 +1,5 @@
+; RUN: opt -passes='flexfat<tbi=last-byte>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
+; RUN: opt -passes='flexfat<tbi=last-byte>,default<O2>,flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
 ; RUN: opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
 ; RUN: opt -passes='flexfat<tbi=prior-byte>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
 ; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
@@ -14,8 +16,7 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
 declare void @may_free(ptr)
 
-; Reuse the metadata address, but emit ordinary observations on either side
-; of a call that can invalidate the allocation. Optimization must retain both.
+; Geometry is immutable; generation observations must survive invalidating calls.
 define i8 @separated(ptr %p) {
 ; RAW-LABEL: define i8 @separated(
 ; RAW: [[ENTRY:%flexfat.metadata]] = {{inttoptr|getelementptr}}
@@ -37,7 +38,6 @@ define i8 @separated(ptr %p) {
   ret i8 %sum
 }
 
-; With no intervening writes or calls, ordinary generation loads can be reused.
 define i8 @adjacent(ptr %p) {
 ; RAW-LABEL: define i8 @adjacent(
 ; RAW: load i8, ptr %flexfat.metadata, align 1
@@ -59,8 +59,6 @@ define i8 @adjacent(ptr %p) {
 
 !0 = !{}
 
-; A metadata write may invalidate the first observation, even when the
-; instrumented data reads themselves are volatile.
 define i8 @metadata_write(ptr %p, ptr %metadata) {
 ; RAW-LABEL: define i8 @metadata_write(
 ; RAW: load i8, ptr %flexfat.metadata

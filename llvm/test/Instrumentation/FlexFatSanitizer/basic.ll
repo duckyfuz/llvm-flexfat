@@ -4,8 +4,6 @@
 ; UNRECOVERABLE: invalid FlexFatSanitizer pass parameter 'recover'
 target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
 
-; A bare input pointer at offset zero is statically elided like LowFat.  Use a
-; derived pointer with an unknown static bound to exercise emitted checks.
 define i32 @test_load(ptr %p) {
 ; CHECK-LABEL: @test_load
 ; CHECK: %flexfat.root.int = ptrtoint ptr %p to i64
@@ -30,7 +28,6 @@ define i32 @test_load(ptr %p) {
   ret i32 %val
 }
 
-; Test 2: Store should be instrumented
 define void @test_store(ptr %p, i32 %v) {
 ; CHECK-LABEL: @test_store
 ; CHECK: ptrtoint ptr %q to i64
@@ -41,7 +38,6 @@ define void @test_store(ptr %p, i32 %v) {
   ret void
 }
 
-; Test 3: Volatile accesses are real dereferences and must be instrumented.
 define i32 @test_volatile_load(ptr %p) {
 ; CHECK-LABEL: @test_volatile_load
 ; CHECK: call void @__flexfat_report_oob
@@ -60,7 +56,6 @@ define void @test_volatile_store(ptr %p, i32 %v) {
   ret void
 }
 
-; Test 4: Runtime functions (__flexfat_*) should NOT be instrumented
 define void @__flexfat_internal_test(ptr %p) {
 ; CHECK-LABEL: @__flexfat_internal_test
 ; CHECK-NOT: call void @__flexfat_report_oob
@@ -68,8 +63,6 @@ define void @__flexfat_internal_test(ptr %p) {
   ret void
 }
 
-; Test 5: complete-width checking remains available only through the explicit
-; whole-access option.
 define i8 @test_load_i8(ptr %p) {
 ; CHECK-LABEL: @test_load_i8
 ; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %q to i64
@@ -83,7 +76,6 @@ define i8 @test_load_i8(ptr %p) {
   ret i8 %val
 }
 
-; Test 6: whole-access mode extends an i64 store through all eight bytes.
 define void @test_store_i64(ptr %p, i64 %v) {
 ; CHECK-LABEL: @test_store_i64
 ; CHECK: %[[PTR_INT:.*]] = ptrtoint ptr %q to i64
@@ -97,7 +89,6 @@ define void @test_store_i64(ptr %p, i64 %v) {
   ret void
 }
 
-; Test 7: AtomicRMW should be instrumented
 define i32 @test_atomic_rmw(ptr %p) {
 ; CHECK-LABEL: @test_atomic_rmw
 ; CHECK: call void @__flexfat_report_oob
@@ -107,7 +98,6 @@ define i32 @test_atomic_rmw(ptr %p) {
   ret i32 %old
 }
 
-; Test 8: AtomicCmpXchg should be instrumented
 define { i32, i1 } @test_atomic_cmpxchg(ptr %p) {
 ; CHECK-LABEL: @test_atomic_cmpxchg
 ; CHECK: call void @__flexfat_report_oob
@@ -117,7 +107,6 @@ define { i32, i1 } @test_atomic_cmpxchg(ptr %p) {
   ret { i32, i1 } %val
 }
 
-; Test 9: Multiple accesses in one function
 define void @test_multiple(ptr %p, ptr %q) {
 ; CHECK-LABEL: @test_multiple
 ; CHECK: call void @__flexfat_report_oob
@@ -131,7 +120,6 @@ define void @test_multiple(ptr %p, ptr %q) {
   ret void
 }
 
-; Test 10: nosanitize suppresses instrumentation.
 define i32 @test_nosanitize(ptr %p) {
 ; CHECK-LABEL: @test_nosanitize
 ; CHECK-NOT: call void @__flexfat_report_oob

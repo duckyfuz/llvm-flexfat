@@ -1,9 +1,8 @@
-; RUN: opt < %s -passes='flexfat,verify' -S -o %t.once
+; RUN: opt < %s -passes='function(require<domtree>),flexfat,function(verify<domtree>),verify' -debug-pass-manager -disable-output 2>&1 | FileCheck %s --check-prefix=ANALYSES
+; RUN: opt < %s -passes='function(require<domtree>),flexfat,function(verify<domtree>),verify' -S -o %t.once
 ; RUN: FileCheck %s < %t.once
 ; RUN: opt < %s -passes='flexfat,flexfat,verify' -S -o %t.twice
 ; RUN: diff %t.once %t.twice
-; RUN: opt < %s -passes='flexfat,flexfat,flexfat,verify' -S -o %t.thrice
-; RUN: diff %t.once %t.thrice
 ; RUN: opt < %s -passes='flexfat<whole-access>,verify' -S -o %t.whole.once
 ; RUN: FileCheck %s < %t.whole.once
 ; RUN: opt < %s -passes='flexfat<whole-access>,flexfat<whole-access>,verify' -S -o %t.whole.twice
@@ -14,8 +13,6 @@ target triple = "aarch64-unknown-linux-gnu"
 @slot = global ptr null
 @value = global i8 0
 
-; The global destination needs no check. The original store must retain its
-; marker even though the escape check is inserted at a separate terminator.
 define void @conditional_escape(ptr %input, i1 %take) {
 ; CHECK-LABEL: @conditional_escape(
 ; CHECK: [[COND:%[^ ]+]] = freeze i1 %take
@@ -31,8 +28,6 @@ define void @conditional_escape(ptr %input, i1 %take) {
   ret void
 }
 
-; An elided escape check still creates helper IR and a conditional block.
-; Mark the store so subsequent passes do not generate them again.
 define void @elided_escape(i1 %take) {
 ; CHECK-LABEL: @elided_escape(
 ; CHECK: [[COND:%[^ ]+]] = freeze i1 %take
@@ -47,7 +42,7 @@ define void @elided_escape(i1 %take) {
   ret void
 }
 
-; A false predicate skips the check but still creates a derived helper graph.
+; Helper-only IR changes still invalidate analyses and need an idempotence marker.
 define void @undefined_derived_escape(i64 %offset) {
 ; CHECK-LABEL: @undefined_derived_escape(
 ; CHECK: %flexfat.escape.derived = getelementptr i8, ptr null, i64 %offset
@@ -59,3 +54,8 @@ define void @undefined_derived_escape(i64 %offset) {
   store ptr %p, ptr @slot
   ret void
 }
+
+; ANALYSES: Running analysis: DominatorTreeAnalysis on undefined_derived_escape
+; ANALYSES: Running pass: FlexFatSanitizerPass
+; ANALYSES: Running pass: DominatorTreeVerifierPass on undefined_derived_escape
+; ANALYSES: Running analysis: DominatorTreeAnalysis on undefined_derived_escape

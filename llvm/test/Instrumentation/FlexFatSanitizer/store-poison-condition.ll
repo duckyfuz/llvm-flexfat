@@ -11,8 +11,6 @@ target triple = "aarch64-unknown-linux-gnu"
 @value = global i8 0
 @slot = global ptr null
 
-; Storing poison is legal. Even an elided escape check must not introduce a
-; poison branch. Keep the original select and store intact.
 define void @poison_global() {
 ; CHECK-LABEL: @poison_global(
 ; CHECK: %p = select i1 poison, ptr undef, ptr @value
@@ -27,8 +25,7 @@ define void @poison_global() {
   ret void
 }
 
-; Freezing only the final branch predicate would still allow poison to reach
-; speculative metadata loads. Both check-only selects need the same condition.
+; One shared freeze must protect both metadata addressing and branch control.
 define void @poison_dynamic(ptr %input) {
 ; CHECK-LABEL: @poison_dynamic(
 ; CHECK: %p = select i1 poison, ptr undef, ptr %q
@@ -45,7 +42,6 @@ define void @poison_dynamic(ptr %input) {
   ret void
 }
 
-; Separate uses of undef can choose different arms without a shared freeze.
 define void @undef_dynamic(ptr %input) {
 ; CHECK-LABEL: @undef_dynamic(
 ; CHECK: %p = select i1 undef, ptr poison, ptr %q

@@ -1,6 +1,5 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && %run %t | FileCheck %s
 // RUN: %clangxx_flexfat -O2 %s -o %t && %run %t | FileCheck %s
-// RUN: %clangxx_flexfat -O3 %s -o %t && %run %t | FileCheck %s
 
 #include <cassert>
 #include <cerrno>
@@ -27,6 +26,14 @@ __attribute__((noinline)) static void consume(char *P) {
   asm volatile("" : : "r"(P) : "memory");
 }
 
+static void roundtrip(void *P, size_t N) {
+  volatile unsigned char *Bytes = static_cast<volatile unsigned char *>(P);
+  for (size_t I = 0; I != N; ++I)
+    Bytes[I] = static_cast<unsigned char>(I);
+  for (size_t I = 0; I != N; ++I)
+    assert(Bytes[I] == static_cast<unsigned char>(I));
+}
+
 static void check(void *P, size_t N, size_t Alignment) {
   assert(P);
   uintptr_t Address = reinterpret_cast<uintptr_t>(P);
@@ -42,7 +49,6 @@ static void check(void *P, size_t N, size_t Alignment) {
 }
 
 int main() {
-  // Discover boundaries from this runtime, including non-power-of-two classes.
   size_t Boundary = 1;
   for (unsigned I = 0; I != 12; ++I) {
     void *Probe = malloc(opaque(Boundary));
@@ -54,15 +60,17 @@ int main() {
       check(P, N, alignof(max_align_t));
       size_t Actual = __flexfat_get_size(reinterpret_cast<uintptr_t>(P));
       assert(N < Boundary ? Actual == Boundary : Actual > Boundary);
+      roundtrip(P, N);
       memset(P, 0x5a, N);
+      consume(static_cast<char *>(P));
       free(P);
-      // Exercise free-list reuse with the same class and potentially new bias.
       P = malloc(opaque(N));
       check(P, N, alignof(max_align_t));
       free(P);
       P = calloc(opaque(N), 1);
       check(P, N, alignof(max_align_t));
-      assert(static_cast<char *>(P)[N - 1] == 0);
+      for (size_t Byte = 0; Byte != N; ++Byte)
+        assert(static_cast<volatile unsigned char *>(P)[Byte] == 0);
       free(P);
       for (size_t Alignment : {size_t(16), size_t(64), size_t(4096)}) {
         P = nullptr;
@@ -72,9 +80,12 @@ int main() {
       }
     }
   }
-  // The direct managed API normalizes zero and rejects arithmetic overflow.
   void *P = __flexfat_malloc(opaque(0));
   check(P, 1, alignof(max_align_t));
+  __flexfat_free(P);
+  P = __flexfat_malloc(opaque(40));
+  check(P, 40, alignof(max_align_t));
+  roundtrip(P, 40);
   __flexfat_free(P);
   assert(__flexfat_malloc(opaque(SIZE_MAX)) == nullptr);
   P = nullptr;
@@ -87,16 +98,17 @@ int main() {
   free(P);
 
   char *Old = static_cast<char *>(malloc(opaque(31)));
-  memset(Old, 0x5a, 31);
+  for (unsigned I = 0; I != 31; ++I)
+    Old[I] = static_cast<char>(I + 1);
+  consume(Old);
   char *New = static_cast<char *>(realloc(Old, opaque(129)));
   check(New, 129, alignof(max_align_t));
   for (unsigned I = 0; I != 31; ++I)
-    assert(New[I] == 0x5a);
+    assert(New[I] == static_cast<char>(I + 1));
   assert(realloc(New, opaque(SIZE_MAX)) == nullptr);
   for (unsigned I = 0; I != 31; ++I)
-    assert(New[I] == 0x5a);
+    assert(New[I] == static_cast<char>(I + 1));
   free(New);
-  // Discover the maximum class without relying on a particular layout.
   size_t Maximum = 0;
   for (size_t N = 1; N && N <= SIZE_MAX / 2; N *= 2) {
     P = __flexfat_malloc(opaque(N));

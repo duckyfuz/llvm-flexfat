@@ -8,8 +8,6 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 @reader_alias = alias i32 (ptr), ptr @reader
 declare i32 @personality(...)
 
-; The caller deliberately precedes the callee. Keep the callee uninlined so
-; dead-call elimination has to respect its updated call-site attributes.
 define void @caller(ptr %p) "no-sanitize-flexfat" {
 ; CHECK-LABEL: define void @caller(
 ; CHECK: call i32 @reader(ptr %p) #[[CALL:[0-9]+]]
@@ -48,7 +46,6 @@ define i32 @reader(ptr %p) #2 {
   ret i32 %v
 }
 
-; Excluded callees and their calls must retain their original attributes.
 define i32 @excluded(ptr %p) #0 "no-sanitize-flexfat" {
 ; CHECK-LABEL: define i32 @excluded(
 ; CHECK-NOT: load i8

@@ -28,7 +28,6 @@ define void @store_vector(ptr %p, <vscale x 2 x i32> %v) {
   ret void
 }
 
-; Statically excluded pointers must not introduce unused vscale computations.
 define <vscale x 4 x i32> @stack_vector(<vscale x 4 x i32> %v) {
 ; CHECK-LABEL: define <vscale x 4 x i32> @stack_vector(
 ; CHECK-NOT: call i64 @llvm.vscale

@@ -3,8 +3,6 @@
 // RUN: %clang -O2 %flexfat_config_flags -c %s -o %t.o
 // RUN: %clangxx_flexfat_tbi -fsanitize-flexfat-tbi=packed-shadow %t.o -o %t && %run %t
 
-// This oracle is uninstrumented: runtime generations must match an independent
-// sum of per-class slot counts, including both ends of every class range.
 #include "flexfat/flexfat_config.h"
 #include "flexfat/flexfat_interface.h"
 #include <assert.h>

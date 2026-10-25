@@ -5,8 +5,6 @@
 
 target triple = "aarch64-unknown-linux-gnu"
 
-; Optimizer-created temporary spills may carry undef through loop PHIs.
-; Only the sanitizer's check operands are sanitized; the original store stays.
 define void @loop_spill(ptr %slot, ptr %input, i1 %update, i32 %count) {
 ; CHECK-LABEL: @loop_spill(
 ; CHECK: phi i1 [ false, %entry ],
@@ -42,7 +40,6 @@ define void @poison_select(ptr %slot, ptr %input, i1 %take) {
   ret void
 }
 
-; Undefined stored values do not excuse an invalid destination.
 define void @bad_destination(ptr %input) {
 ; CHECK-LABEL: @bad_destination(
 ; CHECK: call void @__flexfat_report_oob
@@ -52,8 +49,7 @@ define void @bad_destination(ptr %input) {
   ret void
 }
 
-; A derived check-only pointer must not turn the substituted null into poison
-; through an inbounds promise. Defined paths retain the original provenance.
+; Check-only GEPs must drop inbounds when substituting null for undef.
 define void @derived_spill(ptr %slot, ptr %input, i1 %take, i64 %offset) {
 ; CHECK-LABEL: @derived_spill(
 ; CHECK: [[SOURCE_BASE:%flexfat.base[^ ]*]] = phi ptr [ null, %undefined ], [ {{%[^ ]+}}, %defined ]
@@ -80,7 +76,6 @@ join:
   ret void
 }
 
-; Freeze produces a defined arbitrary value: it must still be checked.
 define void @frozen(ptr %slot, ptr %input, i1 %take) {
 ; CHECK-LABEL: @frozen(
 ; CHECK: ptrtoint ptr %p to i64

@@ -1,3 +1,7 @@
+; RUN: not opt -passes='flexfat<mode=fast>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+; RUN: not opt -passes='flexfat<instrumentation-point=optimizer-last>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+; RUN: not opt -passes='flexfat<post-cleanup=early-cse>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+; REMOVED: invalid FlexFatSanitizer pass parameter
 ; RUN: opt -passes='flexfat<tbi=last-byte;tbi=off;whole-access;no-whole-access>' -S %s | FileCheck %s --check-prefix=OFF
 ; RUN: opt -passes='flexfat<tbi=last-byte;no-share-contained-geometry>,verify' -S %s | FileCheck %s --check-prefix=ORDINARY
 ; RUN: not opt -passes='flexfat<tbi-ordinary-loads>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
@@ -10,7 +14,6 @@
 ; ORDINARY: load i8, ptr
 ; ORDINARY-NOT: load atomic
 ; ORDINARY: call void @__flexfat_report_temporal_v3
-; REMOVED: invalid FlexFatSanitizer pass parameter
 ; ACTIVE: FlexFat temporal options require active TBI
 
 target triple = "aarch64-unknown-linux-gnu"

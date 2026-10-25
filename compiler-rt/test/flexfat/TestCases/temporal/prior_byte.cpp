@@ -5,8 +5,6 @@
 // RUN: not %run %t adjacent-tag 2>&1 | FileCheck %s
 // RUN: not %run %t memset 2>&1 | FileCheck %s
 // CHECK: out-of-bounds
-// A slot's generation lives at base - 1, in the reserved final byte of the
-// preceding slot. The first aligned slot of each region is never allocated.
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -42,8 +40,6 @@ int main(int argc, char **argv) {
   uintptr_t region = __flexfat::GetRegionStart(__flexfat::GetRegionIndex(raw_p));
   assert(base_p >= region + size && base_p - 1 >= region);
   assert(base_q == base_p + size);
-  // The first region uses a guard page; later regions use the previous
-  // region's reserved final byte. All are safe zero-tag locations.
   for (uintptr_t i = 0; i < __flexfat::kNumSizeClasses; ++i)
     assert(raw_byte(__flexfat::GetRegionStart(i) - 1) == 0);
   assert(raw_byte(base_p - 1) == ((uintptr_t)p >> 56));

@@ -1,22 +1,24 @@
 // RUN: %clangxx_flexfat -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
 // REQUIRES: flexfat-custom-config
 
-// Reduced 483.xalancbmk-style case: retain the original 48-byte allocation as
-// the companion base and prove that a 24-byte overread is not mistaken for a
-// valid pointer in the following custom-layout slot.
-
 #include <cstdlib>
+#include <cassert>
+#include <cstdint>
+extern "C" uintptr_t __flexfat_get_size(uintptr_t);
 
 __attribute__((noinline)) static void consume(char *p) {
   asm volatile("" : : "r"(p) : "memory");
 }
 
 int main() {
-  volatile size_t runtimeSize = 48;
+  volatile size_t runtimeSize = 47;
   char *base = static_cast<char *>(std::malloc(runtimeSize));
   if (!base)
     return 1;
-  consume(base + runtimeSize + 24);
+  size_t slot = __flexfat_get_size((uintptr_t)base);
+  assert(slot == 48);
+  // Retain the original companion base across an escape into the next slot.
+  consume(base + slot + 24);
   return 0;
 }
 

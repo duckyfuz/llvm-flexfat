@@ -5,7 +5,6 @@
 // RUN: not %run %t.launcher %t 2>&1 | FileCheck %s
 // CHECK: initialization failed: PR_SET_TAGGED_ADDR_CTRL, errno=1
 
-// Run an executable under a filter denying tagged-address prctl activation.
 #include <assert.h>
 #include <errno.h>
 #include <stddef.h>

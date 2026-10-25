@@ -18,7 +18,6 @@
 // RUN: not %clang_cc1 -triple aarch64-linux-gnu -target-abi ilp32 -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -emit-llvm -o %t.ll %s 2>&1 | FileCheck %s --check-prefix=TARGET
 // TARGET: unsupported option '-fsanitize-flexfat-tbi=last-byte' for target
 
-
 // RUN: not %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=invalid -emit-llvm -o %t.ll %s 2>&1 | FileCheck %s --check-prefix=INVALID
 // INVALID: invalid value 'invalid' in '-fsanitize-flexfat-tbi=invalid'
 

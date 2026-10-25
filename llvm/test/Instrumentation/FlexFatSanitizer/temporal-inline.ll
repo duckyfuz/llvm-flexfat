@@ -5,8 +5,6 @@
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
-; The spatial marker must not suppress temporal coverage. There is one failure
-; branch and no managed/unmanaged shadow-address branch.
 define i8 @access(ptr %p) {
 ; CHECK-LABEL: define i8 @access(
 ; CHECK: [[TAGGED:%.*]] = ptrtoint ptr %p to i64
@@ -85,7 +83,7 @@ define i8 @unmanaged() {
   ret i8 %v
 }
 
-; An incoming old constructor cannot suppress the current ABI reference.
+; An old constructor must not suppress the current storage ABI reference.
 define internal void @__flexfat_tbi_ctor() {
   call void @__flexfat_tbi_abi_v1()
   ret void

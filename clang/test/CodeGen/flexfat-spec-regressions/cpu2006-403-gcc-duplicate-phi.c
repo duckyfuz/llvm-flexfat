@@ -6,10 +6,7 @@
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=prior-byte -emit-llvm -o /dev/null %s
 // RUN: %if !flexfat-custom-config %{ %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=shadow -emit-llvm -o /dev/null %s %}
 
-// SPEC CPU2006 403.gcc, explow.c: two switch cases exit a loop through the
-// same cleanup block. FlexFat must give duplicate predecessor edges compatible
-// companion PHI values so that the following SimplifyCFG pass can merge them.
-
+// SPEC 403.gcc: duplicate switch edges need compatible companion PHIs for SimplifyCFG.
 typedef struct node {
   int code;
   struct node *next;

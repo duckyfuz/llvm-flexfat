@@ -8,8 +8,6 @@ target triple = "aarch64-unknown-linux-gnu"
 declare ptr @malloc(i64)
 declare void @sink(ptr)
 
-; A statically known one-past dereference must retain the dynamic check,
-; including for a one-byte whole access which used to be elided in shadow mode.
 define i8 @one_past_read() {
 ; CHECK-LABEL: define i8 @one_past_read(
 ; CHECK: %end = getelementptr i8
@@ -22,7 +20,6 @@ define i8 @one_past_read() {
   ret i8 %v
 }
 
-; Legal requested-object one-past escapes remain statically valid.
 define void @one_past_escape() {
 ; CHECK-LABEL: define void @one_past_escape(
 ; CHECK-NOT: __flexfat_report_oob
@@ -33,7 +30,6 @@ define void @one_past_escape() {
   ret void
 }
 
-; Scalable accesses must also exclude the trailing byte in every mode.
 define <vscale x 4 x i32> @scalable_read(ptr %p) {
 ; CHECK-LABEL: define <vscale x 4 x i32> @scalable_read(
 ; CHECK: call i64 @llvm.vscale.i64()
