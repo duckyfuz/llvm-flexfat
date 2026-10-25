@@ -7,7 +7,7 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 define i64 @scan(ptr %p, i64 %n) {
 ; CHECK-LABEL: @scan(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
 entry:
   %empty = icmp eq i64 %n, 0
@@ -32,7 +32,7 @@ zero:
 define void @negative(ptr %p, i64 %n) {
 ; CHECK-LABEL: @negative(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   %empty = icmp eq i64 %n, 0
   br i1 %empty, label %zero, label %ph
@@ -56,7 +56,7 @@ declare void @may_free(ptr)
 define void @unsupported(ptr %p, i64 %n) {
 ; CHECK-LABEL: @unsupported(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   br label %body
 body:
@@ -75,7 +75,7 @@ declare ptr @malloc(i64)
 define i64 @static_containment() {
 ; CHECK-LABEL: @static_containment(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   %p = call ptr @malloc(i64 64)
   br label %body
@@ -111,7 +111,7 @@ exit:
 define i64 @volatile_scan(ptr %p, i64 %n) {
 ; CHECK-LABEL: @volatile_scan(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
 entry:
   %empty = icmp eq i64 %n, 0
@@ -137,7 +137,7 @@ zero:
 define i64 @fixed(ptr %p, i64 %n) {
 ; CHECK-LABEL: @fixed(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
 entry:
   %empty = icmp eq i64 %n, 0
@@ -163,7 +163,7 @@ zero:
 define void @volatile_negative(ptr %p, i64 %n) {
 ; CHECK-LABEL: @volatile_negative(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   %empty = icmp eq i64 %n, 0
   br i1 %empty, label %zero, label %ph
@@ -187,7 +187,7 @@ zero:
 define void @atomic_loop(ptr %p, i64 %n) {
 ; CHECK-LABEL: @atomic_loop(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   br label %body
 body:
@@ -202,7 +202,7 @@ exit:
 define void @conditional(ptr %p, i64 %n, i1 %enabled) {
 ; CHECK-LABEL: @conditional(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   br label %body
 body:
@@ -222,7 +222,7 @@ exit:
 define void @two_roots(ptr %p, ptr %r, i64 %n) {
 ; CHECK-LABEL: @two_roots(
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: call void @__flexfat_report_temporal_v3
   %empty = icmp eq i64 %n, 0
   br i1 %empty, label %exit, label %ph

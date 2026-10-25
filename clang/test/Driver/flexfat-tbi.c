@@ -25,16 +25,10 @@
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-check-whole-access -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
 // RUN: not %clang -target aarch64-linux-gnu -fno-sanitize-flexfat-check-whole-access -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-share-contained-geometry -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
 // DEPENDENCY: only allowed with '-fsanitize=flexfat'
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-share-contained-geometry -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize-flexfat-share-contained-geometry -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
 // ACTIVE: only allowed with '-fsanitize-flexfat-tbi=<active mode>'
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=shadow -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ORDINARY
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=packed-shadow -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ORDINARY
-// ORDINARY: '-fsanitize-flexfat-tbi-ordinary-loads' not allowed with '-fsanitize-flexfat-tbi=
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=invalid -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=INVALID
 // INVALID: unsupported argument 'invalid' to option '-fsanitize-flexfat-tbi='
 // RUN: not %clang -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED
@@ -50,7 +44,10 @@
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-prior-byte -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-check-whole-access -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
 // RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-share-contained-geometry -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-ordinary-loads -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
 // LLVM-REMOVED: Unknown command line argument
+
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED-LOADS
+// RUN: not %clang -target aarch64-linux-gnu -fno-sanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED-LOADS
+// REMOVED-LOADS: unknown argument:
 
 int main(void) { return 0; }

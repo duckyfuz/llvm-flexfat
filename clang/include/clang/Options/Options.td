@@ -2551,11 +2551,6 @@ defm sanitize_flexfat_share_contained_geometry : BoolOption<"f", "sanitize-flexf
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
   NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
   BothFlags<[], [ClangOption], " FlexFat contained-allocation geometry sharing">>, Group<f_clang_Group>;
-defm sanitize_flexfat_tbi_ordinary_loads : BoolOption<"f", "sanitize-flexfat-tbi-ordinary-loads",
-  CodeGenOpts<"SanitizeFlexFatTBIOrdinaryLoads">, DefaultFalse,
-  PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
-  NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
-  BothFlags<[], [ClangOption], " ordinary FlexFat generation loads">>, Group<f_clang_Group>;
 defm sanitize_memory_use_after_dtor : BoolOption<"f", "sanitize-memory-use-after-dtor",
   CodeGenOpts<"SanitizeMemoryUseAfterDtor">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,

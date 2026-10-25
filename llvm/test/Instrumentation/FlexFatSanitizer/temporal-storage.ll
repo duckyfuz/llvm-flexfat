@@ -18,22 +18,22 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
 define i8 @twice(ptr %p) {
 ; POW2-LABEL: define i8 @twice(
-; POW2: [[GEN:%.*]] = load{{( atomic)?}} i8, ptr {{.*}}{{( monotonic)?}}, align 1
+; POW2: [[GEN:%.*]] = load i8, ptr {{.*}}, align 1
 ; POW2-NEXT: [[SHIFT:%.*]] = lshr i64 {{.*}}, 56
 ; POW2-NEXT: [[TAG:%.*]] = trunc i64 [[SHIFT]] to i8
 ; POW2-NEXT: [[MATCH:%.*]] = icmp eq i8 [[TAG]], [[GEN]]
 ; POW2-NEXT: [[FAIL:%.*]] = xor i1 [[MATCH]], true
 ; POW2-NEXT: br i1 [[FAIL]]
 ; POW2: %a = load volatile i8, ptr %p
-; POW2: load{{( atomic)?}} i8, ptr {{.*}}{{( monotonic)?}}, align 1
+; POW2: load i8, ptr {{.*}}, align 1
 ; POW2: %b = load volatile i8, ptr %p
 ; COMMON-LABEL: define i8 @twice(
 ; COMMON: [[ENTRY:%flexfat.metadata]] = inttoptr
-; COMMON: [[FIRST:%flexfat.generation]] = load{{( atomic)?}} i8, ptr [[ENTRY]]{{( monotonic| acquire)?}}, align 1
+; COMMON: [[FIRST:%flexfat.generation]] = load i8, ptr [[ENTRY]], align 1
 ; COMMON: icmp eq i8 {{.*}}, [[FIRST]]
 ; COMMON: call void @__flexfat_report_temporal_v3
 ; COMMON: %a = load volatile i8, ptr %p
-; COMMON: [[SECOND:%flexfat.generation[0-9]*]] = load{{( atomic)?}} i8, ptr [[ENTRY]]{{( monotonic| acquire)?}}, align 1
+; COMMON: [[SECOND:%flexfat.generation[0-9]*]] = load i8, ptr [[ENTRY]], align 1
 ; COMMON: icmp eq i8 {{.*}}, [[SECOND]]
 ; COMMON: call void @__flexfat_report_temporal_v3
 ; COMMON: %b = load volatile i8, ptr %p

@@ -1834,20 +1834,16 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
                      OPT_fsanitize_flexfat_check_whole_access,
                      OPT_fno_sanitize_flexfat_check_whole_access,
                      OPT_fsanitize_flexfat_share_contained_geometry,
-                     OPT_fno_sanitize_flexfat_share_contained_geometry,
-                     OPT_fsanitize_flexfat_tbi_ordinary_loads,
-                     OPT_fno_sanitize_flexfat_tbi_ordinary_loads)) {
+                     OPT_fno_sanitize_flexfat_share_contained_geometry)) {
     if (!LangOpts->Sanitize.has(SanitizerKind::FlexFat))
       Diags.Report(diag::err_drv_argument_only_allowed_with)
           << A->getAsString(Args) << "-fsanitize=flexfat";
   }
   llvm::FlexFatTBIMode FlexFatTBI = Opts.getSanitizeFlexFatTBI();
-  for (const Arg *A :
-       {Args.getLastArg(OPT_fsanitize_flexfat_share_contained_geometry,
-                        OPT_fno_sanitize_flexfat_share_contained_geometry),
-        Args.getLastArg(OPT_fsanitize_flexfat_tbi_ordinary_loads,
-                        OPT_fno_sanitize_flexfat_tbi_ordinary_loads)}) {
-    if (A && FlexFatTBI == llvm::FlexFatTBIMode::Off)
+  if (const Arg *A = Args.getLastArg(
+          OPT_fsanitize_flexfat_share_contained_geometry,
+          OPT_fno_sanitize_flexfat_share_contained_geometry)) {
+    if (FlexFatTBI == llvm::FlexFatTBIMode::Off)
       Diags.Report(diag::err_drv_argument_only_allowed_with)
           << A->getAsString(Args) << "-fsanitize-flexfat-tbi=<active mode>";
   }
@@ -1858,11 +1854,6 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
         Args.getLastArgValue(OPT_target_abi) == "ilp32")
       Diags.Report(diag::err_drv_unsupported_opt_for_target)
           << A->getAsString(Args) << T.str();
-    if (Opts.SanitizeFlexFatTBIOrdinaryLoads &&
-        FlexFatTBI != llvm::FlexFatTBIMode::LastByte &&
-        FlexFatTBI != llvm::FlexFatTBIMode::PriorByte)
-      Diags.Report(diag::err_drv_argument_not_allowed_with)
-          << "-fsanitize-flexfat-tbi-ordinary-loads" << A->getAsString(Args);
   }
 
   // At O0 we want to fully disable inlining outside of cases marked with

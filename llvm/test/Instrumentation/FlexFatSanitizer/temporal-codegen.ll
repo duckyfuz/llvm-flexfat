@@ -16,7 +16,7 @@ define i8 @read_byte(ptr %p) {
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
 ; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
-; CHECK: {{ldrb|ldarb}}
+; CHECK: ldrb
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
@@ -28,7 +28,7 @@ define i8 @read_byte(ptr %p) {
 ; CUSTOM-LABEL: read_byte:
 ; CUSTOM: umulh
 ; CUSTOM: mul
-; CUSTOM: ldarb
+; CUSTOM: ldrb
 ; POW2-LABEL: read_byte:
 ; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; POW2: ldrb

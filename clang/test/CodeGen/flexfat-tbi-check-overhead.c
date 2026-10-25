@@ -17,7 +17,7 @@ int wide(volatile int *p) {
 // POINT: icmp uge i64
 // POINT: call void @__flexfat_report_oob
 // POINT-NEXT: unreachable
-// POINT: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
+// POINT: load i8, ptr %flexfat.metadata
 // POINT: call void @__flexfat_report_temporal_v3
 // POINT: load volatile i32
 // WHOLE-LABEL: define{{.*}} @wide(
@@ -33,7 +33,7 @@ unsigned char indexed(unsigned long n) {
 // LOOP: for.body:
 // LOOP-NOT: flexfat.metadata.address
 // LOOP: call void @__flexfat_report_oob
-// LOOP: load atomic i8, ptr %flexfat.metadata {{acquire|monotonic}}
+// LOOP: load i8, ptr %flexfat.metadata
 // LOOP: load volatile i8
   unsigned char *p = malloc(64);
   unsigned char value = 0;

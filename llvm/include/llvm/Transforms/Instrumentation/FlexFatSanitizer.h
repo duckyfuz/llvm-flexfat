@@ -18,7 +18,6 @@ struct FlexFatSanitizerOptions {
   FlexFatTBIMode TBI = FlexFatTBIMode::Off;
   bool CheckWholeAccess = false;
   bool ShareContainedGeometry = true;
-  bool TBIOrdinaryLoads = false;
 
   bool hasTBI() const { return TBI != FlexFatTBIMode::Off; }
 

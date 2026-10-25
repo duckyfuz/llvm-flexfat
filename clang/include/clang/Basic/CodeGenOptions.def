@@ -268,7 +268,6 @@ ENUM_CODEGENOPT(SanitizeFlexFatTBI, llvm::FlexFatTBIMode, 3,
                 llvm::FlexFatTBIMode::Off, Benign)
 CODEGENOPT(SanitizeFlexFatCheckWholeAccess, 1, 0, Benign)
 CODEGENOPT(SanitizeFlexFatShareContainedGeometry, 1, 1, Benign)
-CODEGENOPT(SanitizeFlexFatTBIOrdinaryLoads, 1, 0, Benign)
 CODEGENOPT(SanitizeMemoryTrackOrigins, 2, 0, Benign) ///< Enable tracking origins in
                                                      ///< MemorySanitizer
 ENUM_CODEGENOPT(SanitizeAddressDtor, AsanDtorKind, 2,

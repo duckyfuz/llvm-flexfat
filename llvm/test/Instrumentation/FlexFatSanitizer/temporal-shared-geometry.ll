@@ -19,19 +19,19 @@ define i64 @same_pointer(ptr %p) {
 ; CHECK-LABEL: @same_pointer(
 ; CHECK: [[RAW:%.*]] = and i64 {{.*}}, 72057594037927935
 ; CHECK: [[ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
-; CHECK: load atomic i8, ptr [[ENTRY]] {{acquire|monotonic}}
+; CHECK: load i8, ptr [[ENTRY]]
 ; CHECK: load volatile i64, ptr %p
 ; CHECK-NOT: load i64, ptr
-; CHECK: load atomic i8, ptr [[ENTRY]] {{acquire|monotonic}}
+; CHECK: load i8, ptr [[ENTRY]]
 ; CHECK: load volatile i64, ptr %p
 ; CUSTOM-LABEL: @same_pointer(
 ; CUSTOM: mul i128
 ; CUSTOM: %flexfat.slot = sub i64
 ; CUSTOM: %flexfat.base.int = mul i64 %flexfat.slot,
 ; CUSTOM-NOT: mul i128
-; CUSTOM: load atomic i8
+; CUSTOM: load i8
 ; CUSTOM-NOT: mul i128
-; CUSTOM: load atomic i8
+; CUSTOM: load i8
 ; CUSTOM-NOT: mul i128
 ; CUSTOM: ret i64
   %a = load volatile i64, ptr %p
@@ -41,26 +41,26 @@ define i64 @same_pointer(ptr %p) {
 }
 
 ; A fatal spatial check proves that an arbitrary GEP is in its companion
-; slot. Both uses share that slot's geometry and retain separate acquires.
+; slot. Both uses share that slot's geometry and retain separate observations.
 define i8 @derived_pointer(ptr %p, i64 %n) {
 ; CHECK-LABEL: @derived_pointer(
 ; CHECK: [[DERIVED:%flexfat.metadata[0-9]*]] = inttoptr i64 {{.*}} to ptr
 ; CHECK: %q = getelementptr i8, ptr %p, i64 %n
 ; CHECK: call void @__flexfat_report_oob
-; CHECK: load atomic i8, ptr [[DERIVED]] {{acquire|monotonic}}
+; CHECK: load i8, ptr [[DERIVED]]
 ; CHECK: %a = load volatile i8, ptr %q
 ; CHECK-NOT: load i64, ptr
 ; CHECK-NOT: mul i128
-; CHECK: load atomic i8, ptr [[DERIVED]] {{acquire|monotonic}}
+; CHECK: load i8, ptr [[DERIVED]]
 ; CHECK: %b = load volatile i8, ptr %q
 ; CUSTOM-LABEL: @derived_pointer(
 ; CUSTOM: mul i128
 ; CUSTOM: %flexfat.metadata = inttoptr
 ; CUSTOM: %q = getelementptr i8, ptr %p, i64 %n
 ; CUSTOM: call void @__flexfat_report_oob
-; CUSTOM: load atomic i8
+; CUSTOM: load i8
 ; CUSTOM-NOT: mul i128
-; CUSTOM: load atomic i8
+; CUSTOM: load i8
 ; CUSTOM-NOT: mul i128
 ; CUSTOM: ret i8
   %q = getelementptr i8, ptr %p, i64 %n
@@ -77,7 +77,7 @@ define i8 @marked_derived(ptr %p, i64 %n) {
 ; CHECK: %q = getelementptr i8, ptr %p, i64 %n
 ; CHECK: %flexfat.metadata{{[0-9]*}} = inttoptr
 ; CHECK-NOT: call void @__flexfat_report_oob
-; CHECK: load atomic i8
+; CHECK: load i8
 ; CHECK: %v = load i8, ptr %q
   %q = getelementptr i8, ptr %p, i64 %n
   %v = load i8, ptr %q, !flexfat.instrumented !0
@@ -88,7 +88,7 @@ define i8 @marked_derived(ptr %p, i64 %n) {
 define ptr @escape_only(ptr %p, i64 %offset) {
 ; CHECK-LABEL: @escape_only(
 ; CHECK-NOT: flexfat.metadata
-; CHECK-NOT: load atomic
+; CHECK-NOT: load i8
 ; CHECK: ret ptr %q
   %q = getelementptr i8, ptr %p, i64 %offset
   ret ptr %q
@@ -99,11 +99,11 @@ define ptr @escape_only(ptr %p, i64 %offset) {
 define i8 @constant_address() {
 ; CHECK-LABEL: @constant_address(
 ; CHECK: [[CONST_ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
-; CHECK: load atomic i8, ptr [[CONST_ENTRY]] {{acquire|monotonic}}
+; CHECK: load i8, ptr [[CONST_ENTRY]]
 ; CHECK: load volatile i8, ptr inttoptr (i64 17592186044428 to ptr)
 ; CUSTOM-LABEL: @constant_address(
 ; CUSTOM: [[CONST_ENTRY:%flexfat.metadata]] = inttoptr i64 {{.*}} to ptr
-; CUSTOM: load atomic i8, ptr [[CONST_ENTRY]] {{acquire|monotonic}}
+; CUSTOM: load i8, ptr [[CONST_ENTRY]]
 ; CUSTOM: load volatile i8, ptr inttoptr (i64 17592186044428 to ptr)
   %v = load volatile i8, ptr inttoptr (i64 17592186044428 to ptr)
   ret i8 %v

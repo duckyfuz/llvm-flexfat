@@ -1,9 +1,13 @@
-; REQUIRES: !flexfat-custom-config
-; RUN: opt -passes='flexfat<tbi-ordinary-loads;tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
-; RUN: opt -passes='flexfat<tbi-ordinary-loads;tbi=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
-; RUN: opt -passes='flexfat<tbi=shadow>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
-; RUN: opt -passes='flexfat<tbi=shadow>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
-; RUN: opt -passes='flexfat<tbi=shadow>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
+; RUN: opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
+; RUN: opt -passes='flexfat<tbi=prior-byte>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata'
+; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
+; RUN: opt -passes='flexfat<tbi=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic'
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata' %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic' %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic' %}
+
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=packed-shadow>,verify' -S %s | FileCheck %s --check-prefix=RAW --implicit-check-not='load atomic' --implicit-check-not='load volatile i8, ptr %flexfat.metadata' %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=packed-shadow>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=OPT --implicit-check-not='load atomic' %}
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
@@ -14,7 +18,7 @@ declare void @may_free(ptr)
 ; of a call that can invalidate the allocation. Optimization must retain both.
 define i8 @separated(ptr %p) {
 ; RAW-LABEL: define i8 @separated(
-; RAW: [[ENTRY:%flexfat.metadata]] = inttoptr
+; RAW: [[ENTRY:%flexfat.metadata]] = {{inttoptr|getelementptr}}
 ; RAW: load i8, ptr [[ENTRY]], align 1
 ; RAW: %a = load volatile i8, ptr %p
 ; RAW: call void @may_free(ptr %p)
@@ -33,7 +37,7 @@ define i8 @separated(ptr %p) {
   ret i8 %sum
 }
 
-; With no intervening writes or calls, ordinary shadow loads can be reused.
+; With no intervening writes or calls, ordinary generation loads can be reused.
 define i8 @adjacent(ptr %p) {
 ; RAW-LABEL: define i8 @adjacent(
 ; RAW: load i8, ptr %flexfat.metadata, align 1

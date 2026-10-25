@@ -1,9 +1,9 @@
 ; The standalone instrumentation pass composes with the cleanup pipeline
 ; installed by Clang. Repeated instrumentation must remain idempotent.
 ; RUN: opt -passes='flexfat,function(early-cse<memssa>,instcombine,simplifycfg),flexfat,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s
-; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
-; RUN: opt -passes='flexfat<tbi=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
-; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
+; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=TEMPORAL
+; RUN: opt -passes='flexfat<tbi=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=TEMPORAL
+; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=TEMPORAL
 
 ; RUN: not opt -passes='flexfat<mode=fast>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
 ; RUN: not opt -passes='flexfat<mode=safe>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
@@ -25,14 +25,16 @@ define i32 @read_value(ptr %p) {
   ret i32 %v
 }
 
-; Cleanup must preserve each atomic temporal observation, including when
-; there is no intervening invalidation.
-; ATOMIC: @llvm.global_ctors = appending global [1 x
-; ATOMIC-LABEL: define i8 @twice(
-; ATOMIC: load atomic i8
-; ATOMIC: %a = load volatile i8, ptr %p
-; ATOMIC: load atomic i8
-; ATOMIC: %b = load volatile i8, ptr %p
+; Cleanup reuses adjacent ordinary generation observations. A second pass
+; remains idempotent after that reuse.
+; TEMPORAL: @llvm.global_ctors = appending global [1 x
+; TEMPORAL-LABEL: define i8 @twice(
+; TEMPORAL: load i8
+; TEMPORAL: %a = load volatile i8, ptr %p
+; TEMPORAL-NOT: load i8
+; TEMPORAL: %b = load volatile i8, ptr %p
+; TEMPORAL-NOT: load i8
+; TEMPORAL: ret i8
 define i8 @twice(ptr %p) {
   %a = load volatile i8, ptr %p, !flexfat.instrumented !0
   %b = load volatile i8, ptr %p, !flexfat.instrumented !0

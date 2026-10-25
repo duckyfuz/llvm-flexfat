@@ -5,7 +5,7 @@
 // CHECK: call void @__flexfat_report_oob
 // CHECK-NEXT: unreachable
 // CHECK: flexfat.metadata.address
-// CHECK: load atomic i8
+// CHECK: load i8
 // CHECK: load volatile i32
 // CHECK: call void @__flexfat_tbi_abi_last_byte_{{pow2_v2|custom_v1}}()
 int read_wide(volatile int *p) { return *p; }

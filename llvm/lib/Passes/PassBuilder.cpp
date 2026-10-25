@@ -1007,14 +1007,6 @@ Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
       HasTemporalOptions = true;
       Result.ShareContainedGeometry = false;
       continue;
-    } else if (Param == "tbi-ordinary-loads") {
-      HasTemporalOptions = true;
-      Result.TBIOrdinaryLoads = true;
-      continue;
-    } else if (Param == "no-tbi-ordinary-loads") {
-      HasTemporalOptions = true;
-      Result.TBIOrdinaryLoads = false;
-      continue;
     }
     return make_error<StringError>(
         formatv("invalid FlexFatSanitizer pass parameter '{}'", Param).str(),
@@ -1023,11 +1015,6 @@ Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
   if (HasTemporalOptions && !Result.hasTBI())
     return make_error<StringError>(
         "FlexFat temporal options require active TBI",
-        inconvertibleErrorCode());
-  if (Result.TBIOrdinaryLoads && Result.TBI != FlexFatTBIMode::LastByte &&
-      Result.TBI != FlexFatTBIMode::PriorByte)
-    return make_error<StringError>(
-        "FlexFat ordinary generation loads require last-byte or prior-byte TBI",
         inconvertibleErrorCode());
   return Result;
 }

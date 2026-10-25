@@ -793,7 +793,6 @@ static void addSanitizers(const Triple &TargetTriple,
     FlexFatOpts.CheckWholeAccess = CodeGenOpts.SanitizeFlexFatCheckWholeAccess;
     FlexFatOpts.ShareContainedGeometry =
         CodeGenOpts.SanitizeFlexFatShareContainedGeometry;
-    FlexFatOpts.TBIOrdinaryLoads = CodeGenOpts.SanitizeFlexFatTBIOrdinaryLoads;
 
     FlexFatSanitizerOptions SetupOpts = FlexFatOpts;
     SetupOpts.InternalModuleSetupOnly_ = true;

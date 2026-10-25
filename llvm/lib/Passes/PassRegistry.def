@@ -220,7 +220,7 @@ MODULE_PASS_WITH_PARAMS(
     "flexfat", "FlexFatSanitizerPass",
     [](FlexFatSanitizerOptions Opts) { return FlexFatSanitizerPass(Opts); },
     parseFlexFatPassOptions,
-    "tbi=off|last-byte|prior-byte|shadow|packed-shadow;whole-access;no-whole-access;share-contained-geometry;no-share-contained-geometry;tbi-ordinary-loads;no-tbi-ordinary-loads")
+    "tbi=off|last-byte|prior-byte|shadow|packed-shadow;whole-access;no-whole-access;share-contained-geometry;no-share-contained-geometry")
 MODULE_PASS_WITH_PARAMS(
     "internalize", "InternalizePass",
     [](SmallVector<std::string, 0> PreservedGVs) {

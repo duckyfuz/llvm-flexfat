@@ -706,21 +706,15 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
              options::OPT_fsanitize_flexfat_check_whole_access,
              options::OPT_fno_sanitize_flexfat_check_whole_access,
              options::OPT_fsanitize_flexfat_share_contained_geometry,
-             options::OPT_fno_sanitize_flexfat_share_contained_geometry,
-             options::OPT_fsanitize_flexfat_tbi_ordinary_loads,
-             options::OPT_fno_sanitize_flexfat_tbi_ordinary_loads)) {
+             options::OPT_fno_sanitize_flexfat_share_contained_geometry)) {
       if (!(Kinds & SanitizerKind::FlexFat))
         D.Diag(diag::err_drv_argument_only_allowed_with)
             << A->getAsString(Args) << "-fsanitize=flexfat";
     }
-    for (const Arg *A :
-         {Args.getLastArg(
-              options::OPT_fsanitize_flexfat_share_contained_geometry,
-              options::OPT_fno_sanitize_flexfat_share_contained_geometry),
-          Args.getLastArg(
-              options::OPT_fsanitize_flexfat_tbi_ordinary_loads,
-              options::OPT_fno_sanitize_flexfat_tbi_ordinary_loads)}) {
-      if (A && !needsFlexFatTBIRt())
+    if (const Arg *A = Args.getLastArg(
+            options::OPT_fsanitize_flexfat_share_contained_geometry,
+            options::OPT_fno_sanitize_flexfat_share_contained_geometry)) {
+      if (!needsFlexFatTBIRt())
         D.Diag(diag::err_drv_argument_only_allowed_with)
             << A->getAsString(Args) << "-fsanitize-flexfat-tbi=<active mode>";
     }
@@ -730,15 +724,6 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
          Args.getLastArgValue(options::OPT_mabi_EQ) == "ilp32"))
       D.Diag(diag::err_drv_unsupported_opt_for_target)
           << FlexFatModeArg->getAsString(Args) << Triple.str();
-    if (Args.hasFlag(options::OPT_fsanitize_flexfat_tbi_ordinary_loads,
-                     options::OPT_fno_sanitize_flexfat_tbi_ordinary_loads,
-                     false) &&
-        FlexFatTBI != llvm::FlexFatTBIMode::Off &&
-        FlexFatTBI != llvm::FlexFatTBIMode::LastByte &&
-        FlexFatTBI != llvm::FlexFatTBIMode::PriorByte)
-      D.Diag(diag::err_drv_argument_not_allowed_with)
-          << "-fsanitize-flexfat-tbi-ordinary-loads"
-          << FlexFatModeArg->getAsString(Args);
   }
 
   // We disable the vptr sanitizer if it was enabled by group expansion but RTTI
@@ -1373,9 +1358,7 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
        {std::pair{options::OPT_fsanitize_flexfat_check_whole_access,
                   options::OPT_fno_sanitize_flexfat_check_whole_access},
         std::pair{options::OPT_fsanitize_flexfat_share_contained_geometry,
-                  options::OPT_fno_sanitize_flexfat_share_contained_geometry},
-        std::pair{options::OPT_fsanitize_flexfat_tbi_ordinary_loads,
-                  options::OPT_fno_sanitize_flexfat_tbi_ordinary_loads}})
+                  options::OPT_fno_sanitize_flexfat_share_contained_geometry}})
     if (const Arg *A = Args.getLastArg(Enable, Disable))
       A->render(Args, CmdArgs);
 

@@ -14,11 +14,7 @@ parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
 parser.add_argument('--tbi', choices=['shadow', 'packed-shadow', 'last-byte', 'prior-byte'],
                     default='last-byte')
-parser.add_argument('--ordinary-loads', action='store_true',
-                    help='exercise the ordinary inline generation-load experiment')
 args = parser.parse_args()
-if args.ordinary_loads and args.tbi not in ('last-byte', 'prior-byte'):
-    parser.error('ordinary loads require last-byte or prior-byte TBI')
 results = []
 
 def run(cmd, failure=None):
@@ -36,8 +32,6 @@ for build in args.builds:
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
     common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi=' + args.tbi]
-    if args.ordinary_loads:
-        common += ['-fsanitize-flexfat-tbi-ordinary-loads']
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
@@ -284,7 +278,6 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
             checks += 1
 
         results.append({'build': str(build), 'storage': args.tbi, 'checks': checks,
-                        'ordinary_inline_loads': args.ordinary_loads,
                         'metadata_entry_bytes': metadata_bytes,
                         'metadata_reservation_bytes': reservation_bytes})
         print(json.dumps(results[-1], indent=2), flush=True)

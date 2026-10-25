@@ -50,7 +50,7 @@ define void @coverage(ptr %p, ptr %q, i64 %n) {
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 1, i32 {{.*}})
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 0, i32 {{.*}})
 ; CHECK: call void @llvm.memmove
-; CHECK-NOT: load atomic i8
+; CHECK-NOT: load i8
 ; CHECK-NOT: call void @__flexfat_report_temporal_v3
 ; CHECK: call void @llvm.memset
   %v = load <4 x i32>, ptr %p

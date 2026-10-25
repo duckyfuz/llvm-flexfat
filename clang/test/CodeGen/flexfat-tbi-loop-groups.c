@@ -55,21 +55,21 @@ __attribute__((noinline)) long small(const volatile long *p, long n) {
 // Loop accesses retain spatial checks and per-access generation checks.
 // CHECK-LABEL: define{{.*}} @grouped(
 // CHECK: call void @__flexfat_report_oob
-// CHECK: load atomic i8
+// CHECK: load i8
 // CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @many(
 // CHECK: call void @__flexfat_report_oob
-// CHECK: load atomic i8
+// CHECK: load i8
 // CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @two_roots(
 // CHECK: call void @__flexfat_report_oob
-// CHECK: load atomic i8
+// CHECK: load i8
 // CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @rows(
 // CHECK: call void @__flexfat_report_oob
-// CHECK: load atomic i8
+// CHECK: load i8
 // CHECK: call void @__flexfat_report_temporal_v3
 // CHECK-LABEL: define{{.*}} @small(
 // CHECK: call void @__flexfat_report_oob
-// CHECK: load atomic i8
+// CHECK: load i8
 // CHECK: call void @__flexfat_report_temporal_v3
