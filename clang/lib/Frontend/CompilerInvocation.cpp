@@ -1829,27 +1829,40 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
 #include "clang/Options/Options.inc"
 #undef CODEGEN_OPTION_WITH_MARSHALLING
 
-  for (const Arg *A : Args.filtered(options::OPT_mllvm)) {
-    // Match LLVM's option parser, which accepts one or two leading dashes.
-    StringRef Value = A->getValue();
-    if (!Value.consume_front("-"))
-      continue;
-    Value.consume_front("-");
-    if (Value == "flexfat-tbi" || Value == "flexfat-tbi=true" ||
-        Value == "flexfat-tbi=1")
-      Opts.SanitizeFlexFatTBI = true;
-    else if (Value == "flexfat-tbi=false" || Value == "flexfat-tbi=0")
-      Opts.SanitizeFlexFatTBI = false;
-  }
-
-  if (Opts.SanitizeFlexFatTBI) {
-    if (!LangOptsRef.Sanitize.has(SanitizerKind::FlexFat))
+  for (const Arg *A :
+       Args.filtered(OPT_sanitize_flexfat_tbi_EQ,
+                     OPT_fsanitize_flexfat_check_whole_access,
+                     OPT_fno_sanitize_flexfat_check_whole_access,
+                     OPT_fsanitize_flexfat_share_contained_geometry,
+                     OPT_fno_sanitize_flexfat_share_contained_geometry,
+                     OPT_fsanitize_flexfat_tbi_ordinary_loads,
+                     OPT_fno_sanitize_flexfat_tbi_ordinary_loads)) {
+    if (!LangOpts->Sanitize.has(SanitizerKind::FlexFat))
       Diags.Report(diag::err_drv_argument_only_allowed_with)
-          << "-fsanitize-flexfat-tbi" << "-fsanitize=flexfat";
+          << A->getAsString(Args) << "-fsanitize=flexfat";
+  }
+  llvm::FlexFatTBIMode FlexFatTBI = Opts.getSanitizeFlexFatTBI();
+  for (const Arg *A :
+       {Args.getLastArg(OPT_fsanitize_flexfat_share_contained_geometry,
+                        OPT_fno_sanitize_flexfat_share_contained_geometry),
+        Args.getLastArg(OPT_fsanitize_flexfat_tbi_ordinary_loads,
+                        OPT_fno_sanitize_flexfat_tbi_ordinary_loads)}) {
+    if (A && FlexFatTBI == llvm::FlexFatTBIMode::Off)
+      Diags.Report(diag::err_drv_argument_only_allowed_with)
+          << A->getAsString(Args) << "-fsanitize-flexfat-tbi=<active mode>";
+  }
+  if (FlexFatTBI != llvm::FlexFatTBIMode::Off) {
+    const Arg *A = Args.getLastArg(OPT_sanitize_flexfat_tbi_EQ);
     if (T.getArch() != llvm::Triple::aarch64 || !T.isOSLinux() ||
-        T.getEnvironment() == llvm::Triple::GNUILP32)
+        T.getEnvironment() == llvm::Triple::GNUILP32 ||
+        Args.getLastArgValue(OPT_target_abi) == "ilp32")
       Diags.Report(diag::err_drv_unsupported_opt_for_target)
-          << "-fsanitize-flexfat-tbi" << T.str();
+          << A->getAsString(Args) << T.str();
+    if (Opts.SanitizeFlexFatTBIOrdinaryLoads &&
+        FlexFatTBI != llvm::FlexFatTBIMode::LastByte &&
+        FlexFatTBI != llvm::FlexFatTBIMode::PriorByte)
+      Diags.Report(diag::err_drv_argument_not_allowed_with)
+          << "-fsanitize-flexfat-tbi-ordinary-loads" << A->getAsString(Args);
   }
 
   // At O0 we want to fully disable inlining outside of cases marked with

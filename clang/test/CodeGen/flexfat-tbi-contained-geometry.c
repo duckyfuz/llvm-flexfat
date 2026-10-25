@@ -1,5 +1,7 @@
-// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -mllvm -flexfat-tbi=true %s -o - | FileCheck %s --check-prefix=SHARED
-// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm -flexfat-share-contained-geometry=false %s -o - | FileCheck %s --check-prefix=SEPARATE
+// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte %s -o - | FileCheck %s --check-prefix=SHARED
+// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry %s -o - | FileCheck %s --check-prefix=SEPARATE
+
+// RUN: %clang -target aarch64-linux-gnu -O2 -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-share-contained-geometry -fsanitize-flexfat-share-contained-geometry %s -o - | FileCheck %s --check-prefix=SHARED
 
 extern void *malloc(unsigned long);
 

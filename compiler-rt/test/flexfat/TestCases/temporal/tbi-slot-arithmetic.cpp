@@ -1,6 +1,6 @@
 // REQUIRES: flexfat-tbi
 // RUN: %clang -O2 %flexfat_config_flags -c %s -o %t.o
-// RUN: %if !flexfat-custom-config %{ %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=shadow %t.o -o %t && %run %t %}
+// RUN: %if !flexfat-custom-config %{ %clangxx_flexfat_tbi -fsanitize-flexfat-tbi=shadow %t.o -o %t && %run %t %}
 
 // Compiled without instrumentation, with the matching generated configuration.
 #include "flexfat/flexfat_config.h"

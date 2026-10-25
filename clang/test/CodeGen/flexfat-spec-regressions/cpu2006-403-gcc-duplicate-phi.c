@@ -2,9 +2,9 @@
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -emit-llvm -o /dev/null %s
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O3 -emit-llvm -o /dev/null %s
 // REQUIRES: aarch64-registered-target
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-tbi=true -emit-llvm -o /dev/null %s
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-tbi=true -mllvm -flexfat-tbi-storage=prior-byte -emit-llvm -o /dev/null %s
-// RUN: %if !flexfat-custom-config %{ %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-tbi=true -mllvm -flexfat-tbi-storage=shadow -emit-llvm -o /dev/null %s %}
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -fsanitize-flexfat-tbi=last-byte -emit-llvm -o /dev/null %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=prior-byte -emit-llvm -o /dev/null %s
+// RUN: %if !flexfat-custom-config %{ %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=shadow -emit-llvm -o /dev/null %s %}
 
 // SPEC CPU2006 403.gcc, explow.c: two switch cases exit a loop through the
 // same cleanup block. FlexFat must give duplicate predecessor edges compatible

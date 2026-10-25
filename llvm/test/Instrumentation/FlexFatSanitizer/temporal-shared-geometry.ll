@@ -1,5 +1,5 @@
-; RUN: opt -passes='flexfat<tbi;whole-access>,verify' -S %s | FileCheck %s
-; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi;whole-access>,verify' -S %s | FileCheck %s --check-prefix=CUSTOM %}
+; RUN: opt -passes='flexfat<tbi=last-byte;whole-access>,verify' -S %s | FileCheck %s
+; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte;whole-access>,verify' -S %s | FileCheck %s --check-prefix=CUSTOM %}
 ; RUN: opt -mtriple=x86_64-linux-gnu -passes='flexfat<whole-access>,verify' -S %s | FileCheck %s --check-prefix=SPATIAL
 ; RUN: opt -passes='flexfat<whole-access>,verify' -S %s | FileCheck %s --check-prefix=SPATIAL
 

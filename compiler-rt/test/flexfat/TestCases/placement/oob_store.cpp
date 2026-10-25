@@ -1,5 +1,5 @@
-// RUN: %clangxx_flexfat -O0 -mllvm -flexfat-check-whole-access %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
-// RUN: %clangxx_flexfat -O3 -mllvm -flexfat-check-whole-access %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=MISS
+// RUN: %clangxx_flexfat -O0 -fsanitize-flexfat-check-whole-access %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
+// RUN: %clangxx_flexfat -O3 -fsanitize-flexfat-check-whole-access %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=MISS
 
 // The store is checked at O0. At O3 its effects are discarded before
 // OptimizerLastEP because the allocation is freed without being read.

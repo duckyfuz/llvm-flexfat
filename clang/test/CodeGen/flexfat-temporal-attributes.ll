@@ -1,5 +1,5 @@
 ; REQUIRES: aarch64-registered-target
-; RUN: %clang_cc1 -triple aarch64-linux-gnu -x ir -fsanitize=flexfat -fsanitize-flexfat-tbi -O2 -mllvm -print-after=flexfat -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s
+; RUN: %clang_cc1 -triple aarch64-linux-gnu -x ir -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -O2 -mllvm -print-after=flexfat -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s
 
 ; Inspect module setup before scalar-late function instrumentation. Call-site
 ; invalidation must happen here, even in callers excluded from instrumentation.

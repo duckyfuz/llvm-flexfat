@@ -6560,7 +6560,7 @@ bool ASTReader::ParseCodeGenOptions(const RecordData &Record,
     CGOpts.Name = static_cast<unsigned>(Record[Idx++]);
 #define ENUM_CODEGENOPT(Name, Type, Bits, Default, Compatibility)              \
   if constexpr (CK::Compatibility != CK::Benign)                               \
-    CGOpts.set##Name(static_cast<clang::CodeGenOptions::Type>(Record[Idx++]));
+    CGOpts.set##Name(static_cast<decltype(CGOpts.get##Name())>(Record[Idx++]));
 #define DEBUGOPT(Name, Bits, Default, Compatibility)
 #define VALUE_DEBUGOPT(Name, Bits, Default, Compatibility)
 #define ENUM_DEBUGOPT(Name, Type, Bits, Default, Compatibility)

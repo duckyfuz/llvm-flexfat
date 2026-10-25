@@ -1,5 +1,5 @@
 // REQUIRES: flexfat-tbi
-// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=last-byte %flexfat_config_flags -fno-builtin %s -o %t
+// RUN: %clangxx_flexfat_tbi -fsanitize-flexfat-tbi=last-byte %flexfat_config_flags -fno-builtin %s -o %t
 // RUN: %run %t
 // RUN: %run %t onepast
 // RUN: %run %t maps

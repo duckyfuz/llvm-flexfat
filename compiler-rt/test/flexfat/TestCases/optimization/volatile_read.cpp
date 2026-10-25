@@ -1,5 +1,5 @@
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-OOB
 
 // A volatile heap read remains observable and is checked at O0 and O2.
 

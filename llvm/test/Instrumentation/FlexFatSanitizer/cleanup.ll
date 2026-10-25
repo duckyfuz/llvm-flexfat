@@ -1,9 +1,9 @@
 ; The standalone instrumentation pass composes with the cleanup pipeline
 ; installed by Clang. Repeated instrumentation must remain idempotent.
 ; RUN: opt -passes='flexfat,function(early-cse<memssa>,instcombine,simplifycfg),flexfat,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s
-; RUN: opt -passes='flexfat<tbi;tbi-storage=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
-; RUN: opt -passes='flexfat<tbi;tbi-storage=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
-; RUN: opt -passes='flexfat<tbi>,function(early-cse<memssa>,instcombine,simplifycfg),flexfat<tbi>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
+; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
+; RUN: opt -passes='flexfat<tbi=prior-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
+; RUN: opt -passes='flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),flexfat<tbi=last-byte>,function(early-cse<memssa>,instcombine,simplifycfg),verify' -S %s | FileCheck %s --check-prefix=ATOMIC
 
 ; RUN: not opt -passes='flexfat<mode=fast>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED
 ; RUN: not opt -passes='flexfat<mode=safe>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REMOVED

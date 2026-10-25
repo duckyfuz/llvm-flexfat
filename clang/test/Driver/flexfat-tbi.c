@@ -1,60 +1,56 @@
-// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsyntax-only %s
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=1 %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm --flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm --flexfat-tbi=0 %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=false -mllvm --flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm --flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=false -mllvm -flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -mllvm -flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: not %clang -target x86_64-linux-gnu -fsanitize=flexfat -mllvm --flexfat-tbi=true -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=false -mllvm -flexfat-tbi=true %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -mllvm -flexfat-tbi=false %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: not %clang -target x86_64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize-flexfat-tbi -fsanitize-flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=TBI
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -fno-sanitize-flexfat-tbi %s 2>&1 | FileCheck %s --check-prefix=PLAIN
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=MISSING
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize=flexfat -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=MISSING
-// RUN: not %clang -target x86_64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: not %clang -target aarch64_be-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: not %clang -target arm64-apple-darwin -fsanitize=flexfat -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: not %clang -target aarch64-linux-gnu_ilp32 -fsanitize=flexfat -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD
-// TBI: "-fsanitize-flexfat-tbi"
-// TBI-NOT: libclang_rt.flexfat.a
-// TBI: "-flexfat-tbi-storage=last-byte"
-// TBI: libclang_rt.flexfat_tbi_last_byte
-// TBI-NOT: libclang_rt.flexfat.a
-// PLAIN-NOT: "-fsanitize-flexfat-tbi"
-// PLAIN: libclang_rt.flexfat
-// PLAIN-NOT: flexfat_tbi
-// MISSING: '-fsanitize-flexfat-tbi' only allowed with '-fsanitize=flexfat'
-// BAD: unsupported option '-fsanitize-flexfat-tbi' for target
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte %s 2>&1 | FileCheck %s --check-prefix=LAST
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=prior-byte %s 2>&1 | FileCheck %s --check-prefix=PRIOR
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=shadow %s 2>&1 | FileCheck %s --check-prefix=SHADOW
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-last-byte %s 2>&1 | FileCheck %s --check-prefix=LAST
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -fsanitize-flexfat-tbi-storage=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=NO-DRIVER-STORAGE
-// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-storage=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=LLVM-STORAGE-MISSING
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte -mllvm -flexfat-tbi-storage=prior-byte %s 2>&1 | FileCheck %s --check-prefix=PRIOR
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=prior-byte -mllvm -flexfat-tbi-storage=last-byte %s 2>&1 | FileCheck %s --check-prefix=LAST
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte -mllvm -flexfat-tbi-prior-byte -mllvm -flexfat-tbi-prior-byte=false %s 2>&1 | FileCheck %s --check-prefix=LAST
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-prior-byte -mllvm -flexfat-tbi-storage=last-byte %s 2>&1 | FileCheck %s --check-prefix=LAST
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=prior-byte -mllvm -flexfat-tbi-storage=shadow %s 2>&1 | FileCheck %s --check-prefix=SHADOW
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow %s 2>&1 | FileCheck %s --check-prefix=PACKED
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=shadow -mllvm -flexfat-tbi-storage=packed-shadow %s 2>&1 | FileCheck %s --check-prefix=PACKED
-// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow -mllvm -flexfat-tbi-storage=shadow %s 2>&1 | FileCheck %s --check-prefix=SHADOW
-// PACKED: "-flexfat-tbi-storage=packed-shadow"
-// PACKED: libclang_rt.flexfat_tbi_packed_shadow
-// LAST: "-flexfat-tbi-storage=last-byte"
-// LAST: libclang_rt.flexfat_tbi_last_byte
-// PRIOR: "-flexfat-tbi-storage=prior-byte"
-// PRIOR: libclang_rt.flexfat_tbi_prior_byte
-// SHADOW: "-flexfat-tbi-storage=shadow"
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=off %s 2>&1 | FileCheck %s --check-prefix=OFF
+// OFF: "-fsanitize-flexfat-tbi=off"
+// OFF: libclang_rt.flexfat.a
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte %s 2>&1 | FileCheck %s --check-prefix=LAST_BYTE
+// LAST_BYTE: "-fsanitize-flexfat-tbi=last-byte"
+// LAST_BYTE: libclang_rt.flexfat_tbi_last_byte.a
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=prior-byte %s 2>&1 | FileCheck %s --check-prefix=PRIOR_BYTE
+// PRIOR_BYTE: "-fsanitize-flexfat-tbi=prior-byte"
+// PRIOR_BYTE: libclang_rt.flexfat_tbi_prior_byte.a
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=shadow %s 2>&1 | FileCheck %s --check-prefix=SHADOW
+// SHADOW: "-fsanitize-flexfat-tbi=shadow"
 // SHADOW: libclang_rt.flexfat_tbi.a
-// NO-DRIVER-STORAGE: unknown argument: '-fsanitize-flexfat-tbi-storage=last-byte'
-// LLVM-STORAGE-MISSING: '-mllvm -flexfat-tbi-storage=last-byte' only allowed with '-fsanitize-flexfat-tbi'
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=packed-shadow %s 2>&1 | FileCheck %s --check-prefix=PACKED_SHADOW
+// PACKED_SHADOW: "-fsanitize-flexfat-tbi=packed-shadow"
+// PACKED_SHADOW: libclang_rt.flexfat_tbi_packed_shadow.a
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=off %s 2>&1 | FileCheck %s --check-prefix=OFF
+// RUN: %clang -### -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=off -fsanitize-flexfat-tbi=prior-byte %s 2>&1 | FileCheck %s --check-prefix=PRIOR_BYTE
+// RUN: not %clang -target x86_64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=TARGET
+// RUN: not %clang -target aarch64_be-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=TARGET
+// RUN: not %clang -target arm64-apple-darwin -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=TARGET
+// RUN: not %clang -target aarch64-linux-gnu_ilp32 -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=TARGET
+// TARGET: unsupported option '-fsanitize-flexfat-tbi=last-byte' for target
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-tbi=off -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-tbi=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-check-whole-access -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
+// RUN: not %clang -target aarch64-linux-gnu -fno-sanitize-flexfat-check-whole-access -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-share-contained-geometry -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=DEPENDENCY
+// DEPENDENCY: only allowed with '-fsanitize=flexfat'
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-share-contained-geometry -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize-flexfat-share-contained-geometry -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fno-sanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ACTIVE
+// ACTIVE: only allowed with '-fsanitize-flexfat-tbi=<active mode>'
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=shadow -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ORDINARY
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=packed-shadow -fsanitize-flexfat-tbi-ordinary-loads -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=ORDINARY
+// ORDINARY: '-fsanitize-flexfat-tbi-ordinary-loads' not allowed with '-fsanitize-flexfat-tbi=
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=invalid -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=INVALID
+// INVALID: unsupported argument 'invalid' to option '-fsanitize-flexfat-tbi='
+// RUN: not %clang -fsanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang -fno-sanitize-flexfat-tbi -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang -fsanitize-flexfat-check-whole-access=true -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang -fno-sanitize-flexfat-tbi=off -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// RUN: not %clang -fsanitize-flexfat-tbi-storage=last-byte -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=REMOVED
+// REMOVED: unknown argument:
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi=true -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-storage=last-byte -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-last-byte -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-prior-byte -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-check-whole-access -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-share-contained-geometry -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// RUN: not %clang -target aarch64-linux-gnu -fsanitize=flexfat -mllvm -flexfat-tbi-ordinary-loads -c %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLVM-REMOVED
+// LLVM-REMOVED: Unknown command line argument
+
 int main(void) { return 0; }

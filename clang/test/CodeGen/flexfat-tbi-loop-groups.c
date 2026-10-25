@@ -1,4 +1,4 @@
-// RUN: %clang -target aarch64-linux-gnu -O1 -fno-vectorize -fno-unroll-loops -S -emit-llvm -fsanitize=flexfat -mllvm -flexfat-tbi=true %s -o - | FileCheck %s --implicit-check-not=flexfat.fast --implicit-check-not=flexfat.trip
+// RUN: %clang -target aarch64-linux-gnu -O1 -fno-vectorize -fno-unroll-loops -S -emit-llvm -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte %s -o - | FileCheck %s --implicit-check-not=flexfat.fast --implicit-check-not=flexfat.trip
 
 extern void tick(long);
 

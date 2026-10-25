@@ -60,7 +60,7 @@ if getattr(config, "flexfat_custom_config", False):
     config.available_features.add("flexfat-custom-config")
 
 config.substitutions.append(
-    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-mllvm", "-flexfat-tbi=true"])))
+    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-fsanitize-flexfat-tbi=last-byte"])))
 if (getattr(config, "target_arch", "") == "aarch64" and
         getattr(config, "target_os", "") == "Linux"):
     config.available_features.add("flexfat-tbi")

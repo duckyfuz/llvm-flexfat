@@ -9,17 +9,18 @@
 #define LLVM_TRANSFORMS_INSTRUMENTATION_FLEXFATSANITIZER_H
 
 #include "llvm/IR/PassManager.h"
+#include "llvm/Transforms/Instrumentation/FlexFatSanitizerOptions.h"
 
 namespace llvm {
 class Module;
 
 struct FlexFatSanitizerOptions {
-  bool TemporalTBI = false;
-  enum class TBIStorage { Shadow, PackedShadow, LastByte, PriorByte };
-  TBIStorage Storage = TBIStorage::LastByte;
-  /// Check the complete width of scalar accesses.  The LowFat-compatible
-  /// default checks only the pointer position used by the access.
+  FlexFatTBIMode TBI = FlexFatTBIMode::Off;
   bool CheckWholeAccess = false;
+  bool ShareContainedGeometry = true;
+  bool TBIOrdinaryLoads = false;
+
+  bool hasTBI() const { return TBI != FlexFatTBIMode::Off; }
 
   bool InternalSkipOptimizations_ = false;
   bool InternalModuleSetupOnly_ = false;

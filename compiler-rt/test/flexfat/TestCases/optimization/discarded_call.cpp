@@ -1,5 +1,5 @@
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
 
 // A discarded read is checked at O0, but can be removed by optimization
 // before FlexFat instruments at OptimizerLastEP. Whole-access checking is

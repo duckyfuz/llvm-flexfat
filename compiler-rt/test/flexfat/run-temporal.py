@@ -9,16 +9,16 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parent
-parser = argparse.ArgumentParser(description=__doc__)
+parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
 parser.add_argument('builds', nargs='+', type=Path)
 parser.add_argument('--output', type=Path)
-parser.add_argument('--skip-timings', action='store_true',
-                    help='retained for compatibility; this harness now runs correctness checks only')
-parser.add_argument('--storage', choices=['shadow', 'packed-shadow', 'last-byte', 'prior-byte'],
+parser.add_argument('--tbi', choices=['shadow', 'packed-shadow', 'last-byte', 'prior-byte'],
                     default='last-byte')
 parser.add_argument('--ordinary-loads', action='store_true',
                     help='exercise the ordinary inline generation-load experiment')
 args = parser.parse_args()
+if args.ordinary_loads and args.tbi not in ('last-byte', 'prior-byte'):
+    parser.error('ordinary loads require last-byte or prior-byte TBI')
 results = []
 
 def run(cmd, failure=None):
@@ -35,15 +35,14 @@ for build in args.builds:
     build = build.resolve()
     cc = build / 'bin/clang'
     cxx = build / 'bin/clang++'
-    common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
-              '-mllvm', '-flexfat-tbi-storage=' + args.storage]
+    common = ['-fsanitize=flexfat', '-fsanitize-flexfat-tbi=' + args.tbi]
     if args.ordinary_loads:
-        common += ['-mllvm', '-flexfat-tbi-ordinary-loads=true']
+        common += ['-fsanitize-flexfat-tbi-ordinary-loads']
     # CMake permits STRING as the cache type as well.
     custom = any(line.startswith('FLEXFAT_SIZES_CFG:') and line.split('=',1)[1]
                  for line in (build/'CMakeCache.txt').read_text().splitlines())
-    if custom and args.storage in ('shadow', 'packed-shadow'):
-        raise SystemExit(args.storage + ' TBI storage requires a POW2 build')
+    if custom and args.tbi in ('shadow', 'packed-shadow'):
+        raise SystemExit(args.tbi + ' TBI storage requires a POW2 build')
     if custom:
         header = (build/'lib/Transforms/Instrumentation/flexfat_config_generated.h').read_text()
         table = header.split('kFlexFatGenSizes[', 1)[1].split('};', 1)[0]
@@ -53,11 +52,11 @@ for build in args.builds:
     else:
         sizes = [1 << n for n in range(4, 31)]
         region_log, region_base = 32, 0x100000000000
-    abi = ('__flexfat_tbi_abi_packed_shadow_pow2_v1' if args.storage == 'packed-shadow' else
+    abi = ('__flexfat_tbi_abi_packed_shadow_pow2_v1' if args.tbi == 'packed-shadow' else
            ('__flexfat_tbi_abi_prior_byte_custom_v2' if custom else
-            '__flexfat_tbi_abi_prior_byte_pow2_v3') if args.storage == 'prior-byte' else
+            '__flexfat_tbi_abi_prior_byte_pow2_v3') if args.tbi == 'prior-byte' else
            ('__flexfat_tbi_abi_last_byte_custom_v1' if custom else
-            '__flexfat_tbi_abi_last_byte_pow2_v2') if args.storage == 'last-byte' else
+            '__flexfat_tbi_abi_last_byte_pow2_v2') if args.tbi == 'last-byte' else
            '__flexfat_tbi_abi_v3' if custom else '__flexfat_tbi_abi_v7')
     metadata_bytes = 0
     for i, size in enumerate(sizes):
@@ -66,11 +65,11 @@ for build in args.builds:
         metadata_bytes += ((start + (1 << region_log) - 1) // size - first + 1
                            if custom else (1 << region_log) // size)
     page = os.sysconf('SC_PAGE_SIZE')
-    reservation_bytes = ((1 << 29) + page if args.storage == 'packed-shadow' else
-                         0 if args.storage != 'shadow' else
+    reservation_bytes = ((1 << 29) + page if args.tbi == 'packed-shadow' else
+                         0 if args.tbi != 'shadow' else
                          ((metadata_bytes + page - 1) // page) * page if custom
                          else 1 << 44)
-    if args.storage not in ('shadow', 'packed-shadow'):
+    if args.tbi not in ('shadow', 'packed-shadow'):
         metadata_bytes = 0
     checks = 0
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
@@ -123,12 +122,12 @@ for build in args.builds:
             if custom:
                 for mode in ['geometry', 'geometry-tail']:
                     run([exe, mode], 'unavailable (invalid slot geometry)'); checks += 1
-        run([cxx, *common, '-O2', '-mllvm', '-flexfat-check-whole-access=true',
+        run([cxx, *common, '-O2', '-fsanitize-flexfat-check-whole-access',
              '-fno-vectorize', '-fno-slp-vectorize', '-fno-unroll-loops',
              root/'TestCases/temporal/loops.cpp', '-o', exe])
         run([exe, 'width'], 'out-of-bounds'); checks += 1
 
-        if args.storage == 'shadow':
+        if args.tbi == 'shadow':
             # Arithmetic validates the bias table and the POW2 fixed shadow.
             arithmetic_obj = d/'arithmetic.o'
             config_flags = ['-DFLEXFAT_TEMPORAL_TBI', '-I'+str(root.parent.parent/'lib')]
@@ -139,7 +138,7 @@ for build in args.builds:
                  '-o', arithmetic_obj])
             run([cxx, *common, arithmetic_obj, '-o', exe]); run([exe]); checks += 1
 
-        if args.storage == 'packed-shadow':
+        if args.tbi == 'packed-shadow':
             arithmetic_obj = d/'packed-arithmetic.o'
             run([cxx, '-O2', '-DFLEXFAT_TEMPORAL_TBI',
                  '-I'+str(root.parent.parent/'lib'), '-c',
@@ -165,7 +164,7 @@ for build in args.builds:
                          'packed-shadow': ['__flexfat_tbi_abi_v7'],
                          'shadow': ['__flexfat_tbi_abi_v3', '__flexfat_tbi_abi_v4',
                                     '__flexfat_tbi_abi_v6']}
-                        [args.storage])
+                        [args.tbi])
             for old_abi in old_abis:
                 old_source = d/'old-abi.c'
                 old_source.write_text(f'extern void {old_abi}(void);\n'
@@ -189,7 +188,7 @@ for build in args.builds:
                                ('' if custom else 'void __flexfat_tbi_abi_v3(void) {}\n') +
                                ('void __flexfat_tbi_abi_prior_byte_' +
                                 ('custom' if custom else 'pow2') + '_v1(void) {}\n'
-                                if args.storage == 'prior-byte' else ''))
+                                if args.tbi == 'prior-byte' else ''))
         run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
             abi)
         checks += 4
@@ -201,15 +200,15 @@ for build in args.builds:
         # forces allocations/memory operations through initialization guards.
         startup = d/'startup.o'
         run([cc, '-fno-builtin', '-c', root/'TestCases/temporal/tbi-startup.c', '-o', startup])
-        runtime_name = ('flexfat_tbi_' + args.storage.replace('-', '_')
-                        if args.storage != 'shadow' else 'flexfat_tbi')
+        runtime_name = ('flexfat_tbi_' + args.tbi.replace('-', '_')
+                        if args.tbi != 'shadow' else 'flexfat_tbi')
         runtime = run([cc, '-print-file-name=libclang_rt.' + runtime_name + '.a']).strip()
         # The driver normally puts its runtime first. Explicit ordering places
         # this test hook ahead of the runtime's preinit entry.
         run([cc, startup, '-Wl,--whole-archive', runtime,
              '-Wl,--no-whole-archive', '-lpthread', '-ldl', '-lrt', '-lm', '-o', exe])
         run([exe]); checks += 1
-        if args.storage in ('shadow', 'packed-shadow'):
+        if args.tbi in ('shadow', 'packed-shadow'):
             occupied = d/'occupied-shadow.c'
             occupied.write_text('''#include <sys/mman.h>
 #include <unistd.h>
@@ -241,7 +240,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
         run([cc, *common, '-O2', main, '-L'+str(d), '-ltest', '-Wl,-rpath,'+str(d), '-o', exe])
         run([exe]); run([exe, 'stale'], 'operation = read'); checks += 2
 
-        if args.storage == 'last-byte':
+        if args.tbi == 'last-byte':
             case = root/'TestCases/temporal/last_byte.cpp'
             config_flags = ['-I'+str(root.parent.parent/'lib')]
             if custom:
@@ -255,7 +254,7 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
                     run([exe, mode], 'out-of-bounds'); checks += 1
                 print(build.name, 'last-byte', name, 'passed', flush=True)
 
-        if args.storage == 'prior-byte':
+        if args.tbi == 'prior-byte':
             case = root/'TestCases/temporal/prior_byte.cpp'
             config_flags = ['-I'+str(root.parent.parent/'lib')]
             if custom:
@@ -269,11 +268,10 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
                     run([exe, mode], 'out-of-bounds'); checks += 1
                 print(build.name, 'prior-byte', name, 'passed', flush=True)
         for other in ['shadow', 'packed-shadow', 'last-byte', 'prior-byte']:
-            if other == args.storage or (custom and other in ('shadow', 'packed-shadow')):
+            if other == args.tbi or (custom and other in ('shadow', 'packed-shadow')):
                 continue
             mixed = d/'mixed.o'
-            run([cc, '-fsanitize=flexfat', '-fsanitize-flexfat-tbi',
-                 '-mllvm', '-flexfat-tbi-storage=' + other, '-c', empty, '-o', mixed])
+            run([cc, '-fsanitize=flexfat', '-fsanitize-flexfat-tbi=' + other, '-c', empty, '-o', mixed])
             other_abi = {
                 'shadow': '__flexfat_tbi_abi_v7',
                 'packed-shadow': '__flexfat_tbi_abi_packed_shadow_pow2_v1',
@@ -285,11 +283,10 @@ if(argc>1) free(p); return dso_load(p)==7 ? 0 : 1; }
             run([cc, *common, mixed, '-Wl,--gc-sections', '-o', d/'mixed'], other_abi)
             checks += 1
 
-        results.append({'build': str(build), 'storage': args.storage, 'checks': checks,
+        results.append({'build': str(build), 'storage': args.tbi, 'checks': checks,
                         'ordinary_inline_loads': args.ordinary_loads,
                         'metadata_entry_bytes': metadata_bytes,
-                        'metadata_reservation_bytes': reservation_bytes,
-                        'timings': {}})
+                        'metadata_reservation_bytes': reservation_bytes})
         print(json.dumps(results[-1], indent=2), flush=True)
 if args.output:
     args.output.write_text(json.dumps(results, indent=2)+'\n')

@@ -1,7 +1,7 @@
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 // Cross-boundary OOB write must be reported.
 

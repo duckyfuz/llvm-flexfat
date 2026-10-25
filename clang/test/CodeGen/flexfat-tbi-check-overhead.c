@@ -1,8 +1,11 @@
 // REQUIRES: aarch64-registered-target
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte -O0 -emit-llvm -o - %s | FileCheck %s --check-prefixes=POINT,LAST
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=prior-byte -O0 -emit-llvm -o - %s | FileCheck %s --check-prefixes=POINT,PRIOR
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte -mllvm -flexfat-check-whole-access -O0 -emit-llvm -o - %s | FileCheck %s --check-prefix=WHOLE
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=last-byte -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=LOOP
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -O0 -emit-llvm -o - %s | FileCheck %s --check-prefixes=POINT,LAST
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=prior-byte -O0 -emit-llvm -o - %s | FileCheck %s --check-prefixes=POINT,PRIOR
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-check-whole-access -O0 -emit-llvm -o - %s | FileCheck %s --check-prefix=WHOLE
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -O2 -emit-llvm -o - %s | FileCheck %s --check-prefix=LOOP
+
+// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-check-whole-access -fno-sanitize-flexfat-check-whole-access -O0 -S -emit-llvm -o - %s | FileCheck %s --check-prefixes=POINT,LAST
+// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fno-sanitize-flexfat-check-whole-access -fsanitize-flexfat-check-whole-access -O0 -S -emit-llvm -o - %s | FileCheck %s --check-prefix=WHOLE
 
 extern void *malloc(unsigned long);
 

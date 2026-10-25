@@ -109,31 +109,6 @@ static cl::opt<bool> ClSanitizeOnOptimizerEarlyEP(
     "sanitizer-early-opt-ep", cl::Optional,
     cl::desc("Insert sanitizers on OptimizerEarlyEP."));
 
-static cl::opt<bool> FlexFatCheckWholeAccess(
-    "flexfat-check-whole-access", cl::init(false),
-    cl::desc("Check the complete width of FlexFat scalar accesses"));
-
-static cl::opt<bool>
-    FlexFatTBI("flexfat-tbi", cl::init(false),
-               cl::desc("Enable FlexFat TBI temporal checking"));
-static cl::opt<FlexFatSanitizerOptions::TBIStorage> FlexFatTBIStorage(
-    "flexfat-tbi-storage",
-    cl::init(FlexFatSanitizerOptions::TBIStorage::LastByte),
-    cl::desc("Select FlexFat TBI generation storage"),
-    cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow, "shadow",
-                          "Shadow storage"),
-               clEnumValN(FlexFatSanitizerOptions::TBIStorage::PackedShadow,
-                          "packed-shadow", "Packed per-slot shadow (POW2 only)"),
-               clEnumValN(FlexFatSanitizerOptions::TBIStorage::LastByte,
-                          "last-byte", "Final byte of each slot"),
-               clEnumValN(FlexFatSanitizerOptions::TBIStorage::PriorByte,
-                          "prior-byte", "Byte before each slot base")));
-static cl::opt<bool> FlexFatTBILastByte(
-    "flexfat-tbi-last-byte", cl::init(false),
-    cl::desc("Store FlexFat TBI generations in the final byte of each slot"));
-static cl::opt<bool> FlexFatTBIPriorByte(
-    "flexfat-tbi-prior-byte", cl::init(false),
-    cl::desc("Store FlexFat TBI generations just before each slot base"));
 // Experiment to mark cold functions as optsize/minsize/optnone.
 // TODO: remove once this is exposed as a proper driver flag.
 static cl::opt<PGOOptions::ColdFuncOpt> ClPGOColdFuncAttr(
@@ -814,23 +789,11 @@ static void addSanitizers(const Triple &TargetTriple,
 
   if (LangOpts.Sanitize.has(SanitizerKind::FlexFat)) {
     FlexFatSanitizerOptions FlexFatOpts;
-    FlexFatOpts.TemporalTBI = FlexFatTBI.getNumOccurrences()
-                                  ? FlexFatTBI
-                                  : CodeGenOpts.SanitizeFlexFatTBI;
-    // Each spelling is an assignment. The final command-line assignment wins.
-    unsigned StoragePosition = FlexFatTBIStorage.getPosition();
-    FlexFatOpts.Storage = FlexFatTBIStorage;
-    if (FlexFatTBILastByte.getPosition() > StoragePosition) {
-      StoragePosition = FlexFatTBILastByte.getPosition();
-      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    }
-    if (FlexFatTBIPriorByte.getPosition() > StoragePosition)
-      FlexFatOpts.Storage = FlexFatTBIPriorByte
-                                ? FlexFatSanitizerOptions::TBIStorage::PriorByte
-                                : FlexFatSanitizerOptions::TBIStorage::LastByte;
-    if (!FlexFatOpts.TemporalTBI)
-      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
+    FlexFatOpts.TBI = CodeGenOpts.getSanitizeFlexFatTBI();
+    FlexFatOpts.CheckWholeAccess = CodeGenOpts.SanitizeFlexFatCheckWholeAccess;
+    FlexFatOpts.ShareContainedGeometry =
+        CodeGenOpts.SanitizeFlexFatShareContainedGeometry;
+    FlexFatOpts.TBIOrdinaryLoads = CodeGenOpts.SanitizeFlexFatTBIOrdinaryLoads;
 
     FlexFatSanitizerOptions SetupOpts = FlexFatOpts;
     SetupOpts.InternalModuleSetupOnly_ = true;

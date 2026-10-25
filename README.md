@@ -52,27 +52,45 @@ scripts/flexfat/flexfat.sh custom configure build test
 Enable instrumentation with `-fsanitize=flexfat`. Spatial and temporal errors
 are fatal.
 
-| Setting | Values | Default |
-| --- | --- | --- |
-| `-fsanitize-flexfat-tbi` / `-fno-sanitize-flexfat-tbi` | Enable / disable temporal checking | Off |
-| `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
-| `-mllvm -flexfat-share-contained-geometry=` | `true`, `false` | `true`; skipped at `-O0` |
-| `-mllvm -flexfat-tbi-ordinary-loads=` | `true`, `false` | `false`; experimental |
-| `-mllvm -flexfat-tbi-storage=` | `last-byte`, `prior-byte`, `shadow`, `packed-shadow` | `last-byte` |
+| Setting | Enable / select | Disable | Default |
+| --- | --- | --- | --- |
+| TBI and generation storage | `-fsanitize-flexfat-tbi=last-byte`, `prior-byte`, `shadow`, or `packed-shadow` | `-fsanitize-flexfat-tbi=off` | Off |
+| Whole-access checking | `-fsanitize-flexfat-check-whole-access` | `-fno-sanitize-flexfat-check-whole-access` | Off |
+| Contained geometry sharing | `-fsanitize-flexfat-share-contained-geometry` | `-fno-sanitize-flexfat-share-contained-geometry` | On; skipped at `-O0` |
+| Ordinary generation loads | `-fsanitize-flexfat-tbi-ordinary-loads` | `-fno-sanitize-flexfat-tbi-ordinary-loads` | Off; experimental |
 
-TBI requires little-endian Linux AArch64 with 64-bit pointers and
-`-fsanitize=flexfat`. Explicit `-mllvm -flexfat-tbi=true/false` overrides the
-Clang TBI flags. Storage selection requires TBI; the final storage assignment
-wins. The legacy `-mllvm -flexfat-tbi-last-byte` and
-`-mllvm -flexfat-tbi-prior-byte` selectors remain supported; either selector
-set to `false` selects `last-byte`.
+Selecting a storage mode enables TBI. All FlexFat settings require
+`-fsanitize=flexfat`; explicit geometry-sharing and generation-load settings
+also require active TBI. Ordinary generation loads can be enabled only for
+`last-byte` and `prior-byte`; shadow modes already use ordinary loads.
+Boolean settings use positive/negative flags, without `=true` or `=false`.
+Repeated settings use the final assignment. There are no FlexFat `-mllvm`
+configuration switches.
 
-| TBI storage | Supported builds | Generation location |
+TBI requires little-endian Linux AArch64 with 64-bit pointers.
+
+| TBI mode | Supported builds | Generation location |
 | --- | --- | --- |
 | `last-byte` | POW2, custom | Final byte of the slot |
 | `prior-byte` | POW2, custom | Byte immediately before the slot base |
 | `shadow` | POW2 | Direct shadow; 16 TiB virtual reservation |
 | `packed-shadow` | POW2 | Packed shadow; 512 MiB plus a sentinel page |
+
+```sh
+clang -O2 -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte program.c
+clang -O2 -fsanitize=flexfat -fsanitize-flexfat-tbi=packed-shadow \
+  -fsanitize-flexfat-check-whole-access program.c
+```
+
+Use the same TBI mode when compiling and linking separately.
+
+For LLVM IR tests, `opt` accepts `flexfat<tbi=MODE>` and the parameters
+`whole-access`, `share-contained-geometry`, and `tbi-ordinary-loads`, each
+with a `no-` counterpart. Defaults and temporal dependencies match Clang.
+
+```sh
+opt -passes='flexfat<tbi=last-byte;whole-access>' input.ll -S -o output.ll
+```
 
 Build the compiler and runtime with matching size classes and TBI storage.
 Set `-DFLEXFAT_SIZES_CFG=/path/to/sizes.cfg` at CMake configuration time for
@@ -81,7 +99,7 @@ be strictly ascending multiples of 16, and pass the generator's geometry checks.
 
 Managed allocations reserve a trailing byte and use size-class bounds, so
 padding within a slot remains a detection blind spot. Default fixed-size
-access checks test the starting address; `-flexfat-check-whole-access=true`
+access checks test the starting address; `-fsanitize-flexfat-check-whole-access`
 checks the full width. Memory intrinsics always check their full ranges.
 Uninstrumented writes can corrupt in-slot generations. Oversized allocations
 and exhausted regions fall back to the system allocator.
@@ -99,7 +117,7 @@ Run native temporal acceptance checks with:
 
 ```sh
 python3 llvm-flexfat/compiler-rt/test/flexfat/run-temporal.py \
-  llvm-flexfat/build-flexfat-pow2 --storage=last-byte
+  llvm-flexfat/build-flexfat-pow2 --tbi=last-byte
 ```
 
 The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for

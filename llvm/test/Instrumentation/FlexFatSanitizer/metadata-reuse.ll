@@ -1,4 +1,4 @@
-; RUN: opt < %s -mtriple=aarch64-linux-gnu -passes='flexfat<tbi>,flexfat<tbi>,verify' -disable-output
+; RUN: opt < %s -mtriple=aarch64-linux-gnu -passes='flexfat<tbi=last-byte>,flexfat<tbi=last-byte>,verify' -disable-output
 ; RUN: opt < %s -passes='flexfat,verify' -S | FileCheck %s
 ; RUN: %if flexfat-custom-config %{ opt < %s -passes='flexfat,verify' -S | FileCheck %s --check-prefix=CUSTOM %}
 

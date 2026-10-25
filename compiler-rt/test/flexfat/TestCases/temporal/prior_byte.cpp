@@ -1,5 +1,5 @@
 // REQUIRES: flexfat-tbi
-// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=prior-byte %flexfat_config_flags -fno-builtin %s -o %t
+// RUN: %clangxx_flexfat_tbi -fsanitize-flexfat-tbi=prior-byte %flexfat_config_flags -fno-builtin %s -o %t
 // RUN: %run %t
 // RUN: not %run %t tag-byte 2>&1 | FileCheck %s
 // RUN: not %run %t adjacent-tag 2>&1 | FileCheck %s

@@ -1,9 +1,9 @@
 ; REQUIRES: aarch64-registered-target
-; RUN: opt -passes='flexfat<tbi>,default<O2>,verify' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --implicit-check-not='udiv' --implicit-check-not='sdiv' --implicit-check-not='__flexfat_check_temporal'
-; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=CUSTOM %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=prior-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=shadow>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: opt -passes='flexfat<tbi=last-byte>,default<O2>,verify' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --implicit-check-not='udiv' --implicit-check-not='sdiv' --implicit-check-not='__flexfat_check_temporal'
+; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=CUSTOM %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=prior-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"

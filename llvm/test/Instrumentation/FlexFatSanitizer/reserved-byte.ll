@@ -1,8 +1,8 @@
 ; RUN: opt -passes='flexfat,verify' -S %s | FileCheck %s
 ; RUN: opt -passes='flexfat<whole-access>,verify' -S %s | FileCheck %s
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=shadow>,verify' -S %s | FileCheck %s %}
-; RUN: opt -passes='flexfat<tbi;tbi-storage=last-byte>,verify' -S %s | FileCheck %s
-; RUN: opt -passes='flexfat<tbi;tbi-storage=prior-byte>,verify' -S %s | FileCheck %s
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,verify' -S %s | FileCheck %s %}
+; RUN: opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s
+; RUN: opt -passes='flexfat<tbi=prior-byte>,verify' -S %s | FileCheck %s
 target triple = "aarch64-unknown-linux-gnu"
 
 declare ptr @malloc(i64)

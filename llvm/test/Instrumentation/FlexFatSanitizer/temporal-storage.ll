@@ -1,11 +1,17 @@
-; RUN: opt -passes='flexfat<tbi;tbi-storage=last-byte>,verify' -S %s | FileCheck %s --check-prefix=COMMON
-; RUN: opt -passes='flexfat<tbi;tbi-storage=prior-byte>,verify' -S %s | FileCheck %s --check-prefix=COMMON
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=shadow>,verify' -S %s | FileCheck %s --check-prefixes=COMMON,SHADOW --implicit-check-not='load atomic' %}
-; RUN: %if flexfat-custom-config %{ not opt -passes='flexfat<tbi;tbi-storage=shadow>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REJECT %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=last-byte>' -S %s | FileCheck %s --check-prefix=POW2 --implicit-check-not='icmp ne i8' --implicit-check-not='= or i1' %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=prior-byte>' -S %s | FileCheck %s --check-prefix=POW2 --implicit-check-not='icmp ne i8' --implicit-check-not='= or i1' %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=shadow>' -S %s | FileCheck %s --check-prefix=POW2 --implicit-check-not='icmp ne i8' --implicit-check-not='= or i1' %}
+; RUN: opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=COMMON
+; RUN: opt -passes='flexfat<tbi=prior-byte>,verify' -S %s | FileCheck %s --check-prefix=COMMON
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,verify' -S %s | FileCheck %s --check-prefixes=COMMON,SHADOW --implicit-check-not='load atomic' %}
+; RUN: %if flexfat-custom-config %{ not opt -passes='flexfat<tbi=shadow>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=REJECT %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>' -S %s | FileCheck %s --check-prefix=POW2 --implicit-check-not='icmp ne i8' --implicit-check-not='= or i1' %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=prior-byte>' -S %s | FileCheck %s --check-prefix=POW2 --implicit-check-not='icmp ne i8' --implicit-check-not='= or i1' %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>' -S %s | FileCheck %s --check-prefix=POW2 --implicit-check-not='icmp ne i8' --implicit-check-not='= or i1' %}
 ; REJECT: FlexFat TBI shadow storage requires a POW2 build
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=packed-shadow>,verify' -S %s | FileCheck %s --check-prefix=PACKED %}
+; RUN: %if flexfat-custom-config %{ not opt -passes='flexfat<tbi=packed-shadow>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=PACKED-REJECT %}
+; PACKED: getelementptr i8, ptr inttoptr (i64 35184372088832 to ptr), i64
+; PACKED: load i8, ptr
+; PACKED: call void @__flexfat_tbi_abi_packed_shadow_pow2_v1()
+; PACKED-REJECT: FlexFat TBI packed-shadow storage requires a POW2 build
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
