@@ -212,7 +212,8 @@ int main(void) { return 0; }
             run([exe], 'initialization failed: fixed temporal shadow')
             checks += 1
         run([cc, root/'TestCases/temporal/tbi-reentrant.c', '-fno-builtin', '-c', '-o', startup])
-        run([cc, startup, *common, '-Wl,--wrap=dlsym', '-o', exe])
+        run([cc, startup, *common, '-Wl,--wrap=dlsym',
+             '-Wl,--wrap=_ZN11__sanitizer18internal_allocatorEv', '-o', exe])
         run([exe])
         checks += 1
 

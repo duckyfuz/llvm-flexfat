@@ -19,6 +19,10 @@
 #include "sanitizer_common/sanitizer_mutex.h"
 #include <stddef.h>
 #include <pthread.h>
+#if SANITIZER_LINUX
+#include "sanitizer_common/sanitizer_posix.h"
+#include <sys/mman.h>
+#endif
 #include "sanitizer_common/sanitizer_atomic.h"
 #ifdef FLEXFAT_TEMPORAL_TBI
 #if !defined(__aarch64__) || !defined(__linux__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || __SIZEOF_POINTER__ != 8
@@ -325,6 +329,44 @@ static void InitializeFlags() {
   SetAllocatorMayReturnNull(common_flags()->allocator_may_return_null);
 }
 
+#if SANITIZER_LINUX
+static void SizeTableMappingFailed(const char *operation) {
+  Printf("FLEXFAT initialization failed: size table %s\n", operation);
+  Die();
+}
+
+static void InitSizeTableBacking() {
+  const uptr page = GetPageSizeCached();
+  const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), page);
+  const uptr managed_begin = RoundDownTo(kManagedTableBegin * sizeof(u64), page);
+  const uptr managed_end =
+      RoundUpTo((kManagedTableBegin + kNumSizeClasses) * sizeof(u64), page);
+  uptr sentinel = 0;
+  // A zero-old-size mremap clones a shared page without moving its source.
+  // Boundary pages also contain foreign entries, but must remain private.
+  for (uptr offset = 0; offset < bytes; offset += page) {
+    const uptr address = kTablesBase + offset;
+    if (offset >= managed_begin && offset < managed_end) {
+      internal_memset(reinterpret_cast<void *>(address), 0xff, page);
+    } else if (!sentinel) {
+      uptr result = internal_mmap(reinterpret_cast<void *>(address), page,
+                                 PROT_READ | PROT_WRITE,
+                                 MAP_FIXED | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+      if (result != address)
+        SizeTableMappingFailed("shared mapping");
+      sentinel = address;
+      internal_memset(reinterpret_cast<void *>(sentinel), 0xff, page);
+    } else {
+      uptr result = internal_mremap(reinterpret_cast<void *>(sentinel), 0, page,
+                                   MREMAP_MAYMOVE | MREMAP_FIXED,
+                                   reinterpret_cast<void *>(address));
+      if (result != address)
+        SizeTableMappingFailed("alias mapping");
+    }
+  }
+}
+#endif
+
 static void InitSpatialTables() {
   // Cover all user-address indices, leaving unused ABI slots and gaps unmapped.
   MapMetadataTable(0, "flexfat_sizes");
@@ -346,8 +388,12 @@ static void InitSpatialTables() {
   // regions overwrite those sentinels with their real class metadata. Anonymous
   // mappings already provide zero magics/masks: do not fault foreign pages just
   // to write zeros. Only pages containing managed recovery entries need backing.
+#if SANITIZER_LINUX
+  InitSizeTableBacking();
+#else
   for (uptr i = 0; i < kTableEntries; ++i)
     sizes[i] = ~(u64)0;
+#endif
 
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr table_index = kManagedTableBegin + i;
@@ -360,6 +406,11 @@ static void InitSpatialTables() {
     masks[table_index] = ~(size - 1);
 #endif
   }
+#if SANITIZER_LINUX
+  const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), GetPageSizeCached());
+  if (internal_mprotect(sizes, bytes, PROT_READ) != 0)
+    SizeTableMappingFailed("protection");
+#endif
 }
 
 // Ported LowFat allocation and page-management implementation.

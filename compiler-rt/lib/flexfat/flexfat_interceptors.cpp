@@ -14,7 +14,9 @@
 #include "interception/interception.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_allocator_checks.h"
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
 #include "sanitizer_common/sanitizer_allocator_dlsym.h"
+#endif
 #include "sanitizer_common/sanitizer_allocator_report.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_errno.h"
@@ -24,14 +26,74 @@
 using namespace __sanitizer;
 
 DECLARE_REAL(void *, malloc, uptr size)
+DECLARE_REAL(void *, calloc, uptr count, uptr size)
+DECLARE_REAL(void *, realloc, void *ptr, uptr size)
+DECLARE_REAL(void, free, void *ptr)
 
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+// Like LowFat, use one libc provider for startup and foreign allocations.
+// These entry points deliberately bypass other malloc replacements.
+extern "C" {
+void *__libc_malloc(uptr);
+void *__libc_calloc(uptr, uptr);
+void *__libc_memalign(uptr, uptr);
+void *__libc_realloc(void *, uptr);
+void __libc_free(void *);
+}
+static void *SystemMalloc(uptr size) { return __libc_malloc(size); }
+static void *SystemCalloc(uptr count, uptr size) {
+  return __libc_calloc(count, size);
+}
+static void *SystemRealloc(void *ptr, uptr size) {
+  return __libc_realloc(ptr, size);
+}
+static void SystemFree(void *ptr) { __libc_free(ptr); }
+
+#if SANITIZER_INTERCEPT_MALLOC_USABLE_SIZE
+// Symbol resolution can reenter malloc_usable_size before its REAL pointer is
+// installed. Startup allocations come from __libc_* above, so read glibc's
+// ptmalloc chunk layout directly in this window. Do not allocate or use dlsym
+// here: either would reenter initialization. See glibc malloc.c's musable and
+// memsize (arena chunks borrow the next chunk's prev_size word; mmap chunks
+// cannot). This helper requires a non-null, live libc allocation.
+static uptr BootstrapLibcUsableSize(void *ptr) {
+  uptr address = (uptr)ptr;
+  bool tagged = false;
+#if SANITIZER_ARM64
+  // glibc MTE allocations have a nonzero user tag, but their chunk headers
+  // retain tag zero. Tagged arena chunks cannot borrow the next header word.
+  tagged = (address >> 56) != 0;
+  address &= 0x00ffffffffffffffULL;
+#endif
+  const uptr size_word = *(const uptr *)(address - sizeof(uptr));
+  // The low bits are PREV_INUSE, IS_MMAPPED, and NON_MAIN_ARENA.
+  const uptr size = size_word & ~(uptr)7;
+  if (size_word & 2) // IS_MMAPPED
+    return size - 2 * sizeof(uptr);
+  const uptr next_size_word =
+      *(const uptr *)(address + size - sizeof(uptr));
+  if (!(next_size_word & 1)) // PREV_INUSE marks this chunk as allocated.
+    return 0;
+  return size - (tagged ? 2 : 1) * sizeof(uptr);
+}
+#endif
+#else
 // DlsymAlloc handles allocations that happen before our runtime is initialized
-// (e.g., during dynamic linker symbol resolution). Uses a small static buffer.
+// (e.g., during dynamic linker symbol resolution). Uses the internal allocator.
 namespace {
 struct DlsymAlloc : public DlSymAllocator<DlsymAlloc> {
   static bool UseImpl() { return !__flexfat::IsReady(); }
 };
 } // namespace
+static void *SystemMalloc(uptr size) { return REAL(malloc)(size); }
+static void *SystemCalloc(uptr count, uptr size) {
+  return REAL(calloc)(count, size);
+}
+static void *SystemRealloc(void *ptr, uptr size) {
+  return REAL(realloc)(ptr, size);
+}
+static void SystemFree(void *ptr) { REAL(free)(ptr); }
+#endif
 
 // Helper: should this allocation go through FlexFat?
 // Allocations larger than our max size class fall back to system malloc.
@@ -43,12 +105,14 @@ static inline void check_bounds(const void *ptr, uptr access_size,
                                 int is_write);
 
 static inline void *ManagedOrSystemMalloc(uptr size) {
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(size);
+#endif
   if (ShouldUseFlexFat(size))
     if (void *ptr = __flexfat::Allocate(size))
       return ptr;
-  return REAL(malloc)(size);
+  return SystemMalloc(size);
 }
 
 static inline bool IsValidPowerOfTwo(uptr value) {
@@ -63,39 +127,48 @@ static inline bool CanManageAligned(uptr alignment) {
 
 static inline void *ManagedOrSystemAligned(uptr alignment, uptr size,
                                            void *(*fallback)(uptr, uptr)) {
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(size, alignment);
+#endif
   if (CanManageAligned(alignment))
     if (void *ptr = __flexfat::AllocateAligned(size, alignment))
       return ptr;
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  return __libc_memalign(alignment, size);
+#else
   return fallback(alignment, size);
+#endif
 }
 
 //===----------------------------------------------------------------------===//
 // Interceptors
 //===----------------------------------------------------------------------===//
 
-INTERCEPTOR(void *, malloc, uptr size) {
-  if (DlsymAlloc::Use())
-    return DlsymAlloc::Allocate(size);
-  return ManagedOrSystemMalloc(size);
-}
+INTERCEPTOR(void *, malloc, uptr size) { return ManagedOrSystemMalloc(size); }
 
 INTERCEPTOR(void, free, void *ptr) {
   if (!ptr)
     return;
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::PointerIsMine(ptr))
     return DlsymAlloc::Free(ptr);
+#endif
   if (__flexfat::IsFlexFatPointer((uptr)ptr)) {
     __flexfat::Deallocate(ptr);
     return;
   }
-  REAL(free)(ptr);
+  SystemFree(ptr);
 }
 
 INTERCEPTOR(void *, calloc, uptr nmemb, uptr size) {
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  if (!__flexfat::IsReady())
+    return SystemCalloc(nmemb, size);
+#else
   if (DlsymAlloc::Use())
     return DlsymAlloc::Callocate(nmemb, size);
+#endif
   if (UNLIKELY(CheckForCallocOverflow(nmemb, size))) {
     if (AllocatorMayReturnNull())
       return SetErrnoOnNull(nullptr);
@@ -110,12 +183,17 @@ INTERCEPTOR(void *, calloc, uptr nmemb, uptr size) {
       return ptr;
     }
   }
-  return REAL(calloc)(nmemb, size);
+  return SystemCalloc(nmemb, size);
 }
 
 INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  if (!__flexfat::IsReady())
+    return SystemRealloc(ptr, size);
+#else
   if (DlsymAlloc::Use() || DlsymAlloc::PointerIsMine(ptr))
     return DlsymAlloc::Realloc(ptr, size);
+#endif
 
   // realloc(nullptr, size) == malloc(size)
   if (!ptr) {
@@ -132,7 +210,7 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
     return ManagedOrSystemMalloc(size);
 
   if (!__flexfat::IsFlexFatPointer((uptr)ptr))
-    return REAL(realloc)(ptr, size);
+    return SystemRealloc(ptr, size);
 
   uptr old_class_size = __flexfat::GetSize((uptr)ptr);
   uptr old_base = __flexfat::GetBase((uptr)ptr);
@@ -160,23 +238,32 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
 
 INTERCEPTOR(void *, valloc, uptr size) {
   uptr alignment = GetPageSizeCached();
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(size, alignment);
+#endif
   if (CanManageAligned(alignment))
     if (void *ptr = __flexfat::AllocateAligned(size, alignment))
       return ptr;
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  return __libc_memalign(alignment, size);
+#else
   return REAL(valloc)(size);
+#endif
 }
 
 INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
   if (!IsValidPowerOfTwo(alignment) || alignment % sizeof(void *) != 0)
     return errno_EINVAL;
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::Use()) {
     *memptr = DlsymAlloc::Allocate(size, alignment);
     return 0;
   }
+#endif
 #ifdef FLEXFAT_TEMPORAL_TBI
-  __flexfat_check_temporal((uptr)memptr, sizeof(*memptr), 1);
+  if (__flexfat::IsReady())
+    __flexfat_check_temporal((uptr)memptr, sizeof(*memptr), 1);
 #endif
   if (CanManageAligned(alignment)) {
     if (void *ptr = __flexfat::AllocateAligned(size, alignment)) {
@@ -184,7 +271,17 @@ INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
       return 0;
     }
   }
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  int saved_errno = errno;
+  void *ptr = __libc_memalign(alignment, size);
+  errno = saved_errno;
+  if (!ptr)
+    return errno_ENOMEM;
+  *memptr = ptr;
+  return 0;
+#else
   return REAL(posix_memalign)(memptr, alignment, size);
+#endif
 }
 
 #if SANITIZER_INTERCEPT_MEMALIGN
@@ -215,12 +312,18 @@ INTERCEPTOR(void *, pvalloc, uptr size) {
     return nullptr;
   }
   uptr rounded = RoundUpTo(size ? size : 1, page);
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(rounded, page);
+#endif
   if (CanManageAligned(page))
     if (void *ptr = __flexfat::AllocateAligned(rounded, page))
       return ptr;
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  return __libc_memalign(page, rounded);
+#else
   return REAL(pvalloc)(size);
+#endif
 }
 #endif
 
@@ -333,18 +436,26 @@ INTERCEPTOR(void *, memmove, void *dst, const void *src, uptr size) {
 INTERCEPTOR(uptr, malloc_usable_size, void *ptr) {
   if (!ptr)
     return 0;
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::PointerIsMine(ptr))
     return DlsymAlloc::GetSize(ptr);
+#endif
   if (__flexfat::IsFlexFatPointer((uptr)ptr))
     return __flexfat_get_usable_size((uptr)ptr);
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  if (UNLIKELY(!REAL(malloc_usable_size)))
+    return BootstrapLibcUsableSize(ptr);
+#endif
   return REAL(malloc_usable_size)(ptr);
 }
 #endif
 
 #if SANITIZER_APPLE
 INTERCEPTOR(uptr, malloc_size, void *ptr) {
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   if (DlsymAlloc::PointerIsMine(ptr))
     return DlsymAlloc::GetSize(ptr);
+#endif
   if (__flexfat::IsFlexFatPointer((uptr)ptr))
     return __flexfat::GetSize((uptr)ptr);
   return REAL(malloc_size)(ptr);
@@ -356,6 +467,7 @@ void InitializeInterceptors() {
   static int inited = 0;
   CHECK_EQ(inited, 0);
 
+#if !(SANITIZER_LINUX && SANITIZER_GLIBC)
   INTERCEPT_FUNCTION(malloc);
   INTERCEPT_FUNCTION(free);
   INTERCEPT_FUNCTION(calloc);
@@ -371,6 +483,7 @@ void InitializeInterceptors() {
 #if SANITIZER_INTERCEPT_PVALLOC
   INTERCEPT_FUNCTION(pvalloc);
 #endif
+#endif
   INTERCEPT_FUNCTION(strdup);
 #if SANITIZER_INTERCEPT_STRNDUP
   INTERCEPT_FUNCTION(strndup);
@@ -379,7 +492,13 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(memcpy);
   INTERCEPT_FUNCTION(memmove);
 #if SANITIZER_INTERCEPT_MALLOC_USABLE_SIZE
+#if SANITIZER_LINUX && SANITIZER_GLIBC
+  // Use libc's implementation once resolved. Queries reentering this lookup
+  // use BootstrapLibcUsableSize until the real function pointer is installed.
+  CHECK(INTERCEPT_FUNCTION(malloc_usable_size));
+#else
   INTERCEPT_FUNCTION(malloc_usable_size);
+#endif
 #endif
 #if SANITIZER_APPLE
   INTERCEPT_FUNCTION(malloc_size);

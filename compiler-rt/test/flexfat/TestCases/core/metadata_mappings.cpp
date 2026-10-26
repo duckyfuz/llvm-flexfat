@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 using namespace __flexfat;
 
@@ -46,6 +48,48 @@ int main() {
                      kTablesBase + recovery_slot * kTablesOffset + bytes - page),
                  page, &resident) == 0);
   assert(!(resident & 1));
+
+  // Check sharing before exhaustive reads populate every alias's page table.
+  const uptr private_begin = (first * sizeof(u64)) & ~(page - 1);
+  const uptr private_end =
+      ((first + kNumSizeClasses) * sizeof(u64) + page - 1) & ~(page - 1);
+  uptr sentinel = bytes;
+  for (uptr offset = 0; offset < bytes; offset += page)
+    if (offset < private_begin || offset >= private_end) {
+      sentinel = offset;
+      break;
+    }
+  if (sentinel != bytes) {
+    auto *source = reinterpret_cast<volatile u64 *>(kTablesBase + sentinel);
+    assert(mprotect((void *)source, page, PROT_READ | PROT_WRITE) == 0);
+    *source = 123;
+    for (uptr offset = 0; offset < bytes; offset += page) {
+      if (offset >= private_begin && offset < private_end)
+        continue;
+      assert(*reinterpret_cast<volatile u64 *>(kTablesBase + offset) == 123);
+    }
+    // Managed pages must retain their own backing, including foreign entries
+    // in the boundary pages. Check the entire interval while aliases differ.
+    for (uptr i = private_begin / sizeof(u64);
+         i < private_end / sizeof(u64); ++i)
+      assert(sizes[i] == (i >= first && i < first + kNumSizeClasses
+                             ? SizeClassToSize(i - first) : ~u64(0)));
+    *source = ~u64(0);
+    assert(mprotect((void *)source, page, PROT_READ) == 0);
+  }
+  // Both private and shared portions must be protected after initialization.
+  const uptr probes[] = {private_begin, sentinel == bytes ? private_begin : sentinel};
+  for (uptr offset : probes) {
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+      *reinterpret_cast<volatile u64 *>(kTablesBase + offset) = 0;
+      _exit(1);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV);
+  }
 
   for (uptr i = 0; i < entries; ++i) {
     if (i < first || i >= first + kNumSizeClasses) {
