@@ -2533,12 +2533,24 @@ def fno_sanitize_hwaddress_experimental_aliasing
     Group<f_clang_Group>,
     Visibility<[ClangOption, CLOption]>,
     HelpText<"Disable aliasing mode in HWAddressSanitizer">;
-defm sanitize_flexfat_tbi : BoolOption<"f", "sanitize-flexfat-tbi",
-  CodeGenOpts<"SanitizeFlexFatTBI">, DefaultFalse,
+def sanitize_flexfat_tbi_EQ : Joined<["-"], "fsanitize-flexfat-tbi=">,
+  MetaVarName<"<mode>">, Visibility<[ClangOption, CC1Option]>,
+  Group<f_clang_Group>,
+  HelpText<"Select FlexFat temporal checking and generation storage">,
+  Values<"off,last-byte,prior-byte,shadow,packed-shadow">,
+  NormalizedValuesScope<"llvm::FlexFatTBIMode">,
+  NormalizedValues<["Off", "LastByte", "PriorByte", "Shadow", "PackedShadow"]>,
+  MarshallingInfoEnum<CodeGenOpts<"SanitizeFlexFatTBI">, "Off">;
+defm sanitize_flexfat_check_whole_access : BoolOption<"f", "sanitize-flexfat-check-whole-access",
+  CodeGenOpts<"SanitizeFlexFatCheckWholeAccess">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
   NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
-  BothFlags<[], [ClangOption], " Linux AArch64 FlexFat temporal checking">>,
-  Group<f_clang_Group>;
+  BothFlags<[], [ClangOption], " FlexFat whole-access spatial checking">>, Group<f_clang_Group>;
+defm sanitize_flexfat_share_contained_geometry : BoolOption<"f", "sanitize-flexfat-share-contained-geometry",
+  CodeGenOpts<"SanitizeFlexFatShareContainedGeometry">, DefaultTrue,
+  PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,
+  NegFlag<SetFalse, [], [ClangOption, CC1Option], "Disable">,
+  BothFlags<[], [ClangOption], " FlexFat contained-allocation geometry sharing">>, Group<f_clang_Group>;
 defm sanitize_memory_use_after_dtor : BoolOption<"f", "sanitize-memory-use-after-dtor",
   CodeGenOpts<"SanitizeMemoryUseAfterDtor">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable">,

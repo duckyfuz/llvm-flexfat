@@ -1,6 +1,6 @@
-; RUN: opt -passes='flexfat<tbi>,verify' -S %s | FileCheck %s
-; RUN: opt -passes='flexfat<tbi>,function(dce),verify' -S %s | FileCheck %s --check-prefix=LIVE
-; RUN: opt -passes='flexfat<tbi>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT
+; RUN: opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s
+; RUN: opt -passes='flexfat<tbi=last-byte>,function(dce),verify' -S %s | FileCheck %s --check-prefix=LIVE
+; RUN: opt -passes='flexfat<tbi=last-byte>,default<O2>,verify' -S %s | FileCheck %s --check-prefix=OPT
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
@@ -8,8 +8,6 @@ target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 @reader_alias = alias i32 (ptr), ptr @reader
 declare i32 @personality(...)
 
-; The caller deliberately precedes the callee. Keep the callee uninlined so
-; dead-call elimination has to respect its updated call-site attributes.
 define void @caller(ptr %p) "no-sanitize-flexfat" {
 ; CHECK-LABEL: define void @caller(
 ; CHECK: call i32 @reader(ptr %p) #[[CALL:[0-9]+]]
@@ -39,19 +37,18 @@ define void @invoker(ptr %p) "no-sanitize-flexfat" personality ptr @personality 
 define i32 @reader(ptr %p) #2 {
 ; CHECK-LABEL: define i32 @reader(ptr %p)
 ; CHECK-SAME: #[[READER:[0-9]+]]
-; CHECK: load atomic i8
+; CHECK: load i8
 ; OPT-LABEL: define i32 @reader(
-; OPT: load atomic i8
+; OPT: load i8
 ; LIVE-LABEL: define i32 @reader(
-; LIVE: load atomic i8
+; LIVE: load i8
   %v = load i32, ptr %p
   ret i32 %v
 }
 
-; Excluded callees and their calls must retain their original attributes.
 define i32 @excluded(ptr %p) #0 "no-sanitize-flexfat" {
 ; CHECK-LABEL: define i32 @excluded(
-; CHECK-NOT: load atomic i8
+; CHECK-NOT: load i8
 ; CHECK: ret i32
   %v = load i32, ptr %p
   ret i32 %v

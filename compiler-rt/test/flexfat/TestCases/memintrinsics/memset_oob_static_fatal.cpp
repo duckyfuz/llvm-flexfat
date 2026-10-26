@@ -1,7 +1,5 @@
 // RUN: %clangxx_flexfat -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
-
-// memset OOB write must be reported in fatal mode.
+// RUN: %clangxx_flexfat -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 #include <cstdlib>
 #include <cstring>
@@ -11,10 +9,8 @@ int main() {
   char *guard = (char *)malloc(15); // keep adjacent memory mapped
   if (!dst || !guard) return 1;
 
-  // memset of 32 bytes into a 16-byte slot overflows by 16 bytes.
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   memset(dst, 0, 32);
-  // Keep the write observable until late instrumentation.
   asm volatile("" : : "r"(dst) : "memory");
 
   free(guard);

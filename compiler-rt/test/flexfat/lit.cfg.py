@@ -2,24 +2,15 @@ import lit.formats
 import os
 import shlex
 
-# Setup config name.
 config.name = "FlexFatSanitizer" + getattr(config, "name_suffix", "")
 
-# Setup source root.
 config.test_source_root = os.path.dirname(__file__)
 config.suffixes = [".c", ".cpp"]
 
-# Teach lit that these are shell tests (// RUN: ... lines).
-# When loaded via the build-dir site config, lit.common.configured sets this;
-# when invoked directly against the source dir, we must set it ourselves.
 if not hasattr(config, "test_format"):
     config.test_format = lit.formats.ShTest(execute_external=True)
 
 
-# Find clang++:
-#   1. config.clang is set by lit.common.configured (when run via build-dir site config)
-#   2. config.llvm_tools_dir is set by lit.common.configured
-#   3. Fall back to bare "clang++" on PATH for direct source-dir invocations
 def _find_clang():
     clang = getattr(config, "clang", None)
     if clang:
@@ -40,35 +31,19 @@ def build_invocation(flags):
     return " " + " ".join([clang] + flags) + " "
 
 
-# Base flags
 flexfat_base = ["-fsanitize=flexfat"]
 
 config.substitutions.append(("%clangxx_flexfat ", build_invocation(flexfat_base)))
 
-# Recover mode versions
-config.substitutions.append(
-    (
-        "%clangxx_flexfat_recover ",
-        build_invocation(flexfat_base + ["-mllvm", "-flexfat-recover=true"]),
-    )
-)
-
-# Only Darwin and Linux are supported.
 if getattr(config, "target_os", "Unknown") not in ["Darwin", "Linux"]:
-    # When running directly (no site config), target_os may be unset; don't
-    # mark unsupported in that case — let the tests fail naturally if the
-    # platform truly isn't supported.
     if hasattr(config, "target_os"):
         config.unsupported = True
 
-# Expose 'flexfat-custom-config' feature when the runtime was built with a
-# custom sizes.cfg (i.e. -DFLEXFAT_SIZES_CFG was set at cmake time).
-# Tests guarded with REQUIRES: flexfat-custom-config are skipped otherwise.
 if getattr(config, "flexfat_custom_config", False):
     config.available_features.add("flexfat-custom-config")
 
 config.substitutions.append(
-    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-mllvm", "-flexfat-tbi=true"])))
+    ("%clangxx_flexfat_tbi ", build_invocation(flexfat_base + ["-fsanitize-flexfat-tbi=last-byte"])))
 if (getattr(config, "target_arch", "") == "aarch64" and
         getattr(config, "target_os", "") == "Linux"):
     config.available_features.add("flexfat-tbi")

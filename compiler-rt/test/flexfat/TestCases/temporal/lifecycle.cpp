@@ -95,10 +95,9 @@ int main(int argc, char **argv) {
         }
         free(q);
       }
-      abort(); // Custom configuration must have a region with prefix padding.
+      abort();
     }
     if (!strcmp(mode, "report-observation")) {
-      // Metadata now says the next generation, but report the supplied zero.
       uintptr_t saved = (uintptr_t)p;
       free(p);
       __flexfat_report_temporal_v3(saved, 1, 0, 0);
@@ -109,12 +108,10 @@ int main(int argc, char **argv) {
       return read_byte((char *)(next | (!strcmp(mode, "never") ? (1ULL << 56) : 0)));
     }
     if (!strcmp(mode, "realloc-failure")) {
-      // SIZE_MAX cannot be satisfied by libc, independently of overcommit.
       volatile size_t impossible = SIZE_MAX;
       assert(!realloc(p, impossible)); assert(read_byte(p) == 9); free(p); return 0;
     }
     if (!strcmp(mode, "fallback")) {
-      // Force the managed-to-system path without committing the huge allocation.
       size_t large = 128ULL << 30;
       char *q = (char *)realloc(p, large);
       if (q) { assert(!tag(q)); assert(read_byte(q) == 9); free(q); }
@@ -139,8 +136,7 @@ int main(int argc, char **argv) {
     free(p);
     if (!strcmp(mode, "next-generation")) {
       unsigned next = next_tag(tag(p));
-      // Generation matching has no independent liveness check. Only call the
-      // checker: never dereference or free this deliberately forged pointer.
+      // Generation matching alone permits the next tag; do not dereference it.
       __flexfat_check_temporal(raw(p) | (uintptr_t(next) << 56), 1, 0);
       char *q = opaque((char *)malloc(23));
       assert(raw(q) == raw(p) && tag(q) == next);
@@ -177,7 +173,6 @@ int main(int argc, char **argv) {
   write_byte(p);
   char *dup = strdup("abc"); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "abc")); free(dup);
   dup = strndup("abc", 2); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "ab")); free(dup);
-  // Realloc across classes must preserve data with every storage layout.
   char *shifted = (char *)malloc(257);
   shifted[0] = 17; shifted[256] = 29;
   char *grown = (char *)realloc(shifted, 513);

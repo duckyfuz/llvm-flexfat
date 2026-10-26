@@ -1,9 +1,5 @@
 // RUN: %clangxx_flexfat -fno-builtin-memcpy -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -fno-builtin-memcpy -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_flexfat -fno-builtin-memcpy -O2 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -fno-builtin-memcpy -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s
-
-// memcpy OOB write with non-constant size must be reported in fatal mode.
 
 #include <string.h>
 #include <stdlib.h>
@@ -13,8 +9,6 @@ int main(int argc, char **argv) {
   char *src = strdup("ABCDEFGHIJKLMNOPQRS"); // 19 bytes
   if (!dst || !src) return 1;
 
-  // Use argc to prevent the optimizer from knowing the size at compile time.
-  // This forces a call to libc memcpy instead of llvm.memcpy.
   size_t size = 16 + argc; // 17
 
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!

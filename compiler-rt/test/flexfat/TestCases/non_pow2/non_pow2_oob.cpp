@@ -1,23 +1,24 @@
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
 
-// OOB write past a 48-byte slot must be reported.
-// This exercises the non-pow2 magic-multiply path.
-//
 // REQUIRES: flexfat-custom-config
 
 #include <cstdlib>
+#include <cassert>
+#include <cstdint>
+extern "C" uintptr_t __flexfat_get_size(uintptr_t);
+struct __attribute__((packed)) UnalignedDouble { double value; };
 
 int main() {
   char *p = (char *)malloc(47);
   if (!p) return 1;
 
-  // Write 8 bytes starting at offset 44.
-  // Bytes 44-51 cross the 48-byte slot boundary.
-  // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
-  volatile double *val = (volatile double *)(p + 44);
-  *val = 1.0;
+  assert(__flexfat_get_size((uintptr_t)p) == 48);
+  volatile UnalignedDouble *val = (volatile UnalignedDouble *)(p + 44);
+  val->value = 1.0;
 
   free(p);
   return 0;
 }
+
+// CHECK: FLEXFAT ERROR: out-of-bounds error detected!

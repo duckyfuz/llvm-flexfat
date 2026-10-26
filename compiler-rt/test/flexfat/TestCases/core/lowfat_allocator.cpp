@@ -18,8 +18,7 @@ static uintptr_t raw(const void *p) {
   return (uintptr_t)p & 0x00ffffffffffffffULL;
 }
 
-// Bypass spatial/temporal instrumentation to test actual VM permissions and
-// payload retention, rather than the compiler's bounds checks.
+// Inspect actual VM permissions and retained payload without sanitizer checks.
 __attribute__((noinline,
                disable_sanitizer_instrumentation)) static unsigned char
 load(uintptr_t address) {
@@ -52,7 +51,6 @@ static void *exercise(void *) {
 }
 
 int main() {
-  // LowFat leaves the first word and payload in freed small objects intact.
   char *p = (char *)malloc(23);
   assert(p && raw(p) == raw((void *)__flexfat_get_base((uintptr_t)p)));
   p[0] = 31;
@@ -65,17 +63,15 @@ int main() {
 #ifndef TEST_TBI_IN_SLOT
   assert(load(raw(p)) == 31);
 #endif
-  // Same-class realloc preserves the pointer, payload, and TBI generation.
   char *q = (char *)realloc(p, 24);
   assert(q == p && q[20] == 73);
+  // LowFat zero-size realloc leaves the original allocation alive.
   q = (char *)realloc(p, 0);
   assert(q && raw(q) != raw(p) && p[20] == 73);
   free(q);
   free(p);
 
   size_t page = (size_t)sysconf(_SC_PAGESIZE);
-  // Pick a large slot, then recycle it for a request just over the previous
-  // class boundary. The slot has whole-page slack after the requested data.
   size_t request = 256 * page + 1;
   p = (char *)malloc(request);
   size_t slot = __flexfat_get_size((uintptr_t)p);
@@ -95,17 +91,14 @@ int main() {
 #ifdef TEST_TBI
   assert(((uintptr_t)p >> 56) != old_tag);
 #endif
-  // Reused large slots retain inaccessible guard pages after the payload.
   uintptr_t guard = (base + request + page - 1) & ~(page - 1);
   expect_protected(guard);
   q = (char *)realloc(p, request + 1);
   assert(q == p);
-  // LowFat's same-class realloc opens the full slot, including guard pages.
+  // Same-class realloc opens the full slot, including former guard pages.
   assert(load(guard) == 0);
   free(q);
 
-  // Exercise minimum slots: in-slot TBI must not overwrite the generation
-  // with the second word of LowFat's free-list node.
   p = (char *)malloc(15);
   q = (char *)malloc(15);
   base = raw(p);
@@ -121,8 +114,6 @@ int main() {
   free(q);
   free(p);
 
-  // LowFat's size < alignment fast path selects an alignment-sized slot,
-  // including the largest POW2 class. It must not add alignment padding again.
   void *aligned = nullptr;
   size_t alignment = 1ULL << 30;
   assert(posix_memalign(&aligned, alignment, 15) == 0);

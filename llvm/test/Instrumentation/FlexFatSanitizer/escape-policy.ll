@@ -15,8 +15,6 @@ declare void @custom_free(ptr allocptr, ptr) allockind("free")
 declare ptr @custom_realloc(ptr, ptr allocptr, i64) allockind("realloc") allocsize(2)
 declare void @sink(ptr)
 
-; Every dynamic pointer escape rejects offsets >= slot size. The allocator
-; keeps the requested object's legal one-past pointer strictly inside its slot.
 define void @call_escape(i64 %n) {
 ; CHECK-LABEL: @call_escape(
 ; CHECK: icmp uge i64
@@ -26,7 +24,6 @@ define void @call_escape(i64 %n) {
   ret void
 }
 
-; Consumed operands retain their slot-bound checks.
 define void @free_escape(i64 %n) {
 ; CHECK-LABEL: @free_escape(
 ; CHECK: icmp uge i64
@@ -54,8 +51,6 @@ define void @delete_escape(i64 %n) {
   ret void
 }
 
-; Allocation attributes can place the consumed operand anywhere. Both it and
-; unrelated escaping pointer arguments receive strict slot-bound checks.
 define void @attribute_free_escape(i64 %consumed_offset, i64 %other_offset) {
 ; CHECK-LABEL: @attribute_free_escape(
 ; CHECK: icmp uge i64
@@ -134,7 +129,6 @@ define i64 @integer_escape(i64 %n) {
   ret i64 %bits
 }
 
-; Scalar point accesses remain strict and reject equality.
 define i8 @scalar_load(i64 %n) {
 ; CHECK-LABEL: @scalar_load(
 ; CHECK: icmp uge i64
@@ -153,7 +147,6 @@ define void @scalar_store(i64 %n) {
   ret void
 }
 
-; A statically known exact one-past escape is valid and therefore removed.
 define void @static_exact_one_past_escape() {
 ; CHECK-LABEL: @static_exact_one_past_escape(
 ; CHECK-NOT: __flexfat_report_oob
@@ -186,7 +179,6 @@ define void @static_exact_one_past_realloc() {
   ret void
 }
 
-; Exact allocation bases are statically valid consumed operands.
 define void @allocation_base_free() {
 ; CHECK-LABEL: @allocation_base_free(
 ; CHECK-NOT: __flexfat_report_oob
@@ -205,8 +197,6 @@ define void @allocation_base_realloc() {
   ret void
 }
 
-; A statically known exact one-past scalar access remains checked because the
-; pointer value is valid but dereferencing it is not.
 define i8 @static_exact_one_past_load() {
 ; CHECK-LABEL: @static_exact_one_past_load(
 ; CHECK: icmp uge i64
@@ -229,7 +219,6 @@ define void @static_exact_one_past_store() {
   ret void
 }
 
-; An offset beyond one-past becomes unknown and keeps its dynamic escape check.
 define void @static_beyond_one_past_escape() {
 ; CHECK-LABEL: @static_beyond_one_past_escape(
 ; CHECK: icmp uge i64

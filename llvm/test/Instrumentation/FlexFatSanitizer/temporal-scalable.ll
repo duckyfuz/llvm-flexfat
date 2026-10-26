@@ -1,5 +1,5 @@
-; RUN: opt -passes='flexfat<tbi>,verify' -S %s | FileCheck %s --implicit-check-not="call void @__flexfat_report_temporal_v3"
-; RUN: opt -passes='flexfat<tbi>,flexfat<tbi>,verify' -S %s | FileCheck %s --implicit-check-not="call void @__flexfat_report_temporal_v3"
+; RUN: opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --implicit-check-not="call void @__flexfat_report_temporal_v3"
+; RUN: opt -passes='flexfat<tbi=last-byte>,flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --implicit-check-not="call void @__flexfat_report_temporal_v3"
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
@@ -28,7 +28,6 @@ define void @store_vector(ptr %p, <vscale x 2 x i32> %v) {
   ret void
 }
 
-; Statically excluded pointers must not introduce unused vscale computations.
 define <vscale x 4 x i32> @stack_vector(<vscale x 4 x i32> %v) {
 ; CHECK-LABEL: define <vscale x 4 x i32> @stack_vector(
 ; CHECK-NOT: call i64 @llvm.vscale

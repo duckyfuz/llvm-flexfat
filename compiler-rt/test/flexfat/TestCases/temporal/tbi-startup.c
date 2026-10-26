@@ -3,8 +3,6 @@
 // RUN: %clang %t.o -Wl,--whole-archive %flexfat_tbi_runtime -Wl,--no-whole-archive -lpthread -ldl -lrt -lm -o %t
 // RUN: %run %t
 
-// Compile without instrumentation and link the object before the runtime so
-// this preinit hook exercises allocation before runtime initialization.
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>

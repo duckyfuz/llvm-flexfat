@@ -164,11 +164,11 @@ void *Allocate(uptr size) {
     uptr recovered_base;
     auto *entry = TemporalEntry(base, recovered_base);
     CHECK(entry);
-    unsigned generation = atomic_load(entry, kTemporalLoadOrder);
+    unsigned generation = *entry;
 #ifdef FLEXFAT_CUSTOM_CONFIG
     if (!generation) {
       generation = 1;
-      atomic_store(entry, u8(generation), memory_order_release);
+      *entry = u8(generation);
     }
 #endif
     return reinterpret_cast<void *>(TagPointer(base, generation));

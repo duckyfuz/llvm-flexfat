@@ -25,6 +25,7 @@
 #include "llvm/Support/Regex.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
+#include "llvm/Transforms/Instrumentation/FlexFatSanitizerOptions.h"
 #include <map>
 #include <memory>
 #include <string>

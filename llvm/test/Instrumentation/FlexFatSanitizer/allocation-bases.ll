@@ -13,9 +13,6 @@ declare ptr @_ZnwmSt11align_val_t(i64, i64)
 declare ptr @unknown_pointer()
 declare i32 @__gxx_personality_v0(...)
 
-; Ordinary allocator returns are reused directly as slot bases. The size
-; lookup still clamps the direct base, keeping system-allocation fallback on
-; index-zero sentinel metadata.
 define i8 @ordinary_malloc(i64 %offset) {
 ; CHECK-LABEL: @ordinary_malloc(
 ; CHECK: %p = call ptr @malloc(i64 64)
@@ -59,8 +56,6 @@ define i8 @ordinary_families(i64 %offset, ptr %old, ptr %source) {
   ret i8 %value
 }
 
-; Aligned allocation families may return an interior address and retain full
-; base recovery.
 define i8 @aligned_families(i64 %offset) {
 ; CHECK-LABEL: @aligned_families(
 ; CHECK: %c = call ptr @aligned_alloc(i64 64, i64 128)
@@ -77,8 +72,6 @@ define i8 @aligned_families(i64 %offset) {
   ret i8 %sum
 }
 
-; A musttail result must remain immediately adjacent to its return.  Its
-; zero-width return escape is statically valid, so no base recovery is needed.
 define ptr @musttail_aligned_alloc(i64 %alignment, i64 %size) {
 ; CHECK-LABEL: @musttail_aligned_alloc(
 ; CHECK: %p = musttail call ptr @aligned_alloc(i64 %alignment, i64 %size)
@@ -87,7 +80,6 @@ define ptr @musttail_aligned_alloc(i64 %alignment, i64 %size) {
   ret ptr %p
 }
 
-; Unknown call results also retain recovery.
 define i8 @unknown_result(i64 %offset) {
 ; CHECK-LABEL: @unknown_result(
 ; CHECK: %p = call ptr @unknown_pointer()
@@ -98,7 +90,6 @@ define i8 @unknown_result(i64 %offset) {
   ret i8 %value
 }
 
-; Direct allocation bases flow through companion PHIs without recovery.
 define i8 @allocation_phi(i1 %choose, i64 %offset) {
 ; CHECK-LABEL: @allocation_phi(
 ; CHECK: %a = call ptr @malloc(i64 64)
@@ -124,8 +115,6 @@ merge:
   ret i8 %value
 }
 
-; Ordinary allocation invokes keep their normal edge intact, while an aligned
-; invoke still splits its normal edge to hold recovery.
 define i8 @ordinary_invoke(i64 %offset) personality ptr @__gxx_personality_v0 {
 ; CHECK-LABEL: @ordinary_invoke(
 ; CHECK: %p = invoke ptr @malloc(i64 64)

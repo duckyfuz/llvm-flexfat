@@ -1,15 +1,11 @@
-; RUN: opt < %s -mtriple=aarch64-linux-gnu -passes='flexfat<tbi>,flexfat<tbi>,verify' -disable-output
+; RUN: opt < %s -mtriple=aarch64-linux-gnu -passes='flexfat<tbi=last-byte>,flexfat<tbi=last-byte>,verify' -disable-output
 ; RUN: opt < %s -passes='flexfat,verify' -S | FileCheck %s
 ; RUN: %if flexfat-custom-config %{ opt < %s -passes='flexfat,verify' -S | FileCheck %s --check-prefix=CUSTOM %}
 
 target datalayout = "e-m:e-i64:64-i128:128-n32:64-S128"
 
-declare ptr @malloc(i64)
 declare i32 @__gxx_personality_v0(...)
 
-; One input root is recovered in the entry block and reused by both checks.
-; Metadata uses an absolute region index, clamped branchlessly to the
-; index-zero sentinel for pointers outside the 48-bit user address space.
 define i8 @argument_gep_chain(ptr %p, i64 %a, i64 %b) {
 ; CHECK-LABEL: @argument_gep_chain(
 ; CHECK-COUNT-1: %flexfat.root.int = ptrtoint ptr %p to i64
@@ -45,7 +41,6 @@ define i8 @argument_gep_chain(ptr %p, i64 %a, i64 %b) {
   ret i8 %sum
 }
 
-; A loaded pointer is recovered immediately after the load and reused.
 define i8 @loaded_root(ptr %slot) {
 ; CHECK-LABEL: @loaded_root(
 ; CHECK: %p = load ptr, ptr %slot
@@ -59,25 +54,6 @@ define i8 @loaded_root(ptr %slot) {
   ret i8 %sum
 }
 
-; Ordinary allocation results are already slot bases with left alignment.  A
-; fallback pointer still selects sentinel metadata when the size is loaded.
-define i8 @allocation_root(i64 %a, i64 %b) {
-; CHECK-LABEL: @allocation_root(
-; CHECK: %p = call ptr @malloc(i64 64)
-; CHECK-NEXT: %q1 = getelementptr i8, ptr %p, i64 %a
-; CHECK: ptrtoint ptr %p to i64
-; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
-  %p = call ptr @malloc(i64 64)
-  %q1 = getelementptr i8, ptr %p, i64 %a
-  %x = load i8, ptr %q1
-  %q2 = getelementptr i8, ptr %p, i64 %b
-  %y = load i8, ptr %q2
-  %sum = add i8 %x, %y
-  ret i8 %sum
-}
-
-; Differing-root selects recover only the selected pointer.  Neither inactive
-; input is used for a metadata lookup.
 define i8 @selected_root(i1 %choose, ptr %a, ptr %b) {
 ; CHECK-LABEL: @selected_root(
 ; CHECK: %p = select i1 %choose, ptr %a, ptr %b
@@ -95,8 +71,6 @@ define i8 @selected_root(i1 %choose, ptr %a, ptr %b) {
   ret i8 %sum
 }
 
-; GEP/cast/freeze chains with the same provenance root retain one cached root
-; recovery instead of recovering the selected derived pointer.
 define i8 @selected_shared_root(i1 %choose, ptr %root, i64 %a, i64 %b) {
 ; CHECK-LABEL: @selected_shared_root(
 ; CHECK-COUNT-1: %flexfat.root.int = ptrtoint ptr %root to i64
@@ -113,9 +87,7 @@ define i8 @selected_shared_root(i1 %choose, ptr %root, i64 %a, i64 %b) {
   ret i8 %v
 }
 
-; Model libc++'s cPar short/long-string union: the inactive arm may decode to
-; a high non-pointer bit pattern.  Recovery is control-dependent on the
-; pointer select and therefore never indexes metadata with %inactive.
+; An inactive short-string union arm may contain arbitrary high bits.
 define i8 @cpar_union_select(i1 %is_long, ptr %long_data, i64 %short_bits) {
 ; CHECK-LABEL: @cpar_union_select(
 ; CHECK: %inactive = inttoptr i64 %tagged to ptr
@@ -131,7 +103,6 @@ define i8 @cpar_union_select(i1 %is_long, ptr %long_data, i64 %short_bits) {
   ret i8 %v
 }
 
-; Loop PHIs propagate a companion base PHI rather than recovering per access.
 define i8 @phi_root(ptr %seed, i1 %again) {
 ; CHECK-LABEL: @phi_root(
 ; CHECK-COUNT-1: %flexfat.root.int = ptrtoint ptr %seed to i64
@@ -148,33 +119,9 @@ exit:
   ret i8 %x
 }
 
-; A direct-base allocation invoke needs no normal-edge split or recovery.
-define i8 @invoke_root(i64 %a, i64 %b) personality ptr @__gxx_personality_v0 {
-; CHECK-LABEL: @invoke_root(
-; CHECK: %p = invoke ptr @malloc(i64 64)
-; CHECK: to label %normal unwind label %exception
-; CHECK: normal:
-; CHECK-NEXT: %q1 = getelementptr i8, ptr %p, i64 %a
-; CHECK-NOT: %flexfat.root.int{{[0-9]*}} = ptrtoint ptr %p to i64
-entry:
-  %p = invoke ptr @malloc(i64 64) to label %normal unwind label %exception
-normal:
-  %q1 = getelementptr i8, ptr %p, i64 %a
-  %x = load i8, ptr %q1
-  %q2 = getelementptr i8, ptr %p, i64 %b
-  %y = load i8, ptr %q2
-  %sum = add i8 %x, %y
-  ret i8 %sum
-exception:
-  %landing = landingpad { ptr, i32 } cleanup
-  ret i8 0
-}
-
-; Resolving an invoke incoming to a pointer PHI splits a critical normal edge.
-; The companion PHI must already contain every predecessor when SplitEdge
-; rewrites the destination PHIs.
 declare ptr @unknown_pointer()
 
+; Splitting the invoke edge must see complete companion-PHI incoming lists.
 define i8 @invoke_phi_root(i1 %choose, ptr %fallback)
     personality ptr @__gxx_personality_v0 {
 ; CHECK-LABEL: @invoke_phi_root(

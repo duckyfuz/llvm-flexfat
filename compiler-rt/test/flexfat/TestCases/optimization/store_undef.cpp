@@ -16,7 +16,6 @@
 // DEST: FLEXFAT ERROR: out-of-bounds
 // DEST: operation = write
 
-// The driver is uninstrumented so the tested checks are in the IR fixture.
 #include <string.h>
 extern "C" void loop_spill(void **slot, unsigned long offset, bool update);
 extern "C" void bad_destination();

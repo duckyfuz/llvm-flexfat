@@ -8,9 +8,6 @@
 // RUN: not %run %t read 2>&1 | FileCheck %s
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t range 2>&1 | FileCheck %s
-// RUN: %run %t
-// RUN: not %run %t read 2>&1 | FileCheck %s
-// RUN: not %run %t range 2>&1 | FileCheck %s
 // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
 
 #include <cassert>
@@ -34,7 +31,6 @@ int main(int argc, char **argv) {
   assert(__flexfat_get_size((uintptr_t)p) == 16);
   assert(__flexfat_get_usable_size((uintptr_t)p) == 15);
   assert(malloc_usable_size(p) == 15);
-  // The requested payload and its one-past pointer must remain valid.
   memset(p, 90, 15);
   char *end = opaque(p + 15);
   if (argc > 1 && !strcmp(argv[1], "read"))

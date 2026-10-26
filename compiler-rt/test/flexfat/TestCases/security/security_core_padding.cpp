@@ -6,23 +6,22 @@
 #include <stdint.h>
 
 int main() {
-  // Requesting 17 bytes will result in a 32-byte FlexFat allocation.
-  char *p = (char *)malloc(17);
+  volatile char *p = (volatile char *)malloc(17);
   if (!p) return 1;
 
-  // Access within requested bounds.
   p[0] = 'a';
   p[16] = 'b';
 
-  // Access past requested bounds (17), but within usable class capacity (31).
-  // Class padding remains accessible, excluding the reserved trailing byte.
   p[17] = 'c';
   p[30] = 'z';
 
   printf("Padding access: ok\n");
-  // CHECK: Padding access: ok
-  // CHECK-NOT: FLEXFAT ERROR
 
-  free(p);
+  if (p[0] != 'a' || p[16] != 'b' || p[17] != 'c' || p[30] != 'z')
+    return 2;
+  free((void *)p);
   return 0;
 }
+
+// CHECK: Padding access: ok
+// CHECK-NOT: FLEXFAT ERROR

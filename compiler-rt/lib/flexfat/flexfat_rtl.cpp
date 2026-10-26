@@ -6,14 +6,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file is the main file of the FlexFat Sanitizer runtime library.
-//
-// FlexFat pointers encode allocation bounds information directly in the pointer
-// value through careful memory layout. This allows O(1) bounds checking without
-// maintaining separate metadata.
-//
-//===----------------------------------------------------------------------===//
 
 #include "flexfat_allocator.h"
 #include "flexfat_config.h"
@@ -53,22 +45,7 @@ bool IsReady() {
   return atomic_load(&init_state, memory_order_acquire) == unsigned(InitState::Ready);
 }
 
-// Set to true when -fsanitize-recover=flexfat is active. Controls whether
-// interceptor-level OOB (memset/memcpy/memmove) warns-and-continues or aborts.
-bool flexfat_recover = false;
-
-// Maximum number of size classes across both modes.
-// In POW2-only mode kNumSizeClasses=27; with a custom config it can be up to
-// FLEXFAT_MAX_ARRAY_SIZE. We size the static arrays at compile time using
-// whichever is larger so the same translation unit works in both modes.
-#ifdef FLEXFAT_CUSTOM_CONFIG
-static constexpr uptr kMaxSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
-#else
-static constexpr uptr kMaxSizeClasses = kNumSizeClasses;
-#endif
-
-// Region table - initialized in __flexfat_init
-RegionInfo kRegions[kMaxSizeClasses];
+RegionInfo kRegions[kNumSizeClasses];
 
 // LowFat allocator state: the first word of a free slot is reserved.
 struct FreeBlock {
@@ -88,23 +65,51 @@ struct RegionAllocator {
   uptr endptr;
   uptr accessptr;
 };
-static RegionAllocator region_allocators[kMaxSizeClasses];
+static RegionAllocator region_allocators[kNumSizeClasses];
+
+// Fixed table offsets are part of the compiler ABI, not mapping lengths.
+// Spatial and temporal initialization map their own tables independently.
+// The pass uses absolute addressing for these tables:
+//   slot 0: Sizes (8 bytes per address-region index)
+//   slot 1: Reciprocal magics (custom mode)
+//   slot 2: Temporal biases (custom out-of-line TBI ABI v3)
+//   slot 3: Masks (POW2 mode)
+// Custom mode generates kTablesBase together with its region geometry.
+static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
+static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
+static constexpr uptr kTablesAddressSpan = 4 * kTablesOffset;
+
+static_assert(kTableEntries * sizeof(u64) <= kTablesOffset,
+              "FlexFat metadata table exceeds its fixed slot");
+static_assert(kManagedTableBegin + kNumSizeClasses <= kTableEntries,
+              "FlexFat managed regions exceed the 48-bit metadata table");
+static_assert(kRegionBase + kNumSizeClasses * kRegionSize <= kTablesBase,
+              "FlexFat managed regions overlap fixed metadata");
+static_assert(kTablesBase + kTablesAddressSpan <= kUserAddressLimit,
+              "FlexFat fixed metadata exceeds the 48-bit address space");
+
+static void MapMetadataTable(uptr slot, const char *name) {
+  const uptr address = kTablesBase + slot * kTablesOffset;
+  const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), GetPageSizeCached());
+  CHECK_LE(bytes, kTablesOffset);
+  if (!MemoryRangeIsAvailable(address, address + bytes - 1) ||
+      !MmapFixedNoReserve(address, bytes, name)) {
+    Printf("FLEXFAT initialization failed: fixed %s table\n", name);
+    Die();
+  }
+}
 
 #ifdef FLEXFAT_TEMPORAL_TBI
 // POW2 generations wrap modulo 256; custom generations use 1..255.
 // There is no independent liveness tracking. A matching forged tag can pass
 // for a freed slot, and stale tags can match again after generation wraparound.
-static_assert(sizeof(atomic_uint8_t) == 1,
-              "Temporal metadata must occupy one byte per slot");
-#ifdef FLEXFAT_CUSTOM_CONFIG
-static constexpr memory_order kTemporalLoadOrder = memory_order_acquire;
-#else
-static constexpr memory_order kTemporalLoadOrder = memory_order_relaxed;
-#endif
+// Generation bytes use ordinary accesses, like HWASan tags. Allocator
+// updates are serialized by RegionLock; tag observations do not synchronize
+// application accesses with a concurrent free.
 #if !defined(FLEXFAT_TBI_LAST_BYTE) && !defined(FLEXFAT_TBI_PRIOR_BYTE)
 #ifdef FLEXFAT_CUSTOM_CONFIG
 // Custom-mode foreign table entries address this immutable byte.
-static atomic_uint8_t temporal_sentinel;
+static u8 temporal_sentinel;
 static uptr *TemporalBiases() {
   return reinterpret_cast<uptr *>(kTablesBase + 2 * kTablesOffset);
 }
@@ -152,6 +157,8 @@ static void InitTemporal() {
   map_shadow(kTemporalShadowOffset, kTemporalShadowBytes);
 #endif
 #else
+  // The bias table belongs to temporal storage, not spatial initialization.
+  MapMetadataTable(2, "flexfat_temporal_biases");
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr size = SizeClassToSize(i), start = GetRegionStart(i);
@@ -179,7 +186,7 @@ static void InitTemporal() {
 
 // Allocation operations require complete slots, unlike instrumentation's
 // addressable padding bytes. Arithmetic stays unsigned until the final cast.
-static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
+static u8 *TemporalEntry(uptr raw, uptr &base) {
   uptr region = GetRegionIndex(raw);
   if (region >= kNumSizeClasses)
     return nullptr;
@@ -190,22 +197,20 @@ static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
   if (base < start || base > end - size)
     return nullptr;
 #ifdef FLEXFAT_TBI_PRIOR_BYTE
-  return reinterpret_cast<atomic_uint8_t *>(base - 1);
+  return reinterpret_cast<u8 *>(base - 1);
 #elif defined(FLEXFAT_TBI_LAST_BYTE)
-  return reinterpret_cast<atomic_uint8_t *>(base + size - 1);
+  return reinterpret_cast<u8 *>(base + size - 1);
 #else
 #ifndef FLEXFAT_CUSTOM_CONFIG
 #ifdef FLEXFAT_TBI_PACKED_SHADOW
   const unsigned shift = unsigned(region + kMinSizeLog);
   const s64 biased = s64(raw & 0xffffffffULL) - s64(1ULL << 33);
-  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset +
-                                           uptr(biased >> shift));
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset + uptr(biased >> shift));
 #else
-  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset +
-                                             (base >> kMinSizeLog));
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset + (base >> kMinSizeLog));
 #endif
 #else
-  return reinterpret_cast<atomic_uint8_t *>(
+  return reinterpret_cast<u8 *>(
       TemporalBiases()[raw >> kRegionSizeLog] + slot);
 #endif
 #endif
@@ -213,7 +218,7 @@ static atomic_uint8_t *TemporalEntry(uptr raw, uptr &base) {
 
 struct TemporalState {
   uptr base = 0;
-  atomic_uint8_t *entry = nullptr;
+  u8 *entry = nullptr;
   unsigned generation = 0;
 
   bool Matches(uptr ptr) const {
@@ -227,11 +232,11 @@ struct TemporalState {
 };
 
 #ifndef FLEXFAT_CUSTOM_CONFIG
-static atomic_uint8_t *ForeignTemporalEntry() {
+static u8 *ForeignTemporalEntry() {
 #if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
-  return reinterpret_cast<atomic_uint8_t *>(&__flexfat_tbi_zero_sentinel);
+  return &__flexfat_tbi_zero_sentinel;
 #else
-  return reinterpret_cast<atomic_uint8_t *>(kTemporalShadowOffset);
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset);
 #endif
 }
 #endif
@@ -244,7 +249,7 @@ static TemporalState LoadTemporalState(uptr ptr) {
     state.entry = ForeignTemporalEntry();
 #endif
   if (state.entry)
-    state.generation = atomic_load(state.entry, kTemporalLoadOrder);
+    state.generation = *state.entry;
   return state;
 }
 
@@ -301,44 +306,17 @@ static void EnableTaggedAddresses() {
 }
 #endif
 
-// Fixed address where the metadata tables are mapped during initialization.
-// Pow2 mode uses the size and mask tables. Custom mode uses the size and magic
-// tables. This allows the LLVM pass to use absolute addressing (imm[index*8])
-// instead of PC-relative loads.
-//
-//   kTablesBase + 0 * kTablesOffset: Sizes (8 bytes per class)
-//   kTablesBase + 1 * kTablesOffset: Magics (custom mode)
-//   kTablesBase + 2 * kTablesOffset: Temporal biases (TBI ABI v3)
-//   kTablesBase + 3 * kTablesOffset: Masks (POW2 mode)
-// Custom mode generates kTablesBase together with its region geometry.
-static constexpr uptr kTablesMappingSize = 4 * kTablesOffset;
-static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
-static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
-
-static_assert(kTableEntries * sizeof(u64) <= kTablesOffset,
-              "FlexFat metadata table exceeds its fixed mapping");
-static_assert(kManagedTableBegin + kNumSizeClasses <= kTableEntries,
-              "FlexFat managed regions exceed the 48-bit metadata table");
-static_assert(kRegionBase + kNumSizeClasses * kRegionSize <= kTablesBase,
-              "FlexFat managed regions overlap fixed metadata");
-static_assert(kTablesBase + kTablesMappingSize <= kUserAddressLimit,
-              "FlexFat fixed metadata exceeds the 48-bit address space");
-
 static void InitializeFlags() {
   SetCommonFlagsDefaults();
 
   {
     CommonFlags cf;
     cf.CopyFrom(*common_flags());
-    cf.exitcode = 1;           // Fatal OOB exits with code 1 by default
-    cf.abort_on_error = false; // Use the exitcode path, not SIGABRT, so output
-                               // is flushed before the process exits
+    cf.exitcode = 1;
+    cf.abort_on_error = false;
     OverrideCommonFlags(cf);
   }
 
-  // Register all common flags with a parser and read FLEXFAT_OPTIONS.
-  //    Allow overriding flags at runtime, e.g.:
-  //    FLEXFAT_OPTIONS=exitcode=42:verbosity=1 ./my_program
   FlagParser parser;
   RegisterCommonFlags(&parser);
   parser.ParseStringFromEnv("FLEXFAT_OPTIONS");
@@ -347,25 +325,14 @@ static void InitializeFlags() {
   SetAllocatorMayReturnNull(common_flags()->allocator_may_return_null);
 }
 
-static void InitTables() {
-  // Reserve enough address space for the fixed table offsets used by the pass.
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+static void InitSpatialTables() {
+  // Cover all user-address indices, leaving unused ABI slots and gaps unmapped.
+  MapMetadataTable(0, "flexfat_sizes");
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  bool mapped = MmapFixedNoReserve(kTablesBase, 2 * kTablesOffset,
-                                    "flexfat_tables");
+  MapMetadataTable(1, "flexfat_magics");
 #else
-  bool mapped = MmapFixedNoReserve(kTablesBase, kTablesOffset,
-                                    "flexfat_tables") &&
-                MmapFixedNoReserve(kTablesBase + 3 * kTablesOffset,
-                                    kTablesOffset, "flexfat_masks");
+  MapMetadataTable(3, "flexfat_masks");
 #endif
-  if (!mapped) {
-#else
-  if (!MmapFixedNoReserve(kTablesBase, kTablesMappingSize, "flexfat_tables")) {
-#endif
-    Printf("FLEXFAT initialization failed: fixed spatial tables\n");
-    Die();
-  }
 
   u64 *sizes = (u64 *)(kTablesBase + 0 * kTablesOffset);
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -376,15 +343,11 @@ static void InitTables() {
 
   // LowFat-style absolute indexing covers every user address below 2^48.
   // Foreign regions receive wide bounds and zero recovery metadata; managed
-  // regions overwrite those sentinels with their real class metadata.
-  for (uptr i = 0; i < kTableEntries; ++i) {
+  // regions overwrite those sentinels with their real class metadata. Anonymous
+  // mappings already provide zero magics/masks: do not fault foreign pages just
+  // to write zeros. Only pages containing managed recovery entries need backing.
+  for (uptr i = 0; i < kTableEntries; ++i)
     sizes[i] = ~(u64)0;
-#ifdef FLEXFAT_CUSTOM_CONFIG
-    magics[i] = 0;
-#else
-    masks[i] = 0;
-#endif
-  }
 
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr table_index = kManagedTableBegin + i;
@@ -433,27 +396,25 @@ void Deallocate(void *ptr) {
     if (slot_base >= min_base &&
         slot_base <= region_start + kRegionSize - slot_size) {
 #ifdef FLEXFAT_TBI_PRIOR_BYTE
-      state.entry = reinterpret_cast<atomic_uint8_t *>(slot_base - 1);
+      state.entry = reinterpret_cast<u8 *>(slot_base - 1);
 #else
-      state.entry = reinterpret_cast<atomic_uint8_t *>(
-          slot_base + slot_size - 1);
+      state.entry = reinterpret_cast<u8 *>(slot_base + slot_size - 1);
 #endif
-      state.generation = atomic_load(state.entry, kTemporalLoadOrder);
+      state.generation = *state.entry;
     }
 #else
     state = LoadTemporalState((uptr)ptr);
 #endif
     valid = state.Matches((uptr)ptr);
-    if (valid)
-      atomic_store(state.entry,
-#ifdef FLEXFAT_CUSTOM_CONFIG
-                   u8(state.generation == 255 ? 1 : state.generation + 1),
-#else
-                   u8(state.generation + 1),
-#endif
-                   memory_order_release);
 #endif
     if (valid) {
+#ifdef FLEXFAT_TEMPORAL_TBI
+#ifdef FLEXFAT_CUSTOM_CONFIG
+      *state.entry = u8(state.generation == 255 ? 1 : state.generation + 1);
+#else
+      *state.entry = u8(state.generation + 1);
+#endif
+#endif
       // Invalidate before overwriting the slot with the raw free-list link.
       FreeBlock *block = (FreeBlock *)slot_base;
       ReleaseSlotPages(slot_base, SizeClassToSize(region));
@@ -467,46 +428,9 @@ void Deallocate(void *ptr) {
 #endif
 }
 
-static void PrintOobHeader(const char *level, uptr ptr, uptr base, uptr bound,
-                           int is_write) {
-  // Compute the signed overflow: how many bytes past the end of the allocation
-  // the access reached. 0 means exactly at the boundary.
-  sptr overflow = (sptr)(ptr) - (sptr)(base + bound);
-  const char *op = is_write ? "write" : "read";
-
-  Printf("FLEXFAT %s: out-of-bounds error detected!\n", level);
-  Printf("          operation = %s\n", op);
-  Printf("          pointer   = 0x%zx (heap)\n", ptr);
-  Printf("          base      = 0x%zx\n", base);
-  Printf("          size      = %zu\n", bound);
-  const char *sign = (overflow >= 0) ? "+" : "";
-  Printf("          overflow  = %s%zd\n", sign, (long)overflow);
-  Printf("\n");
-}
-
-static void PrintErrorAndDie(uptr ptr, uptr base, uptr bound, int is_write,
-                             const StackTrace &stack) {
-  PrintOobHeader("ERROR", ptr, base, bound, is_write);
-  stack.Print();
-  Die();
-}
-
-static void PrintWarning(uptr ptr, uptr base, uptr bound, int is_write,
-                         const StackTrace &stack) {
-  PrintOobHeader("WARNING", ptr, base, bound, is_write);
-  stack.Print();
-}
-
 } // namespace __flexfat
 
-// ---------------------- Interface Functions ----------------------
-
 extern "C" {
-
-SANITIZER_INTERFACE_ATTRIBUTE
-void __flexfat_set_recover(int recover) {
-  __flexfat::flexfat_recover = (recover != 0);
-}
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __flexfat_init() {
@@ -521,7 +445,7 @@ void __flexfat_init() {
   EnableTaggedAddresses();
 #endif
 
-  __flexfat::InitTables();
+  __flexfat::InitSpatialTables();
 
   __flexfat::InitRegionTable();
 
@@ -538,16 +462,20 @@ void __flexfat_init() {
   atomic_store(&init_state, unsigned(InitState::Ready), memory_order_release);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+SANITIZER_INTERFACE_ATTRIBUTE NORETURN
 void __flexfat_report_oob(uptr ptr, uptr base, uptr bound, int is_write) {
-  GET_STACK_TRACE_FATAL_HERE;
-  __flexfat::PrintErrorAndDie(ptr, base, bound, is_write, stack);
-}
+  sptr overflow = (sptr)ptr - (sptr)(base + bound);
 
-SANITIZER_INTERFACE_ATTRIBUTE
-void __flexfat_warn_oob(uptr ptr, uptr base, uptr bound, int is_write) {
+  Printf("FLEXFAT ERROR: out-of-bounds error detected!\n");
+  Printf("          operation = %s\n", is_write ? "write" : "read");
+  Printf("          pointer   = 0x%zx (heap)\n", ptr);
+  Printf("          base      = 0x%zx\n", base);
+  Printf("          size      = %zu\n", bound);
+  Printf("          overflow  = %s%zd\n\n", overflow >= 0 ? "+" : "",
+         (long)overflow);
   GET_STACK_TRACE_FATAL_HERE;
-  __flexfat::PrintWarning(ptr, base, bound, is_write, stack);
+  stack.Print();
+  Die();
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE

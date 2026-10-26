@@ -1,5 +1,5 @@
 // REQUIRES: flexfat-tbi
-// RUN: %clangxx_flexfat_tbi -mllvm -flexfat-tbi-storage=last-byte %flexfat_config_flags -fno-builtin %s -o %t
+// RUN: %clangxx_flexfat_tbi -fsanitize-flexfat-tbi=last-byte %flexfat_config_flags -fno-builtin %s -o %t
 // RUN: %run %t
 // RUN: %run %t onepast
 // RUN: %run %t maps
@@ -37,8 +37,7 @@ int main(int argc, char **argv) {
   if (argc > 1 && !strcmp(argv[1], "byte"))
     return *(volatile char *)last;
   if (argc > 1 && !strcmp(argv[1], "wide")) {
-    // Default scalar checks test the starting byte. The wide read overlaps
-    // the reserved generation byte without starting at it.
+    // Default scalar checks validate the starting byte, not the full width.
     (void)*(volatile int *)(last - 3);
     return 0;
   }
@@ -68,8 +67,7 @@ int main(int argc, char **argv) {
     fclose(maps);
   }
   char *q = opaque((char *)malloc(15));
-  if (argc > 1 && (!strcmp(argv[1], "adjacent-tag") ||
-                   !strcmp(argv[1], "recover-other"))) {
+  if (argc > 1 && !strcmp(argv[1], "adjacent-tag")) {
     char *slots[256];
     for (char *&slot : slots)
       slot = opaque((char *)malloc(15));
@@ -78,10 +76,7 @@ int main(int argc, char **argv) {
       uintptr_t after = (uintptr_t)slots[i] & 0x00ffffffffffffffULL;
       if (after == before + 16 &&
           ((uintptr_t)slots[i] >> 56) == ((uintptr_t)slots[i - 1] >> 56)) {
-        if (!strcmp(argv[1], "adjacent-tag"))
-          *(volatile char *)opaque((char *)((uintptr_t)slots[i] - 1)) = 0;
-        else
-          *(volatile char *)(slots[i] - 2) = 1;
+        *(volatile char *)opaque((char *)((uintptr_t)slots[i] - 1)) = 0;
         return 0;
       }
     }

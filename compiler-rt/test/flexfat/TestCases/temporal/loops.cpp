@@ -1,3 +1,7 @@
+// RUN: %clangxx_flexfat_tbi -fsanitize-flexfat-tbi=prior-byte -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops %s -o %t.prior && %t.prior
+// RUN: not %t.prior quad-call 2>&1 | FileCheck %s
+// RUN: not %t.prior quad-cross 2>&1 | FileCheck %s --check-prefix=CROSS
+// RUN: not %t.prior quad-overflow 2>&1 | FileCheck %s --check-prefix=CROSS
 // REQUIRES: flexfat-tbi
 // RUN: %clangxx_flexfat_tbi -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops %s -o %t && %t
 // RUN: not %t stale 2>&1 | FileCheck %s
@@ -140,12 +144,12 @@ int main(int argc, char **argv) {
   assert(four_offsets(foreign, 28) == 2114);
   assert(scan(a+4, 8) == 68);
   assert(backwards(a+11, 8) == 68);
-  assert(scan(foreign, 32) == 528); // Unmanaged memory remains accessible.
-  update(a, b, 32);              // Check both managed roots.
+  assert(scan(foreign, 32) == 528);
+  update(a, b, 32);
   assert(scan(a, 32) == 1056);
-  update(a, foreign, 32);        // Check mixed managed and unmanaged roots.
+  update(a, foreign, 32);
   assert(scan(a, 32) == 1584);
-  update(a, b, 1);               // Check a single iteration.
+  update(a, b, 1);
   reverse_write(a+11, 8);
   assert(scan(a+4, 8) == 56);
   fixed_write(a, 8);

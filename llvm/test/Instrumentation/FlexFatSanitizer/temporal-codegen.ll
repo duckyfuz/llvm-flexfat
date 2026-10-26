@@ -1,22 +1,20 @@
 ; REQUIRES: aarch64-registered-target
-; RUN: opt -passes='flexfat<tbi>,default<O2>,verify' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --implicit-check-not='udiv' --implicit-check-not='sdiv' --implicit-check-not='__flexfat_check_temporal'
-; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=CUSTOM %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=prior-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
-; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi;tbi-storage=shadow>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: opt -passes='flexfat<tbi=last-byte>,default<O2>,verify' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --implicit-check-not='udiv' --implicit-check-not='sdiv' --implicit-check-not='__flexfat_check_temporal'
+; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=CUSTOM %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=prior-byte>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
+; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=shadow>,default<O2>' -S %s | llc -mtriple=aarch64-linux-gnu -o - | FileCheck %s --check-prefix=POW2 %}
 
 target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 
-; Isolate temporal code generation from spatial checks. The successful path
-; retains the tagged address in x0 and has neither a call nor diagnostic spills.
 define i8 @read_byte(ptr %p) {
 ; CHECK-LABEL: read_byte:
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
 ; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
-; CHECK: {{ldrb|ldarb}}
+; CHECK: ldrb
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
@@ -28,7 +26,7 @@ define i8 @read_byte(ptr %p) {
 ; CUSTOM-LABEL: read_byte:
 ; CUSTOM: umulh
 ; CUSTOM: mul
-; CUSTOM: ldarb
+; CUSTOM: ldrb
 ; POW2-LABEL: read_byte:
 ; POW2-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; POW2: ldrb

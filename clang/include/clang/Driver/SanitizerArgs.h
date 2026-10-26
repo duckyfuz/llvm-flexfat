@@ -13,6 +13,7 @@
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
+#include "llvm/Transforms/Instrumentation/FlexFatSanitizerOptions.h"
 #include <string>
 #include <vector>
 
@@ -122,19 +123,19 @@ public:
     return Sanitizers.has(SanitizerKind::NumericalStability);
   }
   bool needsRtsanRt() const { return Sanitizers.has(SanitizerKind::Realtime); }
-  bool TemporalTBI = false;
-  enum class TBIStorage { Shadow, PackedShadow, LastByte, PriorByte };
-  TBIStorage Storage = TBIStorage::LastByte;
+  llvm::FlexFatTBIMode FlexFatTBI = llvm::FlexFatTBIMode::Off;
   bool needsFlexFatTBILastByteRt() const {
-    return TemporalTBI && Storage == TBIStorage::LastByte;
+    return FlexFatTBI == llvm::FlexFatTBIMode::LastByte;
   }
   bool needsFlexFatTBIPriorByteRt() const {
-    return TemporalTBI && Storage == TBIStorage::PriorByte;
+    return FlexFatTBI == llvm::FlexFatTBIMode::PriorByte;
   }
   bool needsFlexFatTBIPackedShadowRt() const {
-    return TemporalTBI && Storage == TBIStorage::PackedShadow;
+    return FlexFatTBI == llvm::FlexFatTBIMode::PackedShadow;
   }
-  bool needsFlexFatTBIRt() const { return TemporalTBI; }
+  bool needsFlexFatTBIRt() const {
+    return FlexFatTBI != llvm::FlexFatTBIMode::Off;
+  }
   bool needsFlexFatRt() const { return Sanitizers.has(SanitizerKind::FlexFat); }
 
   bool hasMemTag() const {

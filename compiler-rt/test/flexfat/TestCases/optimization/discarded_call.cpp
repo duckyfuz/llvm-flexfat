@@ -1,29 +1,40 @@
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O3 %s -o %t && %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-MISS
-// RUN: %clangxx_flexfat -mllvm -flexfat-check-whole-access -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-CATCH
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DNOINLINE_READ -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DNOINLINE_READ -O3 %s -o %t && %run %t | FileCheck %s --check-prefix=MISS
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DINLINE_READ -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DINLINE_READ -O3 %s -o %t && %run %t | FileCheck %s --check-prefix=MISS
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DSTORE -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DSTORE -O3 %s -o %t && %run %t | FileCheck %s --check-prefix=MISS
+// RUN: %clangxx_flexfat -fsanitize-flexfat-check-whole-access -DLIVE_READ -O3 %s -o %t && not %run %t 2>&1 | FileCheck %s --check-prefix=CATCH
 
-// A discarded read is checked at O0, but can be removed by optimization
-// before FlexFat instruments at OptimizerLastEP. Whole-access checking is
-// enabled in both runs so the difference comes from optimization timing.
-
+// OptimizerLastEP sees live accesses, but discarded accesses can disappear first.
 #include <cstdio>
 #include <cstdlib>
 
-// noinline keeps this as an inter-procedural case.
+#if defined(STORE)
+__attribute__((noinline)) static void access(char *p) {
+  *reinterpret_cast<double *>(p + 14) = 42.0;
+}
+#else
+#if defined(NOINLINE_READ) || defined(LIVE_READ)
 __attribute__((noinline))
-static double peek(char *p) {
-  // 8-byte (double) OOB read. p was allocated with malloc(15); a double starting
-  // at offset 14 spans bytes [14, 22), which overflows the 16-byte FlexFat slot
-  // boundary at byte 16. FlexFat detects this as an out-of-bounds access.
+#endif
+#if !defined(LIVE_READ)
+static
+#endif
+double access(char *p) {
   return *reinterpret_cast<double *>(p + 14);
 }
+#endif
 
 int main() {
-  char *p = (char *)malloc(15);
-  peek(p);   // Return value intentionally discarded.
+  char *p = static_cast<char *>(malloc(15));
+#if defined(LIVE_READ)
+  printf("value=%f\n", access(p));
+#else
+  access(p);
+#endif
   free(p);
-
-  // CHECK-MISS: DONE
-  // CHECK-CATCH: FLEXFAT ERROR: out-of-bounds error detected!
-  printf("DONE\n");
-  return 0;
+  puts("DONE");
 }
+// MISS: DONE
+// CATCH: FLEXFAT ERROR: out-of-bounds error detected!

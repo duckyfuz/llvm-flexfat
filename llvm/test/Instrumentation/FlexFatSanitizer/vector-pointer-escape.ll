@@ -7,8 +7,6 @@ target triple = "aarch64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-i128:128-n32:64-S128"
 declare ptr @malloc(i64)
 
-; Optimizer-last can encounter a pointer vector converted to escaping integers.
-; Each pointer needs its own scalar geometry, rather than a vector/scalar cast.
 define <2 x i64> @fixed_escape(ptr %base, <2 x i64> %offsets) {
 ; CHECK-LABEL: define <2 x i64> @fixed_escape(
 ; CHECK: [[IDX0:%.*]] = extractelement <2 x i64> %offsets, i64 0
@@ -44,7 +42,6 @@ define <vscale x 2 x i64> @scalable_escape(ptr %base, <vscale x 2 x i64> %offset
   ret <vscale x 2 x i64> %v
 }
 
-; Preserve each lane's allocation base through an incoming vector PHI.
 define <2 x i64> @joined_escape(i1 %which, i64 %offset) {
 ; CHECK-LABEL: define <2 x i64> @joined_escape(
 ; CHECK: flexfat.escape.phi
@@ -71,7 +68,6 @@ merge:
   ret <2 x i64> %bits
 }
 
-; Duplicate switch edges must also agree in the scalar lane PHIs.
 define <2 x i64> @duplicate_edges(ptr %base, <2 x i64> %offsets, i32 %which) {
 ; CHECK-LABEL: define <2 x i64> @duplicate_edges(
 ; CHECK: flexfat.escape.phi = phi ptr
@@ -90,7 +86,6 @@ exit:
   ret <2 x i64> zeroinitializer
 }
 
-; Scalarize the select as well as its lane-wise GEP operands.
 define <2 x i64> @selected_escape(<2 x i1> %choose, ptr %a, ptr %b,
                                  <2 x i64> %offsets) {
 ; CHECK-LABEL: define <2 x i64> @selected_escape(
@@ -108,7 +103,6 @@ define <2 x i64> @selected_escape(<2 x i1> %choose, ptr %a, ptr %b,
 
 declare <2 x ptr> @may_throw()
 declare i32 @personality(...)
-; Extraction of an invoke result must stay on its normal edge.
 define <2 x i64> @invoke_escape(i1 %choose) personality ptr @personality {
 ; CHECK-LABEL: define <2 x i64> @invoke_escape(
 ; CHECK: invoke <2 x ptr> @may_throw()

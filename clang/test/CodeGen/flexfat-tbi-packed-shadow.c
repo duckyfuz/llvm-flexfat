@@ -1,9 +1,9 @@
 // REQUIRES: aarch64-registered-target
 // UNSUPPORTED: flexfat-custom-config
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow -O2 -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow -O2 -S -emit-llvm -o - %s | FileCheck %s
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow -O0 -emit-llvm -o - %s | FileCheck %s --check-prefix=RAW
-// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi -mllvm -flexfat-tbi-storage=packed-shadow -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=packed-shadow -O2 -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=packed-shadow -O2 -S -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=packed-shadow -O0 -emit-llvm -o - %s | FileCheck %s --check-prefix=RAW
+// RUN: %clang -target aarch64-linux-gnu -fsanitize=flexfat -fsanitize-flexfat-tbi=last-byte -fsanitize-flexfat-tbi=packed-shadow -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
 // RAW: and i64 {{.*}}, 4294967295
 // RAW: sub i64 {{.*}}, 8589934592
 // RAW: ashr i64
@@ -20,9 +20,8 @@
 // CHECK: call void @__flexfat_report_temporal_v3
 // CHECK: call void @__flexfat_tbi_abi_packed_shadow_pow2_v1()
 // ASM-LABEL: read_byte:
-// ASM: csel x[[OFFSET:[0-9]+]], x{{[0-9]+}}, xzr, lo
-// ASM-NOT: add
 // ASM: b.hs
+// ASM: csel x[[OFFSET:[0-9]+]], x{{[0-9]+}}, xzr, lo
 // ASM-NOT: add
 // ASM: ldrb w[[GEN:[0-9]+]], [x[[OFFSET]], x{{[0-9]+}}]
 // ASM-NEXT: cmp x[[GEN]], x0, lsr #56

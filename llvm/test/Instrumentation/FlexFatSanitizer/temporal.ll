@@ -1,8 +1,8 @@
-; RUN: opt -passes='flexfat<tbi>,flexfat<tbi>,verify' -S %s | FileCheck %s
-; RUN: not --crash opt -mtriple=x86_64-linux-gnu -passes='flexfat<tbi>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: not --crash opt -mtriple=aarch64-unknown-linux-gnu_ilp32 -passes='flexfat<tbi>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: sed 's/e-p:64:64/E-p:64:64/' %s | not --crash opt -passes='flexfat<tbi>' -disable-output 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: sed 's/e-p:64:64/e-p:32:32/' %s | not --crash opt -passes='flexfat<tbi>' -disable-output 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: opt -passes='flexfat<tbi=last-byte>,flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s
+; RUN: not --crash opt -mtriple=x86_64-linux-gnu -passes='flexfat<tbi=last-byte>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: not --crash opt -mtriple=aarch64-unknown-linux-gnu_ilp32 -passes='flexfat<tbi=last-byte>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: sed 's/e-p:64:64/E-p:64:64/' %s | not --crash opt -passes='flexfat<tbi=last-byte>' -disable-output 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: sed 's/e-p:64:64/e-p:32:32/' %s | not --crash opt -passes='flexfat<tbi=last-byte>' -disable-output 2>&1 | FileCheck %s --check-prefix=BAD
 ; BAD: FlexFat TBI requires little-endian Linux AArch64 with 64-bit pointers
 
 target triple = "aarch64-unknown-linux-gnu"
@@ -17,7 +17,6 @@ declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 
-; Spatial elimination at the allocation root must not remove temporal checks.
 define i32 @allocated() {
 ; CHECK-LABEL: define i32 @allocated
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 4, i32 1, i32 {{.*}})
@@ -50,7 +49,7 @@ define void @coverage(ptr %p, ptr %q, i64 %n) {
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 1, i32 {{.*}})
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 %n, i32 0, i32 {{.*}})
 ; CHECK: call void @llvm.memmove
-; CHECK-NOT: load atomic i8
+; CHECK-NOT: load i8
 ; CHECK-NOT: call void @__flexfat_report_temporal_v3
 ; CHECK: call void @llvm.memset
   %v = load <4 x i32>, ptr %p
@@ -77,7 +76,6 @@ exit:
   ret void
 }
 
-; Tagged application values must pass through unchanged.
 define ptr @pointer_value(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: define ptr @pointer_value
 ; CHECK: %s = select i1 %cond, ptr %p, ptr %q
@@ -86,8 +84,6 @@ define ptr @pointer_value(ptr %p, ptr %q, i1 %cond) {
   ret ptr %s
 }
 
-
-; An existing spatial marker must not suppress a missing temporal check.
 define i8 @already_spatial(ptr %p) {
 ; CHECK-LABEL: define i8 @already_spatial
 ; CHECK: call void @__flexfat_report_temporal_v3(i64 {{.*}}, i64 1, i32 0, i32 {{.*}})

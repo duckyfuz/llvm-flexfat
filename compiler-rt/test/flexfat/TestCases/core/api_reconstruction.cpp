@@ -27,13 +27,10 @@ int main() {
   uptr size = flexfat_size(p);
 
   printf("Base and Interior Pointers:\n");
-  // Test start of object
   if (flexfat_base(p) == (uptr)p) printf("  start: ok\n");
-  // Test interior pointer
   if (flexfat_base(p + 50) == (uptr)p) printf("  interior: ok\n");
 
   printf("Size Operations:\n");
-  // Size should be >= requested size and usually a power of 2 (or from config)
   if (size >= request_size) printf("  size_ge: ok\n");
 
   printf("Usable Size & Offsets:\n");
@@ -43,14 +40,16 @@ int main() {
   if (flexfat_usable_size(p + 50) == size - 1 - 50) printf("  usable_50: ok\n");
 
   printf("Non-Fat Pointer Handling:\n");
-  // Standard stack pointer (not instrumented yet in this test)
   int x;
   if (flexfat_base(&x) == 0) printf("  stack_base: ok\n");
   if (flexfat_size(&x) == (uptr)-1) printf("  stack_size: ok\n");
 
-  // NULL pointer
   if (flexfat_base(NULL) == 0) printf("  null_base: ok\n");
   if (flexfat_size(NULL) == (uptr)-1) printf("  null_size: ok\n");
+
+  const uptr high = UINT64_C(0xffff000000001234);
+  assert(__flexfat_get_base(high) == 0);
+  assert(__flexfat_get_size(high) == UINTPTR_MAX);
 
   free(p);
   

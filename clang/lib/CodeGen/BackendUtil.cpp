@@ -109,35 +109,6 @@ static cl::opt<bool> ClSanitizeOnOptimizerEarlyEP(
     "sanitizer-early-opt-ep", cl::Optional,
     cl::desc("Insert sanitizers on OptimizerEarlyEP."));
 
-static cl::opt<bool> FlexFatCheckWholeAccess(
-    "flexfat-check-whole-access", cl::init(false),
-    cl::desc("Check the complete width of FlexFat scalar accesses"));
-
-static cl::opt<bool>
-    FlexFatTBI("flexfat-tbi", cl::init(false),
-               cl::desc("Enable FlexFat TBI temporal checking"));
-static cl::opt<FlexFatSanitizerOptions::TBIStorage> FlexFatTBIStorage(
-    "flexfat-tbi-storage",
-    cl::init(FlexFatSanitizerOptions::TBIStorage::LastByte),
-    cl::desc("Select FlexFat TBI generation storage"),
-    cl::values(clEnumValN(FlexFatSanitizerOptions::TBIStorage::Shadow, "shadow",
-                          "Shadow storage"),
-               clEnumValN(FlexFatSanitizerOptions::TBIStorage::PackedShadow,
-                          "packed-shadow", "Packed per-slot shadow (POW2 only)"),
-               clEnumValN(FlexFatSanitizerOptions::TBIStorage::LastByte,
-                          "last-byte", "Final byte of each slot"),
-               clEnumValN(FlexFatSanitizerOptions::TBIStorage::PriorByte,
-                          "prior-byte", "Byte before each slot base")));
-static cl::opt<bool> FlexFatTBILastByte(
-    "flexfat-tbi-last-byte", cl::init(false),
-    cl::desc("Store FlexFat TBI generations in the final byte of each slot"));
-static cl::opt<bool> FlexFatTBIPriorByte(
-    "flexfat-tbi-prior-byte", cl::init(false),
-    cl::desc("Store FlexFat TBI generations just before each slot base"));
-
-static cl::opt<bool> FlexFatRecover("flexfat-recover", cl::init(false),
-                                    cl::desc("Continue after a FlexFat error"));
-
 // Experiment to mark cold functions as optsize/minsize/optnone.
 // TODO: remove once this is exposed as a proper driver flag.
 static cl::opt<PGOOptions::ColdFuncOpt> ClPGOColdFuncAttr(
@@ -706,7 +677,8 @@ static void addKCFIPass(const Triple &TargetTriple, const LangOptions &LangOpts,
 
 static void addSanitizers(const Triple &TargetTriple,
                           const CodeGenOptions &CodeGenOpts,
-                          const LangOptions &LangOpts, PassBuilder &PB) {
+                          const LangOptions &LangOpts, PassBuilder &PB,
+                          PassBuilder *FlexFatOptimizationPB) {
   auto SanitizersCallback = [&](ModulePassManager &MPM, OptimizationLevel Level,
                                 ThinOrFullLTOPhase) {
     if (CodeGenOpts.hasSanitizeCoverage()) {
@@ -818,27 +790,10 @@ static void addSanitizers(const Triple &TargetTriple,
 
   if (LangOpts.Sanitize.has(SanitizerKind::FlexFat)) {
     FlexFatSanitizerOptions FlexFatOpts;
-    FlexFatOpts.Recover =
-        CodeGenOpts.SanitizeRecover.has(SanitizerKind::FlexFat);
-    if (FlexFatRecover.getNumOccurrences())
-      FlexFatOpts.Recover = FlexFatRecover;
-    FlexFatOpts.TemporalTBI = FlexFatTBI.getNumOccurrences()
-                                  ? FlexFatTBI
-                                  : CodeGenOpts.SanitizeFlexFatTBI;
-    // Each spelling is an assignment. The final command-line assignment wins.
-    unsigned StoragePosition = FlexFatTBIStorage.getPosition();
-    FlexFatOpts.Storage = FlexFatTBIStorage;
-    if (FlexFatTBILastByte.getPosition() > StoragePosition) {
-      StoragePosition = FlexFatTBILastByte.getPosition();
-      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    }
-    if (FlexFatTBIPriorByte.getPosition() > StoragePosition)
-      FlexFatOpts.Storage = FlexFatTBIPriorByte
-                                ? FlexFatSanitizerOptions::TBIStorage::PriorByte
-                                : FlexFatSanitizerOptions::TBIStorage::LastByte;
-    if (!FlexFatOpts.TemporalTBI)
-      FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
+    FlexFatOpts.TBI = CodeGenOpts.getSanitizeFlexFatTBI();
+    FlexFatOpts.CheckWholeAccess = CodeGenOpts.SanitizeFlexFatCheckWholeAccess;
+    FlexFatOpts.ShareContainedGeometry =
+        CodeGenOpts.SanitizeFlexFatShareContainedGeometry;
 
     FlexFatSanitizerOptions SetupOpts = FlexFatOpts;
     SetupOpts.InternalModuleSetupOnly_ = true;
@@ -846,20 +801,20 @@ static void addSanitizers(const Triple &TargetTriple,
         [SetupOpts](ModulePassManager &MPM, OptimizationLevel) {
           MPM.addPass(FlexFatSanitizerPass(SetupOpts));
         });
-    // Instrument the final optimized IR, then simplify the generated checks.
+    assert(FlexFatOptimizationPB && "missing FlexFat optimization pipeline");
+    // Optimize the instrumented IR again at the requested level. The separate
+    // builder retains target/tuning settings without repeating frontend
+    // instrumentation callbacks or inserting FlexFat checks recursively.
     PB.registerOptimizerLastEPCallback(
-        [FlexFatOpts](ModulePassManager &MPM, OptimizationLevel Level,
-                      ThinOrFullLTOPhase) mutable {
+        [FlexFatOpts, FlexFatOptimizationPB](ModulePassManager &MPM,
+                                            OptimizationLevel Level,
+                                            ThinOrFullLTOPhase Phase) mutable {
           FlexFatOpts.InternalSkipOptimizations_ =
               Level == OptimizationLevel::O0;
           MPM.addPass(FlexFatSanitizerPass(FlexFatOpts));
-          if (Level != OptimizationLevel::O0) {
-            FunctionPassManager Cleanup;
-            Cleanup.addPass(EarlyCSEPass(true));
-            Cleanup.addPass(InstCombinePass());
-            Cleanup.addPass(SimplifyCFGPass());
-            MPM.addPass(createModuleToFunctionPassAdaptor(std::move(Cleanup)));
-          }
+          if (Level != OptimizationLevel::O0)
+            MPM.addPass(FlexFatOptimizationPB->buildPerModuleDefaultPipeline(
+                Level, Phase));
         });
   }
 }
@@ -996,6 +951,13 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
       CodeGenOpts.VerifyEach, PrintPassOpts);
   SI.registerCallbacks(PIC, &MAM);
   PassBuilder PB(TM.get(), PTO, PGOOpt, &PIC, CI.getVirtualFileSystemPtr());
+  // Keep this builder alive until the pipeline has run, just like PB. Reuse
+  // Clang's optimization tuning, but do not generate/use profile instrumentation
+  // a second time or register sanitizer/plugin callbacks on this builder.
+  std::unique_ptr<PassBuilder> FlexFatOptimizationPB;
+  if (LangOpts.Sanitize.has(SanitizerKind::FlexFat))
+    FlexFatOptimizationPB = std::make_unique<PassBuilder>(
+        TM.get(), PTO, std::nullopt, &PIC, CI.getVirtualFileSystemPtr());
 
   // Handle the assignment tracking feature options.
   switch (CodeGenOpts.getAssignmentTrackingMode()) {
@@ -1145,7 +1107,8 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
 
     if (!IsThinLTOPostLink) {
       // Most sanitizers only run during PreLink stage.
-      addSanitizers(TargetTriple, CodeGenOpts, LangOpts, PB);
+      addSanitizers(TargetTriple, CodeGenOpts, LangOpts, PB,
+                    FlexFatOptimizationPB.get());
       addKCFIPass(TargetTriple, LangOpts, PB);
       addLowerAllowCheckPass(CodeGenOpts, LangOpts, PB);
 

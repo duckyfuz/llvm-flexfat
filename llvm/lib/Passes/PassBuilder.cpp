@@ -982,27 +982,40 @@ Expected<HWAddressSanitizerOptions> parseHWASanPassOptions(StringRef Params) {
 
 Expected<FlexFatSanitizerOptions> parseFlexFatPassOptions(StringRef Params) {
   FlexFatSanitizerOptions Result;
-  if (!Params.empty()) {
-    for (StringRef Param : llvm::split(Params, ';')) {
-      if (Param == "recover")
-        Result.Recover = true;
-      else if (Param == "tbi")
-        Result.TemporalTBI = true;
-      else if (Param == "whole-access")
-        Result.CheckWholeAccess = true;
-      else if (Param == "tbi-storage=shadow")
-        Result.Storage = FlexFatSanitizerOptions::TBIStorage::Shadow;
-      else if (Param == "tbi-storage=last-byte")
-        Result.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-      else if (Param == "tbi-storage=prior-byte")
-        Result.Storage = FlexFatSanitizerOptions::TBIStorage::PriorByte;
-      else
-        return make_error<StringError>(
-            formatv("invalid FlexFatSanitizer pass parameter '{}'", Param)
-                .str(),
-            inconvertibleErrorCode());
+  if (Params.empty())
+    return Result;
+  bool HasTemporalOptions = false;
+  for (StringRef Param : llvm::split(Params, ';')) {
+    StringRef Value = Param;
+    if (Value.consume_front("tbi=")) {
+      auto Mode = parseFlexFatTBIMode(Value);
+      if (Mode) {
+        Result.TBI = *Mode;
+        continue;
+      }
+    } else if (Param == "whole-access") {
+      Result.CheckWholeAccess = true;
+      continue;
+    } else if (Param == "no-whole-access") {
+      Result.CheckWholeAccess = false;
+      continue;
+    } else if (Param == "share-contained-geometry") {
+      HasTemporalOptions = true;
+      Result.ShareContainedGeometry = true;
+      continue;
+    } else if (Param == "no-share-contained-geometry") {
+      HasTemporalOptions = true;
+      Result.ShareContainedGeometry = false;
+      continue;
     }
+    return make_error<StringError>(
+        formatv("invalid FlexFatSanitizer pass parameter '{}'", Param).str(),
+        inconvertibleErrorCode());
   }
+  if (HasTemporalOptions && !Result.hasTBI())
+    return make_error<StringError>(
+        "FlexFat temporal options require active TBI",
+        inconvertibleErrorCode());
   return Result;
 }
 

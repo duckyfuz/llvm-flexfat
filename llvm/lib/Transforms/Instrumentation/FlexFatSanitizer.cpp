@@ -6,14 +6,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-//
-// This file implements the FlexFat Sanitizer instrumentation pass.
-//
-// FlexFat pointers encode allocation bounds information directly in the pointer
-// value through careful memory layout. This pass instruments memory accesses
-// to call runtime functions that verify bounds using this encoded information.
-//
-//===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Instrumentation/FlexFatSanitizer.h"
 #include "llvm/ADT/DenseMap.h"
@@ -32,7 +24,6 @@
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ModRef.h"
@@ -42,8 +33,6 @@
 #include <algorithm>
 #include <optional>
 
-// When the build generates a custom size-class config, pull in the tables so
-// the pass can emit the right IR (AND vs. 128-bit magic multiply).
 #ifdef FLEXFAT_CUSTOM_CONFIG
 #include "flexfat_config_generated.h"
 #endif
@@ -52,20 +41,12 @@ using namespace llvm;
 
 #define DEBUG_TYPE "flexfat"
 
-static cl::opt<bool> ClShareContainedGeometry(
-    "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
-    cl::desc(
-        "Share temporal geometry for accesses proven within an allocation"));
-static cl::opt<bool> ClTBIOrdinaryLoads(
-    "flexfat-tbi-ordinary-loads", cl::Hidden, cl::init(false),
-    cl::desc("Use ordinary generation loads for TBI storage experiments"));
 STATISTIC(NumInstrumentedLoads, "Number of loads instrumented");
 STATISTIC(NumInstrumentedStores, "Number of stores instrumented");
 STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
 STATISTIC(NumInstrumentedMemIntrinsics,
           "Number of mem intrinsics instrumented");
 STATISTIC(NumInstrumentedEscapes, "Number of pointer escapes instrumented");
-
 
 namespace {
 
@@ -144,19 +125,17 @@ struct SelectProvenance {
   std::optional<uint64_t> StaticUpperBound;
 };
 
-/// Helper class to instrument a module with FlexFat bounds checks.
 class FlexFatSanitizer {
 public:
   FlexFatSanitizer(Module &M, const FlexFatSanitizerOptions &Options)
       : M(M), Options(Options), DL(M.getDataLayout()),
         TLII(M.getTargetTriple()), TLI(TLII),
         IntptrTy(DL.getIntPtrType(M.getContext())), TablesBase(kTablesBase) {
-    if (Options.TemporalTBI &&
+    if (Options.hasTBI() &&
         (M.getTargetTriple().getArch() != Triple::aarch64 ||
          !M.getTargetTriple().isOSLinux() ||
          M.getTargetTriple().getEnvironment() == Triple::GNUILP32 ||
-         !DL.isLittleEndian() ||
-         DL.getPointerSizeInBits() != 64))
+         !DL.isLittleEndian() || DL.getPointerSizeInBits() != 64))
       report_fatal_error("FlexFat TBI requires little-endian Linux AArch64 with 64-bit pointers");
   }
 
@@ -171,9 +150,8 @@ private:
   Type *IntptrTy;
   const uint64_t TablesBase;
   bool usesInSlotTags() const {
-    return Options.TemporalTBI &&
-           (Options.Storage == FlexFatSanitizerOptions::TBIStorage::LastByte ||
-            Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte);
+    return Options.hasTBI() && (Options.TBI == FlexFatTBIMode::LastByte ||
+                                Options.TBI == FlexFatTBIMode::PriorByte);
   }
   DenseMap<Value *, BoundsRecord> Bounds;
   DenseMap<Value *, Value *> RecoveredBases;
@@ -194,10 +172,8 @@ private:
   unsigned BoundsIRGeneration = 0;
 
   FunctionCallee ReportOobFn = nullptr;
-  FunctionCallee WarnOobFn = nullptr;
 
   FunctionCallee getReportOobFn();
-  FunctionCallee getWarnOobFn();
 
   bool instrumentFunction(Function &F);
   void discoverAccesses(Instruction *I,
@@ -208,7 +184,7 @@ private:
         It != Geometries.end() && It->second.Raw)
       return It->second.Raw;
     Value *Int = IRB.CreatePtrToInt(Ptr, IntptrTy, Name);
-    return Options.TemporalTBI
+    return Options.hasTBI()
                ? IRB.CreateAnd(
                      Int, ConstantInt::get(IntptrTy, 0x00ffffffffffffffULL),
                      "flexfat.raw")
@@ -246,7 +222,6 @@ private:
   MDNode *getInstrumentedMetadata();
   MDNode *getNoSanitizeMetadata();
 
-  // Emit the OOB-check block given a pre-computed (Base, AllocSize, PtrInt).
   void emitOobCheck(IRBuilder<> &IRB, Value *PtrInt, Value *Base,
                     Value *AllocSize, uint64_t FixedAccessSize,
                     Value *DynAccessSize, Instruction *InsertBefore,
@@ -270,7 +245,7 @@ private:
     Value *Idx64 = IRB.CreateZExtOrTrunc(Idx, I64Ty);
     Value *GEP = IRB.CreateInBoundsGEP(ElemTy, BasePtr, {Idx64});
     auto *Load = IRB.CreateLoad(ElemTy, GEP);
-    if (Options.TemporalTBI)
+    if (Options.hasTBI())
       Load->setMetadata(LLVMContext::MD_invariant_load, MDNode::get(Ctx, {}));
     return Load;
   }
@@ -316,7 +291,6 @@ private:
 
 FunctionCallee FlexFatSanitizer::getReportOobFn() {
   if (!ReportOobFn) {
-    // void __flexfat_report_oob(uptr ptr, uptr base, uptr size, i8 is_write)
     Type *VoidTy = Type::getVoidTy(M.getContext());
     Type *I8Ty = Type::getInt8Ty(M.getContext());
     ReportOobFn = M.getOrInsertFunction(
@@ -332,46 +306,7 @@ FunctionCallee FlexFatSanitizer::getReportOobFn() {
   return ReportOobFn;
 }
 
-FunctionCallee FlexFatSanitizer::getWarnOobFn() {
-  if (!WarnOobFn) {
-    // void __flexfat_warn_oob(uptr ptr, uptr base, uptr size, i8 is_write)
-    Type *VoidTy = Type::getVoidTy(M.getContext());
-    Type *I8Ty = Type::getInt8Ty(M.getContext());
-    WarnOobFn = M.getOrInsertFunction(
-        "__flexfat_warn_oob",
-        FunctionType::get(VoidTy, {IntptrTy, IntptrTy, IntptrTy, I8Ty}, false));
-    if (auto *F = dyn_cast<Function>(WarnOobFn.getCallee())) {
-      F->addFnAttr(Attribute::NoUnwind);
-      F->setMemoryEffects(MemoryEffects::inaccessibleMemOnly());
-    }
-  }
-  return WarnOobFn;
-}
-
 #ifdef FLEXFAT_CUSTOM_CONFIG
-// ---------------------------------------------------------------------------
-// emitDynamicSlotMagic
-//
-// Given a runtime RegionIndex, emit IR that loads the per-class size and
-// magic from the embedded tables and returns (AllocSize, Base) as IntptrTy.
-//
-// Generated IR (conceptually):
-//
-//   %alloc_size = load i64, ptr getelementptr(__flexfat_gen_sizes, 0,
-//   %region_idx) %magic      = load i64, ptr
-//   getelementptr(__flexfat_gen_magics, 0, %region_idx)
-//
-//   ; Reciprocal fixed-point base recovery for every class
-//   %ptr128     = zext i64 %ptr to i128
-//   %magic128   = zext i64 %magic to i128
-//   %mul128     = mul i128 %ptr128, %magic128
-//   %idx128     = lshr i128 %mul128, 64
-//   %idx        = trunc i128 %idx128 to i64
-//   %candidate  = mul i64 %idx, %alloc_size
-//   %too_high   = icmp ugt i64 %candidate, %ptr
-//   %slot       = sub i64 %idx, (zext i1 %too_high to i64)
-//   %base       = mul i64 %slot, %alloc_size
-// ---------------------------------------------------------------------------
 std::pair<Value *, Value *>
 FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
                                        Value *RegionIndex) {
@@ -382,7 +317,6 @@ FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
   Value *AllocSize64 = loadFromFixedTable(IRB, TablesBase + 0 * kTablesOffset,
                                           I64Ty, RegionIndex);
 
-  // Narrow to IntptrTy (which is i64 on 64-bit targets)
   Value *AllocSize = IRB.CreateZExtOrTrunc(AllocSize64, IntptrTy);
 
   // In custom-config mode we deliberately use the reciprocal-multiply path
@@ -409,7 +343,6 @@ FlexFatSanitizer::emitDynamicSlotMagic(IRBuilder<> &IRB, Value *PtrInt,
 
 #endif // FLEXFAT_CUSTOM_CONFIG
 
-// Emit the OOB-check block given a pre-computed (Base, AllocSize, PtrInt).
 void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     Value *Base, Value *AllocSize,
                                     uint64_t FixedAccessSize,
@@ -439,14 +372,13 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
   }
 
   Instruction *OobTerm =
-      SplitBlockAndInsertIfThen(IsOOB, InsertBefore, /*Unreachable=*/false);
+      SplitBlockAndInsertIfThen(IsOOB, InsertBefore, /*Unreachable=*/true);
   markNoSanitize(OobTerm);
   IRBuilder<> OobIRB(OobTerm);
   OobIRB.SetNoSanitizeMetadata();
-  FunctionCallee OobFn = Options.Recover ? getWarnOobFn() : getReportOobFn();
   Type *I8Ty = Type::getInt8Ty(M.getContext());
   Value *IsWriteVal = ConstantInt::get(I8Ty, isWriteCheck(Kind) ? 1 : 0);
-  OobIRB.CreateCall(OobFn, {PtrInt, Base, AccessBound, IsWriteVal});
+  OobIRB.CreateCall(getReportOobFn(), {PtrInt, Base, AccessBound, IsWriteVal});
 }
 
 bool FlexFatSanitizer::shouldSkipInstruction(const Instruction *I) const {
@@ -614,7 +546,7 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
                                               bool Temporal) {
   GeometryRecord G;
   G.Tagged = B.CreatePtrToInt(Ptr, IntptrTy, "flexfat.root.int");
-  G.Raw = Options.TemporalTBI
+  G.Raw = Options.hasTBI()
               ? B.CreateAnd(G.Tagged, B.getInt64(0x00ffffffffffffffULL),
                             "flexfat.raw")
               : G.Tagged;
@@ -625,7 +557,7 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
   G.Slot = Slot;
   G.Base = B.CreateMul(Slot, Size, "flexfat.base.int");
 #else
-  if (Options.TemporalTBI) {
+  if (Options.hasTBI()) {
     // Pow2 classes have size 2^(class+4). Derive immutable geometry from the
     // region instead of reading the size and mask tables on each root. All
     // foreign regions use the zero-index bias sentinel, including high ones.
@@ -658,7 +590,7 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
     G.Base = B.CreateAnd(G.Raw, Mask, "flexfat.base.int");
   }
 #endif
-  if (Options.TemporalTBI && Temporal)
+  if (Options.hasTBI() && Temporal)
     materializeTemporalGeometry(B, G);
   return G;
 }
@@ -682,7 +614,7 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
         B.CreateAnd(Valid, B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
 #endif
     Value *Address =
-        Options.Storage == FlexFatSanitizerOptions::TBIStorage::PriorByte
+        Options.TBI == FlexFatTBIMode::PriorByte
             ? B.CreateSub(G.Base, B.getInt64(1), "flexfat.metadata.address")
             : B.CreateAdd(G.Base, B.CreateSub(G.Size, B.getInt64(1)),
                           "flexfat.metadata.address");
@@ -695,7 +627,7 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
   }
 #ifndef FLEXFAT_CUSTOM_CONFIG
   Value *Address;
-  if (Options.Storage == FlexFatSanitizerOptions::TBIStorage::PackedShadow) {
+  if (Options.TBI == FlexFatTBIMode::PackedShadow) {
     // One byte per slot, concatenating the POW2 classes below the anchor.
     // For slot shift s, prefix = 2^29 - (2^33 >> s). Combining that prefix
     // with the within-region slot index gives a single signed shift.
@@ -1558,10 +1490,9 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
   }
 }
 
-// Emit a generation observation for each covered access. Shadow observations
-// are ordinary loads, like HWASan's, and may be reused by later optimization.
-// In-slot observations retain atomic ordering unless the ordinary-load
-// experiment is explicitly enabled.
+// Emit an ordinary generation observation for each covered access, like
+// HWASan. Later optimization may reuse observations when no intervening
+// operation can invalidate them.
 bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Instruction *I = Access.Inst;
   IRBuilder<> B(I);
@@ -1589,13 +1520,6 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
       G.Tagged = B.CreatePtrToInt(Access.Pointer, IntptrTy);
   }
   auto *Generation = B.CreateLoad(B.getInt8Ty(), G.Entry, "flexfat.generation");
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  if (!ClTBIOrdinaryLoads)
-    Generation->setAtomic(AtomicOrdering::Acquire);
-#else
-  if (usesInSlotTags() && !ClTBIOrdinaryLoads)
-    Generation->setAtomic(AtomicOrdering::Monotonic);
-#endif
   Generation->setAlignment(Align(1));
   Value *Tag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
   Value *Matches = B.CreateICmpEQ(Tag, Generation);
@@ -1636,7 +1560,7 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
 
 void FlexFatSanitizer::discoverAccesses(
     Instruction *I, SmallVectorImpl<AccessRecord> &Accesses) {
-  if (!Options.TemporalTBI || I->getMetadata("flexfat.temporal"))
+  if (!Options.hasTBI() || I->getMetadata("flexfat.temporal"))
     return;
   auto Add = [&](Value *Ptr, Value *Length, bool Write) {
     SmallPtrSet<Value *, 16> Seen;
@@ -1697,7 +1621,7 @@ Value *FlexFatSanitizer::getContainedAllocationRoot(
 
 void FlexFatSanitizer::prepareContainedGeometry(
     ArrayRef<AccessRecord> Accesses, DominatorTree &DT) {
-  if (!ClShareContainedGeometry)
+  if (!Options.ShareContainedGeometry)
     return;
   for (const AccessRecord &Access : Accesses) {
     if (AccessGeometry.count({Access.Inst, Access.Pointer}))
@@ -1761,8 +1685,6 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   llvm::erase_if(ToInstrument,
                  [this](Instruction *I) { return shouldSkipInstruction(I); });
 
-  // LowFat-style phase 2: resolve every provenance root and memoize one
-  // recovered allocation base before CFG-changing checks are inserted.
   for (Instruction *I : ToInstrument)
     if (!I->hasMetadata(LLVMContext::MD_nosanitize))
       prepareBounds(I);
@@ -1772,19 +1694,18 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   DT.recalculate(F);
   if (!Options.InternalSkipOptimizations_)
     prepareContainedGeometry(TemporalAccesses, DT);
-  if (!Options.Recover)
-    for (const AccessRecord &A : TemporalAccesses)
-      if (!AccessGeometry.count({A.Inst, A.Pointer}) &&
-          !shouldSkipInstruction(A.Inst)) {
-        BoundsRecord B = getBounds(A.Pointer);
-        if (B.Kind != BaseKind::NonFlexFat) {
-          Value *Root = RecoveredBaseOrigins.lookup(B.CompanionBase);
-          Value *GeometryRoot = Root ? Root : B.CompanionBase;
-          if (isa<Instruction>(GeometryRoot) || isa<Argument>(GeometryRoot))
-            SpatialGeometry[{A.Inst, A.Pointer}] =
-                getTemporalGeometry(GeometryRoot);
-        }
+  for (const AccessRecord &A : TemporalAccesses)
+    if (!AccessGeometry.count({A.Inst, A.Pointer}) &&
+        !shouldSkipInstruction(A.Inst)) {
+      BoundsRecord B = getBounds(A.Pointer);
+      if (B.Kind != BaseKind::NonFlexFat) {
+        Value *Root = RecoveredBaseOrigins.lookup(B.CompanionBase);
+        Value *GeometryRoot = Root ? Root : B.CompanionBase;
+        if (isa<Instruction>(GeometryRoot) || isa<Argument>(GeometryRoot))
+          SpatialGeometry[{A.Inst, A.Pointer}] =
+              getTemporalGeometry(GeometryRoot);
       }
+    }
   // Without a retained spatial check or an independent same-slot proof,
   // derive temporal metadata from the actual access pointer.
   for (const AccessRecord &A : TemporalAccesses)
@@ -1792,13 +1713,6 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
         !SpatialGeometry.count({A.Inst, A.Pointer}) &&
         (isa<Instruction>(A.Pointer) || isa<Argument>(A.Pointer)))
       (void)getTemporalGeometry(A.Pointer);
-  // Temporal discovery is independent of spatial elision. Prepare all
-  // provenance before inserting any check branches (including invoke splits).
-  if (Options.Recover)
-    for (const AccessRecord &Access : TemporalAccesses)
-      Modified |= instrumentTemporal(Access);
-
-  // LowFat-style phase 3: insert checks using the cached recovered bases.
   for (Instruction *I : ToInstrument) {
     if (I->hasMetadata(LLVMContext::MD_nosanitize))
       continue;
@@ -1861,10 +1775,9 @@ bool FlexFatSanitizer::instrumentFunction(Function &F) {
   }
   // A fatal spatial failure cannot continue into the temporal observation.
   // Its successful edge also proves that the companion base names this slot.
-  if (!Options.Recover)
-    for (const AccessRecord &Access : TemporalAccesses)
-      Modified |= instrumentTemporal(Access);
-  if (Modified && Options.TemporalTBI)
+  for (const AccessRecord &Access : TemporalAccesses)
+    Modified |= instrumentTemporal(Access);
+  if (Modified && Options.hasTBI())
     invalidateTemporalAttributes(F);
   return Modified || BoundsIRGeneration != 0 || EscapeIRModified;
 }
@@ -1878,13 +1791,13 @@ bool FlexFatSanitizer::run() {
     if (Options.InternalModuleSetupOnly_) {
       // Remove attributes that would become invalid after temporal checks
       // are added, before the optimizer can use them to eliminate accesses.
-      if (Options.TemporalTBI && shouldInstrumentFunction(F)) {
+      if (Options.hasTBI() && shouldInstrumentFunction(F)) {
         TemporalFunctions.insert(&F);
         Modified |= invalidateTemporalAttributes(F);
       }
     } else if (instrumentFunction(F)) {
       Modified = true;
-      if (Options.TemporalTBI)
+      if (Options.hasTBI())
         TemporalFunctions.insert(&F);
     }
   }
@@ -1901,34 +1814,34 @@ bool FlexFatSanitizer::run() {
               Modified |= invalidateTemporalAttributes(*CB);
 
   // Storage layouts have distinct link ABIs from each other.
-  using TBIStorage = FlexFatSanitizerOptions::TBIStorage;
-  const auto Storage = Options.Storage;
+  const auto Mode = Options.TBI;
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  const char *CtorName = Storage == TBIStorage::PriorByte
+  const char *CtorName = Mode == FlexFatTBIMode::PriorByte
                              ? "__flexfat_tbi_ctor_prior_byte_custom_v2"
-                         : Storage == TBIStorage::LastByte
+                         : Mode == FlexFatTBIMode::LastByte
                              ? "__flexfat_tbi_ctor_last_byte_custom_v1"
                              : "__flexfat_tbi_ctor_v3";
-  const char *ABIName = Storage == TBIStorage::PriorByte
+  const char *ABIName = Mode == FlexFatTBIMode::PriorByte
                             ? "__flexfat_tbi_abi_prior_byte_custom_v2"
-                        : Storage == TBIStorage::LastByte
+                        : Mode == FlexFatTBIMode::LastByte
                             ? "__flexfat_tbi_abi_last_byte_custom_v1"
                             : "__flexfat_tbi_abi_v3";
 #else
-  const char *CtorName =
-      Storage == TBIStorage::PriorByte ? "__flexfat_tbi_ctor_prior_byte_pow2_v3"
-      : Storage == TBIStorage::LastByte ? "__flexfat_tbi_ctor_last_byte_pow2_v2"
-      : Storage == TBIStorage::PackedShadow
-          ? "__flexfat_tbi_ctor_packed_shadow_pow2_v1"
-          : "__flexfat_tbi_ctor_v7";
+  const char *CtorName = Mode == FlexFatTBIMode::PriorByte
+                             ? "__flexfat_tbi_ctor_prior_byte_pow2_v3"
+                         : Mode == FlexFatTBIMode::LastByte
+                             ? "__flexfat_tbi_ctor_last_byte_pow2_v2"
+                         : Mode == FlexFatTBIMode::PackedShadow
+                             ? "__flexfat_tbi_ctor_packed_shadow_pow2_v1"
+                             : "__flexfat_tbi_ctor_v7";
   const char *ABIName =
-      Storage == TBIStorage::PriorByte  ? "__flexfat_tbi_abi_prior_byte_pow2_v3"
-      : Storage == TBIStorage::LastByte ? "__flexfat_tbi_abi_last_byte_pow2_v2"
-      : Storage == TBIStorage::PackedShadow
+      Mode == FlexFatTBIMode::PriorByte ? "__flexfat_tbi_abi_prior_byte_pow2_v3"
+      : Mode == FlexFatTBIMode::LastByte ? "__flexfat_tbi_abi_last_byte_pow2_v2"
+      : Mode == FlexFatTBIMode::PackedShadow
           ? "__flexfat_tbi_abi_packed_shadow_pow2_v1"
           : "__flexfat_tbi_abi_v7";
 #endif
-  if (Options.TemporalTBI && !M.getFunction(CtorName)) {
+  if (Options.hasTBI() && !M.getFunction(CtorName)) {
     auto &Ctx = M.getContext();
     auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), false);
     auto ABI = M.getOrInsertFunction(ABIName, Ty);
@@ -1940,27 +1853,6 @@ bool FlexFatSanitizer::run() {
     B.CreateRetVoid();
     appendToGlobalCtors(M, Ctor, 0);
     appendToUsed(M, {Ctor});
-    Modified = true;
-  }
-
-  // Emit a module constructor that calls __flexfat_set_recover(Recover) so the
-  // runtime interceptors (memset/memcpy/memmove) know whether to warn or abort.
-  // This runs before main() via .init_array / __mod_init_func.
-  if (Options.Recover && !M.getFunction("__flexfat_set_recover_ctor")) {
-    LLVMContext &Ctx = M.getContext();
-    FunctionType *SetRecoverTy =
-        FunctionType::get(Type::getVoidTy(Ctx), {Type::getInt32Ty(Ctx)}, false);
-    FunctionCallee SetRecoverFn =
-        M.getOrInsertFunction("__flexfat_set_recover", SetRecoverTy);
-    Function *Ctor = Function::Create(
-        FunctionType::get(Type::getVoidTy(Ctx), false),
-        GlobalValue::InternalLinkage, "__flexfat_set_recover_ctor", &M);
-    BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Ctor);
-    IRBuilder<> CtorBuilder(BB);
-    CtorBuilder.CreateCall(SetRecoverFn,
-                           {ConstantInt::get(Type::getInt32Ty(Ctx), 1)});
-    CtorBuilder.CreateRetVoid();
-    appendToGlobalCtors(M, Ctor, /*Priority=*/0);
     Modified = true;
   }
 
@@ -1976,11 +1868,10 @@ FlexFatSanitizerPass::FlexFatSanitizerPass(
 PreservedAnalyses FlexFatSanitizerPass::run(Module &M,
                                             ModuleAnalysisManager &) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  if (Options.TemporalTBI &&
-      (Options.Storage == FlexFatSanitizerOptions::TBIStorage::Shadow ||
-       Options.Storage == FlexFatSanitizerOptions::TBIStorage::PackedShadow)) {
+  if (Options.hasTBI() && (Options.TBI == FlexFatTBIMode::Shadow ||
+                           Options.TBI == FlexFatTBIMode::PackedShadow)) {
     M.getContext().emitError(
-        Options.Storage == FlexFatSanitizerOptions::TBIStorage::PackedShadow
+        Options.TBI == FlexFatTBIMode::PackedShadow
             ? "FlexFat TBI packed-shadow storage requires a POW2 build"
             : "FlexFat TBI shadow storage requires a POW2 build");
     return PreservedAnalyses::all();
