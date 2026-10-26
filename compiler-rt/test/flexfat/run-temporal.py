@@ -57,6 +57,14 @@ for build in args.builds:
     with tempfile.TemporaryDirectory(prefix='flexfat-tbi-') as directory:
         d = Path(directory)
         exe = d/'test'
+        # Spatial tables have identical allocation rules in every TBI mode;
+        # temporal storage must not fill their unused ABI slots or gaps.
+        metadata_obj = d/'metadata.o'
+        run([cxx, '-O2', *config_flags, '-c',
+             root/'TestCases/core/metadata_mappings.cpp', '-o', metadata_obj])
+        run([cxx, *common, metadata_obj, '-o', exe])
+        run([exe])
+        checks += 1
         variants = [(['-O'+level], 'O'+level) for level in ['0', '2', '3']]
         failures = {
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',

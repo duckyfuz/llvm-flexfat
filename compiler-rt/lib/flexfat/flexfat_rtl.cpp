@@ -67,6 +67,38 @@ struct RegionAllocator {
 };
 static RegionAllocator region_allocators[kNumSizeClasses];
 
+// Fixed table offsets are part of the compiler ABI, not mapping lengths.
+// Spatial and temporal initialization map their own tables independently.
+// The pass uses absolute addressing for these tables:
+//   slot 0: Sizes (8 bytes per address-region index)
+//   slot 1: Reciprocal magics (custom mode)
+//   slot 2: Temporal biases (custom out-of-line TBI ABI v3)
+//   slot 3: Masks (POW2 mode)
+// Custom mode generates kTablesBase together with its region geometry.
+static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
+static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
+static constexpr uptr kTablesAddressSpan = 4 * kTablesOffset;
+
+static_assert(kTableEntries * sizeof(u64) <= kTablesOffset,
+              "FlexFat metadata table exceeds its fixed slot");
+static_assert(kManagedTableBegin + kNumSizeClasses <= kTableEntries,
+              "FlexFat managed regions exceed the 48-bit metadata table");
+static_assert(kRegionBase + kNumSizeClasses * kRegionSize <= kTablesBase,
+              "FlexFat managed regions overlap fixed metadata");
+static_assert(kTablesBase + kTablesAddressSpan <= kUserAddressLimit,
+              "FlexFat fixed metadata exceeds the 48-bit address space");
+
+static void MapMetadataTable(uptr slot, const char *name) {
+  const uptr address = kTablesBase + slot * kTablesOffset;
+  const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), GetPageSizeCached());
+  CHECK_LE(bytes, kTablesOffset);
+  if (!MemoryRangeIsAvailable(address, address + bytes - 1) ||
+      !MmapFixedNoReserve(address, bytes, name)) {
+    Printf("FLEXFAT initialization failed: fixed %s table\n", name);
+    Die();
+  }
+}
+
 #ifdef FLEXFAT_TEMPORAL_TBI
 // POW2 generations wrap modulo 256; custom generations use 1..255.
 // There is no independent liveness tracking. A matching forged tag can pass
@@ -125,6 +157,8 @@ static void InitTemporal() {
   map_shadow(kTemporalShadowOffset, kTemporalShadowBytes);
 #endif
 #else
+  // The bias table belongs to temporal storage, not spatial initialization.
+  MapMetadataTable(2, "flexfat_temporal_biases");
   uptr bytes = 0;
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr size = SizeClassToSize(i), start = GetRegionStart(i);
@@ -272,29 +306,6 @@ static void EnableTaggedAddresses() {
 }
 #endif
 
-// Fixed address where the metadata tables are mapped during initialization.
-// Pow2 mode uses the size and mask tables. Custom mode uses the size and magic
-// tables. This allows the LLVM pass to use absolute addressing (imm[index*8])
-// instead of PC-relative loads.
-//
-//   kTablesBase + 0 * kTablesOffset: Sizes (8 bytes per class)
-//   kTablesBase + 1 * kTablesOffset: Magics (custom mode)
-//   kTablesBase + 2 * kTablesOffset: Temporal biases (TBI ABI v3)
-//   kTablesBase + 3 * kTablesOffset: Masks (POW2 mode)
-// Custom mode generates kTablesBase together with its region geometry.
-static constexpr uptr kTablesMappingSize = 4 * kTablesOffset;
-static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
-static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
-
-static_assert(kTableEntries * sizeof(u64) <= kTablesOffset,
-              "FlexFat metadata table exceeds its fixed mapping");
-static_assert(kManagedTableBegin + kNumSizeClasses <= kTableEntries,
-              "FlexFat managed regions exceed the 48-bit metadata table");
-static_assert(kRegionBase + kNumSizeClasses * kRegionSize <= kTablesBase,
-              "FlexFat managed regions overlap fixed metadata");
-static_assert(kTablesBase + kTablesMappingSize <= kUserAddressLimit,
-              "FlexFat fixed metadata exceeds the 48-bit address space");
-
 static void InitializeFlags() {
   SetCommonFlagsDefaults();
 
@@ -314,25 +325,14 @@ static void InitializeFlags() {
   SetAllocatorMayReturnNull(common_flags()->allocator_may_return_null);
 }
 
-static void InitTables() {
-  // Reserve enough address space for the fixed table offsets used by the pass.
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+static void InitSpatialTables() {
+  // Cover all user-address indices, leaving unused ABI slots and gaps unmapped.
+  MapMetadataTable(0, "flexfat_sizes");
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  bool mapped = MmapFixedNoReserve(kTablesBase, 2 * kTablesOffset,
-                                    "flexfat_tables");
+  MapMetadataTable(1, "flexfat_magics");
 #else
-  bool mapped = MmapFixedNoReserve(kTablesBase, kTablesOffset,
-                                    "flexfat_tables") &&
-                MmapFixedNoReserve(kTablesBase + 3 * kTablesOffset,
-                                    kTablesOffset, "flexfat_masks");
+  MapMetadataTable(3, "flexfat_masks");
 #endif
-  if (!mapped) {
-#else
-  if (!MmapFixedNoReserve(kTablesBase, kTablesMappingSize, "flexfat_tables")) {
-#endif
-    Printf("FLEXFAT initialization failed: fixed spatial tables\n");
-    Die();
-  }
 
   u64 *sizes = (u64 *)(kTablesBase + 0 * kTablesOffset);
 #ifdef FLEXFAT_CUSTOM_CONFIG
@@ -343,15 +343,11 @@ static void InitTables() {
 
   // LowFat-style absolute indexing covers every user address below 2^48.
   // Foreign regions receive wide bounds and zero recovery metadata; managed
-  // regions overwrite those sentinels with their real class metadata.
-  for (uptr i = 0; i < kTableEntries; ++i) {
+  // regions overwrite those sentinels with their real class metadata. Anonymous
+  // mappings already provide zero magics/masks: do not fault foreign pages just
+  // to write zeros. Only pages containing managed recovery entries need backing.
+  for (uptr i = 0; i < kTableEntries; ++i)
     sizes[i] = ~(u64)0;
-#ifdef FLEXFAT_CUSTOM_CONFIG
-    magics[i] = 0;
-#else
-    masks[i] = 0;
-#endif
-  }
 
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr table_index = kManagedTableBegin + i;
@@ -449,7 +445,7 @@ void __flexfat_init() {
   EnableTaggedAddresses();
 #endif
 
-  __flexfat::InitTables();
+  __flexfat::InitSpatialTables();
 
   __flexfat::InitRegionTable();
 
