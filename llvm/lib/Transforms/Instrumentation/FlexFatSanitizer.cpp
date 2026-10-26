@@ -56,6 +56,9 @@ static cl::opt<bool> ClShareContainedGeometry(
     "flexfat-share-contained-geometry", cl::Hidden, cl::init(true),
     cl::desc(
         "Share temporal geometry for accesses proven within an allocation"));
+static cl::opt<bool> ClTBIOrdinaryLoads(
+    "flexfat-tbi-ordinary-loads", cl::Hidden, cl::init(false),
+    cl::desc("Use ordinary generation loads for TBI storage experiments"));
 STATISTIC(NumInstrumentedLoads, "Number of loads instrumented");
 STATISTIC(NumInstrumentedStores, "Number of stores instrumented");
 STATISTIC(NumInstrumentedAtomics, "Number of atomic operations instrumented");
@@ -412,7 +415,9 @@ void FlexFatSanitizer::emitOobCheck(IRBuilder<> &IRB, Value *PtrInt,
                                     uint64_t FixedAccessSize,
                                     Value *DynAccessSize,
                                     Instruction *InsertBefore, CheckKind Kind) {
-  Value *AccessBound = usesInSlotTags() && !isEscapeCheck(Kind)
+  // The allocator reserves a trailing byte in every mode. Keep it available
+  // for legal one-past escapes, but exclude it from memory accesses.
+  Value *AccessBound = !isEscapeCheck(Kind)
                            ? IRB.CreateSub(AllocSize, IRB.getInt64(1))
                            : AllocSize;
   Value *IsOOB = nullptr;
@@ -493,9 +498,6 @@ bool FlexFatSanitizer::isAllocationResult(Value *Ptr) const {
 }
 
 bool FlexFatSanitizer::isDirectAllocationBase(Value *Ptr) const {
-  if (Options.AllocationAlignment == FlexFatSanitizerOptions::Alignment::Right)
-    return false;
-
   auto *CB = dyn_cast<CallBase>(Ptr);
   if (!CB)
     return false;
@@ -1182,9 +1184,6 @@ bool FlexFatSanitizer::instrumentPointerCheck(Instruction *I, Value *Ptr,
     bool IsStaticallyValid =
         isEscapeCheck(Kind) ? FixedAccessSize <= *PtrBounds.StaticUpperBound
                             : FixedAccessSize < *PtrBounds.StaticUpperBound;
-    if (!usesInSlotTags() && FixedAccessSize &&
-        FixedAccessSize == *PtrBounds.StaticUpperBound)
-      IsStaticallyValid = true;
     if (IsStaticallyValid)
       return false;
   }
@@ -1237,7 +1236,7 @@ bool FlexFatSanitizer::instrumentMemoryAccess(Instruction *I, Value *Ptr,
   bool IsWrite =
       isa<StoreInst>(I) || isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I);
   if (AccessSize.isScalable()) {
-    if (!usesInSlotTags() || getBounds(Ptr).Kind == BaseKind::NonFlexFat)
+    if (getBounds(Ptr).Kind == BaseKind::NonFlexFat)
       return false;
     IRBuilder<> B(I);
     B.SetNoSanitizeMetadata();
@@ -1561,7 +1560,8 @@ void FlexFatSanitizer::prepareBounds(Instruction *I) {
 
 // Emit a generation observation for each covered access. Shadow observations
 // are ordinary loads, like HWASan's, and may be reused by later optimization.
-// In-slot observations retain atomic ordering.
+// In-slot observations retain atomic ordering unless the ordinary-load
+// experiment is explicitly enabled.
 bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Instruction *I = Access.Inst;
   IRBuilder<> B(I);
@@ -1590,9 +1590,10 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   }
   auto *Generation = B.CreateLoad(B.getInt8Ty(), G.Entry, "flexfat.generation");
 #ifdef FLEXFAT_CUSTOM_CONFIG
-  Generation->setAtomic(AtomicOrdering::Acquire);
+  if (!ClTBIOrdinaryLoads)
+    Generation->setAtomic(AtomicOrdering::Acquire);
 #else
-  if (usesInSlotTags())
+  if (usesInSlotTags() && !ClTBIOrdinaryLoads)
     Generation->setAtomic(AtomicOrdering::Monotonic);
 #endif
   Generation->setAlignment(Align(1));
@@ -1957,31 +1958,6 @@ bool FlexFatSanitizer::run() {
     BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Ctor);
     IRBuilder<> CtorBuilder(BB);
     CtorBuilder.CreateCall(SetRecoverFn,
-                           {ConstantInt::get(Type::getInt32Ty(Ctx), 1)});
-    CtorBuilder.CreateRetVoid();
-    appendToGlobalCtors(M, Ctor, /*Priority=*/0);
-    Modified = true;
-  }
-
-  // Emit a module constructor that calls __flexfat_set_right_align(1) so the
-  // runtime allocator right-aligns objects within their size-class slot.
-  // Right-aligning places the object's right edge at the slot boundary,
-  // making off-by-one overflows detectable at the cost of a left-side
-  // blind spot of (class_size - requested_size) bytes.
-  if (Options.AllocationAlignment ==
-          FlexFatSanitizerOptions::Alignment::Right &&
-      !M.getFunction("__flexfat_set_right_align_ctor")) {
-    LLVMContext &Ctx = M.getContext();
-    FunctionType *SetRightAlignTy =
-        FunctionType::get(Type::getVoidTy(Ctx), {Type::getInt32Ty(Ctx)}, false);
-    FunctionCallee SetRightAlignFn =
-        M.getOrInsertFunction("__flexfat_set_right_align", SetRightAlignTy);
-    Function *Ctor = Function::Create(
-        FunctionType::get(Type::getVoidTy(Ctx), false),
-        GlobalValue::InternalLinkage, "__flexfat_set_right_align_ctor", &M);
-    BasicBlock *BB = BasicBlock::Create(Ctx, "entry", Ctor);
-    IRBuilder<> CtorBuilder(BB);
-    CtorBuilder.CreateCall(SetRightAlignFn,
                            {ConstantInt::get(Type::getInt32Ty(Ctx), 1)});
     CtorBuilder.CreateRetVoid();
     appendToGlobalCtors(M, Ctor, /*Priority=*/0);

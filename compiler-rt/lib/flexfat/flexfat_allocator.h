@@ -30,6 +30,10 @@ void *Allocate(uptr size);
 // Allocate a managed slot with an aligned interior user pointer.
 void *AllocateAligned(uptr size, uptr alignment);
 
+// LowFat heap selector and realloc page handling.
+uptr AllocationClass(uptr size);
+void MakeAllocationAccessible(uptr ptr);
+
 // Free a managed FlexFat allocation. Callers must classify foreign pointers.
 void Deallocate(void *ptr);
 

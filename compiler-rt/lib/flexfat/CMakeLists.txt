@@ -64,6 +64,7 @@ set(FLEXFAT_SOURCES
 
 set(FLEXFAT_HEADERS
   flexfat_allocator.h
+  flexfat_lowfat_allocator.inc
   flexfat_config.h
   flexfat_interface.h
   flexfat_stack.h

@@ -43,12 +43,7 @@ def build_invocation(flags):
 # Base flags
 flexfat_base = ["-fsanitize=flexfat"]
 
-# right-align mode: allocations are biased toward the high end of the slot
-# while preserving the platform's default malloc alignment.
-flexfat_right_align = flexfat_base + ["-mllvm", "-flexfat-alignment=right"]
-
 config.substitutions.append(("%clangxx_flexfat ", build_invocation(flexfat_base)))
-config.substitutions.append(("%clangxx_flexfat_right_align ", build_invocation(flexfat_right_align)))
 
 # Recover mode versions
 config.substitutions.append(

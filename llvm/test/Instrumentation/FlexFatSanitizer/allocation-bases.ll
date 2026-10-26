@@ -1,6 +1,5 @@
 ; RUN: opt < %s -passes='flexfat,verify' -S | FileCheck %s --check-prefix=CHECK
 ; RUN: clang -x ir -O0 -fsanitize=flexfat -S -emit-llvm %s -o - | FileCheck %s --check-prefix=CLANG
-; RUN: clang -x ir -O0 -fsanitize=flexfat -mllvm -flexfat-alignment=right -S -emit-llvm %s -o - | FileCheck %s --check-prefix=RIGHT
 
 target datalayout = "e-m:e-i64:64-i128:128-n32:64-S128"
 
@@ -14,7 +13,7 @@ declare ptr @_ZnwmSt11align_val_t(i64, i64)
 declare ptr @unknown_pointer()
 declare i32 @__gxx_personality_v0(...)
 
-; Ordinary allocator returns are reused directly for left alignment. The size
+; Ordinary allocator returns are reused directly as slot bases. The size
 ; lookup still clamps the direct base, keeping system-allocation fallback on
 ; index-zero sentinel metadata.
 define i8 @ordinary_malloc(i64 %offset) {
@@ -29,9 +28,6 @@ define i8 @ordinary_malloc(i64 %offset) {
 ; CLANG-NEXT: %q = getelementptr i8, ptr %p, i64 %offset
 ; CLANG-NOT: %flexfat.root.int = ptrtoint ptr %p
 ; CLANG: ptrtoint ptr %p to i64
-; RIGHT-LABEL: @ordinary_malloc(
-; RIGHT: %p = call ptr @malloc(i64 64)
-; RIGHT-NEXT: %flexfat.root.int = ptrtoint ptr %p to i64
   %p = call ptr @malloc(i64 64)
   %q = getelementptr i8, ptr %p, i64 %offset
   %value = load i8, ptr %q
@@ -64,7 +60,7 @@ define i8 @ordinary_families(i64 %offset, ptr %old, ptr %source) {
 }
 
 ; Aligned allocation families may return an interior address and retain full
-; recovery even outside right-align mode.
+; base recovery.
 define i8 @aligned_families(i64 %offset) {
 ; CHECK-LABEL: @aligned_families(
 ; CHECK: %c = call ptr @aligned_alloc(i64 64, i64 128)

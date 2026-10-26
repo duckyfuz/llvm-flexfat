@@ -19,8 +19,8 @@ int main(int argc, char **argv) {
 
   // CHECK: FLEXFAT ERROR: out-of-bounds error detected!
   // CHECK: operation = write
-  // CHECK: size      = 16
-  // CHECK: overflow  = +1
+  // CHECK: size      = 15
+  // CHECK: overflow  = +2
   memset(buf, 'A', size);
 
   free(buf);

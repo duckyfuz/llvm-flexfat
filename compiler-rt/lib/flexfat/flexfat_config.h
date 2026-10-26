@@ -65,9 +65,9 @@ inline uptr TagPointer(uptr ptr, unsigned tag) {
 
 inline bool CheckBoundsImpl(uptr ptr, uptr access_size, uptr base,
                             uptr alloc_size) {
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+  // Every allocation reserves its trailing byte, including spatial-only and
+  // shadow-tag modes. Legal one-past pointers may point here, accesses may not.
   --alloc_size;
-#endif
   uptr offset = ptr - base;
   if (access_size > alloc_size)
     return false;
@@ -75,11 +75,7 @@ inline bool CheckBoundsImpl(uptr ptr, uptr access_size, uptr base,
 }
 
 inline uptr UsableClassSize(uptr size) {
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
   return size - 1;
-#else
-  return size;
-#endif
 }
 
 //===----------------------------------------------------------------------===//

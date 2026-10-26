@@ -1,11 +1,7 @@
-// RUN: %clangxx_flexfat_right_align -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_flexfat -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 
-// Regression test for right-align mode realloc semantics.
-//
-// A 48-byte allocation lands in a 64-byte slot and, with 16-byte malloc
-// alignment, is returned at slot_base+16. realloc() must preserve the 48 bytes
-// of user data starting at the returned pointer, not copy from slot_base.
+// Realloc across classes must preserve the requested bytes.
 
 #include <cstdio>
 #include <cstdlib>

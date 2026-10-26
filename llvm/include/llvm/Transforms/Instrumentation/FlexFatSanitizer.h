@@ -22,9 +22,6 @@ struct FlexFatSanitizerOptions {
   /// default checks only the pointer position used by the access.
   bool CheckWholeAccess = false;
 
-  enum class Alignment { Left, Right };
-  Alignment AllocationAlignment = Alignment::Left;
-
   bool InternalSkipOptimizations_ = false;
   bool InternalModuleSetupOnly_ = false;
 };

@@ -39,8 +39,8 @@ int main() {
   printf("Usable Size & Offsets:\n");
   if (flexfat_offset(p) == 0) printf("  offset_0: ok\n");
   if (flexfat_offset(p + 50) == 50) printf("  offset_50: ok\n");
-  if (flexfat_usable_size(p) == size) printf("  usable_start: ok\n");
-  if (flexfat_usable_size(p + 50) == size - 50) printf("  usable_50: ok\n");
+  if (flexfat_usable_size(p) == size - 1) printf("  usable_start: ok\n");
+  if (flexfat_usable_size(p + 50) == size - 1 - 50) printf("  usable_50: ok\n");
 
   printf("Non-Fat Pointer Handling:\n");
   // Standard stack pointer (not instrumented yet in this test)
