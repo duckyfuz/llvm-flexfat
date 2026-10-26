@@ -35,6 +35,11 @@
 #ifndef LF_CONFIG_H
 #define LF_CONFIG_H
 
+#if defined(FLEXFAT_TBI_PACKED_SHADOW) && defined(FLEXFAT_CUSTOM_CONFIG)
+#error "FlexFat TBI packed-shadow storage requires a POW2 build"
+#endif
+
+
 #include "sanitizer_common/sanitizer_internal_defs.h"
 
 #ifdef FLEXFAT_CUSTOM_CONFIG

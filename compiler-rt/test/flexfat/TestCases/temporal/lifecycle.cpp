@@ -32,11 +32,13 @@ extern "C" uintptr_t __flexfat_get_usable_size(uintptr_t);
 extern "C" void __flexfat_check_temporal(uintptr_t, uintptr_t, int);
 extern "C" void __flexfat_report_temporal_v3(uintptr_t, uintptr_t, unsigned, unsigned);
 extern "C" void __flexfat_tbi_abi_v7() __attribute__((weak));
+extern "C" void __flexfat_tbi_abi_packed_shadow_pow2_v1() __attribute__((weak));
 extern "C" void __flexfat_tbi_abi_last_byte_pow2_v2() __attribute__((weak));
 extern "C" void __flexfat_tbi_abi_prior_byte_pow2_v3() __attribute__((weak));
 static bool pow2() {
   return __flexfat_tbi_abi_v7 || __flexfat_tbi_abi_last_byte_pow2_v2 ||
-         __flexfat_tbi_abi_prior_byte_pow2_v3;
+         __flexfat_tbi_abi_prior_byte_pow2_v3 ||
+         __flexfat_tbi_abi_packed_shadow_pow2_v1;
 }
 static unsigned next_tag(unsigned current) {
   return pow2() ? (current + 1) & 255 : (current == 255 ? 1 : current + 1);

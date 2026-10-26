@@ -32,6 +32,8 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_pow2_v2();
 #ifndef FLEXFAT_CUSTOM_CONFIG
 // POW2 v7 uses the 32–48 TiB direct shadow and modulo-256 generations.
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7();
+// Packed POW2 v1 stores one byte per slot in the 512 MiB below 32 TiB.
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_packed_shadow_pow2_v1();
 #endif
 // v3 immutable biases live at kTablesBase + 2 * kTablesOffset. The generation
 // byte is addressed by wrapping integer addition of bias and absolute slot.

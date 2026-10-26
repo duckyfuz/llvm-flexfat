@@ -56,7 +56,7 @@ Use `-fsanitize=flexfat` to instrument an application. Controls:
 | `-mllvm -flexfat-check-whole-access=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-tbi=` | `true`, `false` | `false` |
 | `-mllvm -flexfat-recover=` | `true`, `false` | `false` |
-| `-mllvm -flexfat-tbi-storage=` | `shadow` (POW2 only), `last-byte`, `prior-byte` | `last-byte` |
+| `-mllvm -flexfat-tbi-storage=` | `shadow`, `packed-shadow` (both POW2 only), `last-byte`, `prior-byte` | `last-byte` |
 
 The existing Clang TBI and sanitizer recovery flags remain supported. Explicit
 `-flexfat-tbi` and `-flexfat-recover` settings override them.
@@ -77,7 +77,7 @@ Uninstrumented code can overwrite an in-slot generation byte; use shadow
 storage when such writes are
 possible. Exercise the layouts with
 `compiler-rt/test/flexfat/run-temporal.py BUILD_DIR --storage=last-byte`
-(or `prior-byte`, or `shadow` for a POW2 build).
+(or `prior-byte`, or `shadow` / `packed-shadow` for a POW2 build).
 
 POW2 TBI shadow storage derives a generation address from the slot base:
 `32 TiB + (slot_base >> 4)`. It reserves the zero-initialized 32–48 TiB
@@ -85,6 +85,18 @@ virtual address range at startup. Only the first 16-byte granule of each
 slot stores its generation. Unmanaged pointers have a recovered base of zero,
 which addresses a shared zero entry. The reservation commits physical pages
 only as entries are written.
+
+In `packed-shadow` mode (POW2 only), one byte per slot is stored in tightly
+packed class ranges in `[K - 512 MiB, K)`, where `K = 32 TiB`. A separate
+zero sentinel page starts at `K`; the last four bytes before `K` are unused.
+For an untagged pointer `raw` and slot size `2^s`, the generation address is
+`K + (((int64_t)(raw & 0xffffffff) - 2^33) >> s)` (arithmetic shift).
+Foreign pointers use `K`. This reserves 512 MiB plus a sentinel page and
+commits pages on demand. It preserves ordinary shadow's allocation capacity,
+modulo-256 generations, spatial policy and generation loads. Additional address
+arithmetic trades runtime cost for a smaller metadata footprint. The runtime
+archive is `libclang_rt.flexfat_tbi_packed_shadow.a`; its distinct ABI rejects
+objects compiled for a different storage mode.
 
 In `prior-byte` mode, each slot's generation occupies the byte immediately
 before its base. The first aligned slot in every region is reserved so this
