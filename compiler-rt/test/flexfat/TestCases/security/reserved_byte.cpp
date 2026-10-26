@@ -8,7 +8,6 @@
 // RUN: not %run %t read 2>&1 | FileCheck %s
 // RUN: not %run %t write 2>&1 | FileCheck %s
 // RUN: not %run %t range 2>&1 | FileCheck %s
-// RUN: %clangxx_flexfat_right_align -O3 %s -o %t
 // RUN: %run %t
 // RUN: not %run %t read 2>&1 | FileCheck %s
 // RUN: not %run %t range 2>&1 | FileCheck %s

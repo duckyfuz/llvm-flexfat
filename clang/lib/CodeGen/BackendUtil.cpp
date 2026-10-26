@@ -109,14 +109,6 @@ static cl::opt<bool> ClSanitizeOnOptimizerEarlyEP(
     "sanitizer-early-opt-ep", cl::Optional,
     cl::desc("Insert sanitizers on OptimizerEarlyEP."));
 
-static cl::opt<FlexFatSanitizerOptions::Alignment> FlexFatAlignment(
-    "flexfat-alignment", cl::init(FlexFatSanitizerOptions::Alignment::Left),
-    cl::desc("Controls allocation alignment within FlexFat class slots"),
-    cl::values(clEnumValN(FlexFatSanitizerOptions::Alignment::Left, "left",
-                          "Left-align allocations"),
-               clEnumValN(FlexFatSanitizerOptions::Alignment::Right, "right",
-                          "Right-align allocations")));
-
 static cl::opt<bool> FlexFatCheckWholeAccess(
     "flexfat-check-whole-access", cl::init(false),
     cl::desc("Check the complete width of FlexFat scalar accesses"));
@@ -846,7 +838,6 @@ static void addSanitizers(const Triple &TargetTriple,
                                 : FlexFatSanitizerOptions::TBIStorage::LastByte;
     if (!FlexFatOpts.TemporalTBI)
       FlexFatOpts.Storage = FlexFatSanitizerOptions::TBIStorage::LastByte;
-    FlexFatOpts.AllocationAlignment = FlexFatAlignment;
     FlexFatOpts.CheckWholeAccess = FlexFatCheckWholeAccess;
 
     FlexFatSanitizerOptions SetupOpts = FlexFatOpts;

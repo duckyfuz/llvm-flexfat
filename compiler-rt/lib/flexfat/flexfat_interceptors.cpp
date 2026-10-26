@@ -32,7 +32,6 @@ DECLARE_REAL(void *, malloc, uptr size)
 
 namespace __flexfat {
 extern bool flexfat_recover;
-extern bool flexfat_right_align;
 } // namespace __flexfat
 
 // DlsymAlloc handles allocations that happen before our runtime is initialized
@@ -46,7 +45,7 @@ struct DlsymAlloc : public DlSymAllocator<DlsymAlloc> {
 // Helper: should this allocation go through FlexFat?
 // Allocations larger than our max size class fall back to system malloc.
 static inline bool ShouldUseFlexFat(uptr size) {
-  return __flexfat::IsReady() && size > 0 && size < __flexfat::kMaxSize;
+  return __flexfat::IsReady() && size < __flexfat::kMaxSize;
 }
 
 static inline void check_bounds(const void *ptr, uptr access_size,
@@ -65,19 +64,17 @@ static inline bool IsValidPowerOfTwo(uptr value) {
   return value && (value & (value - 1)) == 0;
 }
 
-static inline bool CanManageAligned(uptr alignment, uptr size) {
-  // The allocator adds one trailing byte and alignment - 1 padding bytes.
-  uptr normalized_size = size ? size : 1;
-  return __flexfat::IsReady() && IsValidPowerOfTwo(alignment) &&
-         normalized_size < __flexfat::kMaxSize &&
-         alignment <= __flexfat::kMaxSize - normalized_size;
+static inline bool CanManageAligned(uptr alignment) {
+  // Let LowFat's aligned-allocation policy select the class, including the
+  // alignment-sized-slot fast path when size < alignment.
+  return __flexfat::IsReady() && IsValidPowerOfTwo(alignment);
 }
 
 static inline void *ManagedOrSystemAligned(uptr alignment, uptr size,
                                            void *(*fallback)(uptr, uptr)) {
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(size, alignment);
-  if (CanManageAligned(alignment, size))
+  if (CanManageAligned(alignment))
     if (void *ptr = __flexfat::AllocateAligned(size, alignment))
       return ptr;
   return fallback(alignment, size);
@@ -138,66 +135,43 @@ INTERCEPTOR(void *, realloc, void *ptr, uptr size) {
   __flexfat_check_temporal((uptr)ptr, 0, 3);
 #endif
 
-  // realloc(ptr, 0) == free(ptr)
-  if (size == 0) {
-    if (__flexfat::IsFlexFatPointer((uptr)ptr))
-      __flexfat::Deallocate(ptr);
-    else
-      REAL(free)(ptr);
-    return nullptr;
-  }
+  // Preserve LowFat's zero-size policy: allocate a new minimum-sized object
+  // and leave the old object untouched.
+  if (size == 0)
+    return ManagedOrSystemMalloc(size);
 
-  bool old_is_flexfat = __flexfat::IsFlexFatPointer((uptr)ptr);
-
-  if (!old_is_flexfat)
+  if (!__flexfat::IsFlexFatPointer((uptr)ptr))
     return REAL(realloc)(ptr, size);
 
-  if (ShouldUseFlexFat(size)) {
-    void *new_ptr = __flexfat::Allocate(size);
-    if (!new_ptr)
-      new_ptr = REAL(malloc)(size);
-    if (!new_ptr)
-      return nullptr;
-    // Copy old data. For FlexFat pointers, cap the copy to the bytes reachable
-    // from the returned pointer to the end of the slot. In right-align mode
-    // the user pointer may be shifted within the slot, so copying from the
-    // slot base would corrupt the preserved contents.
-    uptr copy_size = size;
-    uptr old_class_size = __flexfat::GetSize((uptr)ptr);
-    uptr old_base = __flexfat::GetBase((uptr)ptr);
-    uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
-    uptr old_usable = __flexfat::UsableClassSize(old_class_size) - old_offset;
-    if (old_usable < copy_size)
-      copy_size = old_usable;
-    internal_memcpy(new_ptr, ptr, copy_size);
-    __flexfat::Deallocate(ptr);
-    return new_ptr;
+  uptr old_class_size = __flexfat::GetSize((uptr)ptr);
+  uptr old_base = __flexfat::GetBase((uptr)ptr);
+  uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
+  uptr index = __flexfat::AllocationClass(size);
+  if (index == __flexfat::GetRegionIndex((uptr)ptr) &&
+      size <= __flexfat::UsableClassSize(old_class_size) - old_offset) {
+    // lowfat_realloc() keeps allocations in the same class in place and
+    // makes the complete slot accessible, including any former guard pages.
+    __flexfat::MakeAllocationAccessible((uptr)ptr);
+    return ptr;
   }
 
-  // New size exceeds FlexFat max — use system realloc
-  if (old_is_flexfat) {
-    // Must migrate from FlexFat to system
-    void *new_ptr = REAL(malloc)(size);
-    if (!new_ptr)
-      return nullptr;
-    uptr old_class_size = __flexfat::GetSize((uptr)ptr);
-    uptr old_base = __flexfat::GetBase((uptr)ptr);
-    uptr old_offset = __flexfat::Untag((uptr)ptr) - old_base;
-    uptr old_usable = __flexfat::UsableClassSize(old_class_size) - old_offset;
-    uptr copy_size = old_usable < size ? old_usable : size;
-    internal_memcpy(new_ptr, ptr, copy_size);
-    __flexfat::Deallocate(ptr);
-    return new_ptr;
-  }
-
-  return REAL(realloc)(ptr, size);
+  void *new_ptr = ManagedOrSystemMalloc(size);
+  if (!new_ptr)
+    return nullptr;
+  // LowFat tracks the slot size rather than the original request. Unprotect
+  // it before copying, since large allocations may contain inaccessible pages.
+  __flexfat::MakeAllocationAccessible((uptr)ptr);
+  uptr old_usable = __flexfat::UsableClassSize(old_class_size) - old_offset;
+  internal_memcpy(new_ptr, ptr, Min(size, old_usable));
+  __flexfat::Deallocate(ptr);
+  return new_ptr;
 }
 
 INTERCEPTOR(void *, valloc, uptr size) {
   uptr alignment = GetPageSizeCached();
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(size, alignment);
-  if (CanManageAligned(alignment, size))
+  if (CanManageAligned(alignment))
     if (void *ptr = __flexfat::AllocateAligned(size, alignment))
       return ptr;
   return REAL(valloc)(size);
@@ -213,7 +187,7 @@ INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
 #ifdef FLEXFAT_TEMPORAL_TBI
   __flexfat_check_temporal((uptr)memptr, sizeof(*memptr), 1);
 #endif
-  if (CanManageAligned(alignment, size)) {
+  if (CanManageAligned(alignment)) {
     if (void *ptr = __flexfat::AllocateAligned(size, alignment)) {
       *memptr = ptr;
       return 0;
@@ -252,7 +226,7 @@ INTERCEPTOR(void *, pvalloc, uptr size) {
   uptr rounded = RoundUpTo(size ? size : 1, page);
   if (DlsymAlloc::Use())
     return DlsymAlloc::Allocate(rounded, page);
-  if (CanManageAligned(page, rounded))
+  if (CanManageAligned(page))
     if (void *ptr = __flexfat::AllocateAligned(rounded, page))
       return ptr;
   return REAL(pvalloc)(size);

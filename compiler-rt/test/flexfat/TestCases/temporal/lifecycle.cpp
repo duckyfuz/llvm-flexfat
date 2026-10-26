@@ -177,8 +177,7 @@ int main(int argc, char **argv) {
   write_byte(p);
   char *dup = strdup("abc"); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "abc")); free(dup);
   dup = strndup("abc", 2); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "ab")); free(dup);
-  // Both layouts have enough slack here to shift the user pointer in
-  // right-align mode. Realloc must copy from that interior user address.
+  // Realloc across classes must preserve data with every storage layout.
   char *shifted = (char *)malloc(257);
   shifted[0] = 17; shifted[256] = 29;
   char *grown = (char *)realloc(shifted, 513);
@@ -188,7 +187,10 @@ int main(int argc, char **argv) {
   assert(read_byte((char *)(grown_base + grown_offset)) == 17);
   free(grown);
   char *q = (char *)realloc(p, 100); assert(q && read_byte(q) == 9); free(q);
-  p = (char *)malloc(23); assert(!realloc(p, 0));
+  p = (char *)malloc(23);
+  // LowFat realloc(p, 0) allocates separately and preserves p.
+  q = (char *)realloc(p, 0); assert(q && raw(q) != raw(p));
+  write_byte(p); assert(read_byte(p) == 9); free(p); free(q);
   p = (char *)calloc(16, 1); assert(p && (pow2() || tag(p)));
   for (unsigned i = 0; i < 16; ++i) assert(p[i] == 0);
   free(p);

@@ -4,7 +4,6 @@
 // OptimizerLastEP, followed by the fixed cleanup pipeline.
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -fdebug-pass-manager -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=OPT
 // RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O3 -fdebug-pass-manager -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=OPT
-// RUN: %clang_cc1 -triple aarch64-linux-gnu -fsanitize=flexfat -O2 -mllvm -flexfat-alignment=right -fdebug-pass-manager -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=OPT
 // OPT: Running pass: FlexFatSanitizerPass
 // OPT-NOT: Running pass: FlexFatSanitizerPass
 // OPT: Running pass: InlinerPass

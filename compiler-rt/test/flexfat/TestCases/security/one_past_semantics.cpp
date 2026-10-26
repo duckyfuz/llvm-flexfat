@@ -22,30 +22,30 @@
 // RUN: %clangxx_flexfat -O3 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
 // RUN: %clangxx_flexfat -O3 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
 // RUN: %clangxx_flexfat -O3 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && %run %t legal 2>&1 | FileCheck %s --check-prefix=LEGAL
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && %run %t escape 2>&1 | FileCheck %s --check-prefix=ESCAPE
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t boundary 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t beyond 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t deref 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && %run %t legal 2>&1 | FileCheck %s --check-prefix=LEGAL
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && %run %t escape 2>&1 | FileCheck %s --check-prefix=ESCAPE
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t boundary 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t beyond 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t deref 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && %run %t legal 2>&1 | FileCheck %s --check-prefix=LEGAL
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && %run %t escape 2>&1 | FileCheck %s --check-prefix=ESCAPE
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t boundary 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t beyond 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t deref 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
-// RUN: %clangxx_flexfat_right_align -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && %run %t legal 2>&1 | FileCheck %s --check-prefix=LEGAL
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && %run %t escape 2>&1 | FileCheck %s --check-prefix=ESCAPE
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t boundary 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t beyond 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t deref 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O0 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && %run %t legal 2>&1 | FileCheck %s --check-prefix=LEGAL
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && %run %t escape 2>&1 | FileCheck %s --check-prefix=ESCAPE
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t boundary 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t beyond 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t deref 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O2 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && %run %t legal 2>&1 | FileCheck %s --check-prefix=LEGAL
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && %run %t escape 2>&1 | FileCheck %s --check-prefix=ESCAPE
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t boundary 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t beyond 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t deref 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t write 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t range 2>&1 | FileCheck %s --check-prefix=OOB
+// RUN: %clangxx_flexfat -DREQUEST_SIZE=175 -O3 %s -o %t && not %run %t underflow 2>&1 | FileCheck %s --check-prefix=OOB
 
 #include <cstdint>
 #include <cstdio>
@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc > 1 && std::strcmp(argv[1], "underflow") == 0) {
-    // Cross the slot base, including any left padding in right-align mode.
+    // Cross the slot base.
     escape(p - opaqueSize(__flexfat_get_offset((uintptr_t)p) + 1));
     return 0;
   }
