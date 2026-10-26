@@ -28,7 +28,7 @@ int wide(volatile int *p) {
 unsigned char indexed(unsigned long n) {
 // LOOP-LABEL: define{{.*}} @indexed(
 // LOOP: call{{.*}} @malloc(i64 noundef 64)
-// LOOP: %flexfat.metadata.address = add i64
+// LOOP: %flexfat.metadata.address = add {{(nuw )?}}i64
 // LOOP: %flexfat.metadata =
 // LOOP: for.body:
 // LOOP-NOT: flexfat.metadata.address

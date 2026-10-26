@@ -65,7 +65,8 @@ for build in args.builds:
         run([cxx, *common, metadata_obj, '-o', exe])
         run([exe])
         checks += 1
-        variants = [(['-O'+level], 'O'+level) for level in ['0', '2', '3']]
+        variants = [(['-O'+level], 'O'+level)
+                    for level in ['0', '1', '2', '3', 's', 'z']]
         failures = {
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
