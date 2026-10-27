@@ -19,13 +19,17 @@
 #include "sanitizer_common/sanitizer_mutex.h"
 #include <stddef.h>
 #include <pthread.h>
+#if SANITIZER_LINUX
+#include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_posix.h"
+#include <sys/mman.h>
+#endif
 #include "sanitizer_common/sanitizer_atomic.h"
 #ifdef FLEXFAT_TEMPORAL_TBI
 #if !defined(__aarch64__) || !defined(__linux__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || __SIZEOF_POINTER__ != 8
 #error FlexFat TBI requires little-endian Linux AArch64 with 64-bit pointers
 #endif
 #include "sanitizer_common/sanitizer_linux.h"
-#include "sanitizer_common/sanitizer_libc.h"
 #include <linux/prctl.h>
 #endif
 
@@ -325,6 +329,55 @@ static void InitializeFlags() {
   SetAllocatorMayReturnNull(common_flags()->allocator_may_return_null);
 }
 
+#if SANITIZER_LINUX
+static void NORETURN SizeTableMappingFailed(const char *operation, uptr address,
+                                          uptr bytes, uptr result) {
+  int error = 0;
+  internal_iserror(result, &error);
+  Printf("FLEXFAT initialization failed: size table %s "
+         "(address=0x%zx, bytes=%zu, result=0x%zx, errno=%d)\n",
+         operation, address, bytes, result, error);
+  Die();
+}
+
+static void InitSizeTableBacking() {
+  const uptr page = GetPageSizeCached();
+  const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), page);
+  const uptr managed_begin = RoundDownTo(kManagedTableBegin * sizeof(u64), page);
+  const uptr managed_end =
+      RoundUpTo((kManagedTableBegin + kNumSizeClasses) * sizeof(u64), page);
+  // Pages intersecting managed entries retain their private backing, including
+  // any foreign entries at the boundaries.
+  internal_memset(reinterpret_cast<void *>(kTablesBase + managed_begin), 0xff,
+                  managed_end - managed_begin);
+
+  const uptr sentinel_offset = managed_begin == 0 ? managed_end : 0;
+  if (sentinel_offset >= bytes)
+    return;
+  const uptr sentinel = kTablesBase + sentinel_offset;
+  uptr result = internal_mmap(reinterpret_cast<void *>(sentinel), page,
+                              PROT_READ | PROT_WRITE,
+                              MAP_FIXED | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (result != sentinel)
+    SizeTableMappingFailed("shared mapping", sentinel, page, result);
+  internal_memset(reinterpret_cast<void *>(sentinel), 0xff, page);
+
+  // All foreign-only pages alias one all-ones shared page. A zero-old-size
+  // mremap clones that page without moving its source.
+  for (uptr offset = 0; offset < bytes; offset += page) {
+    if (offset == sentinel_offset ||
+        (offset >= managed_begin && offset < managed_end))
+      continue;
+    const uptr address = kTablesBase + offset;
+    const uptr alias = internal_mremap(reinterpret_cast<void *>(sentinel), 0,
+                                      page, MREMAP_MAYMOVE | MREMAP_FIXED,
+                                      reinterpret_cast<void *>(address));
+    if (alias != address)
+      SizeTableMappingFailed("alias mapping", address, page, alias);
+  }
+}
+#endif
+
 static void InitSpatialTables() {
   // Cover all user-address indices, leaving unused ABI slots and gaps unmapped.
   MapMetadataTable(0, "flexfat_sizes");
@@ -346,8 +399,12 @@ static void InitSpatialTables() {
   // regions overwrite those sentinels with their real class metadata. Anonymous
   // mappings already provide zero magics/masks: do not fault foreign pages just
   // to write zeros. Only pages containing managed recovery entries need backing.
+#if SANITIZER_LINUX
+  InitSizeTableBacking();
+#else
   for (uptr i = 0; i < kTableEntries; ++i)
     sizes[i] = ~(u64)0;
+#endif
 
   for (uptr i = 0; i < kNumSizeClasses; ++i) {
     uptr table_index = kManagedTableBegin + i;
@@ -360,6 +417,12 @@ static void InitSpatialTables() {
     masks[table_index] = ~(size - 1);
 #endif
   }
+#if SANITIZER_LINUX
+  const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), GetPageSizeCached());
+  const uptr result = internal_mprotect(sizes, bytes, PROT_READ);
+  if (result != 0)
+    SizeTableMappingFailed("protection", kTablesBase, bytes, result);
+#endif
 }
 
 // Ported LowFat allocation and page-management implementation.
