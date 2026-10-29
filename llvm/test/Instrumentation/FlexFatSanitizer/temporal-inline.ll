@@ -1,5 +1,5 @@
 ; RUN: opt -passes='flexfat<tbi=last-byte>,flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --implicit-check-not='__flexfat_temporal_regions' --implicit-check-not='call void @__flexfat_check_temporal' --implicit-check-not='udiv ' --implicit-check-not='sdiv '
-; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=CUSTOM %}
+; RUN: %if flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=CUSTOM --implicit-check-not='icmp ne i8' %}
 ; RUN: %if !flexfat-custom-config %{ opt -passes='flexfat<tbi=last-byte>,verify' -S %s | FileCheck %s --check-prefix=POW2 %}
 
 target triple = "aarch64-unknown-linux-gnu"
@@ -32,12 +32,13 @@ define i8 @access(ptr %p) {
 ; CUSTOM-NOT: mul i128
 ; CUSTOM: icmp uge i64 %flexfat.base.int
 ; CUSTOM: icmp ule i64 %flexfat.base.int
+; CUSTOM: [[NOT_MANAGED:%.*]] = xor i1 %flexfat.managed, true
+; CUSTOM: %flexfat.slot.valid = or i1 [[NOT_MANAGED]], {{.*}}
 ; CUSTOM: %flexfat.metadata.address = add i64
 ; CUSTOM: select i1 {{.*}}@__flexfat_tbi_zero_sentinel
 ; CUSTOM: load i8, ptr {{.*}}
-; CUSTOM: icmp ne i8 {{.*}}, 0
-; CUSTOM: xor i1 %flexfat.managed, true
-; CUSTOM: or i1
+; CUSTOM: [[MATCH:%.*]] = icmp eq i8 {{.*}}
+; CUSTOM: and i1 %flexfat.slot.valid, [[MATCH]]
 ; POW2-LABEL: define i8 @access(
 ; POW2: %flexfat.class = sub i64
 ; POW2: %flexfat.managed = icmp ult i64
@@ -91,8 +92,8 @@ define internal void @__flexfat_tbi_ctor() {
 declare void @__flexfat_tbi_abi_v1()
 ; CHECK-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_
 ; CHECK: call void @__flexfat_tbi_abi_last_byte_
-; CUSTOM-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_custom_v1()
-; CUSTOM: call void @__flexfat_tbi_abi_last_byte_custom_v1()
+; CUSTOM-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_custom_v2()
+; CUSTOM: call void @__flexfat_tbi_abi_last_byte_custom_v2()
 ; POW2-LABEL: define internal void @__flexfat_tbi_ctor_last_byte_pow2_v2()
 ; POW2: call void @__flexfat_tbi_abi_last_byte_pow2_v2()
 ; CHECK-NEXT: ret void

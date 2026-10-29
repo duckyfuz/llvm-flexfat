@@ -72,13 +72,12 @@ struct RegionAllocator {
 static RegionAllocator region_allocators[kNumSizeClasses];
 
 // Fixed table offsets are part of the compiler ABI, not mapping lengths.
-// Spatial and temporal initialization map their own tables independently.
 // The pass uses absolute addressing for these tables:
 //   slot 0: Sizes (8 bytes per address-region index)
 //   slot 1: Reciprocal magics (custom mode)
-//   slot 2: Temporal biases (custom out-of-line TBI ABI v3)
+//   slot 2: Reserved (unmapped)
 //   slot 3: Masks (POW2 mode)
-// Custom mode generates kTablesBase together with its region geometry.
+// Both build families obtain their layout from flexfat_layout.h.
 static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
 static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
 static void MapMetadataTable(uptr slot, const char *name) {
@@ -93,21 +92,18 @@ static void MapMetadataTable(uptr slot, const char *name) {
 }
 
 #ifdef FLEXFAT_TEMPORAL_TBI
-// POW2 generations wrap modulo 256; custom generations use 1..255.
+#if defined(FLEXFAT_CUSTOM_CONFIG) && !defined(FLEXFAT_TBI_LAST_BYTE) && \
+    !defined(FLEXFAT_TBI_PRIOR_BYTE)
+#error "Custom FlexFat TBI requires last-byte or prior-byte storage"
+#endif
+
+// All size-class layouts use zero-initialized generations modulo 256.
 // There is no independent liveness tracking. A matching forged tag can pass
 // for a freed slot, and stale tags can match again after generation wraparound.
 // Generation bytes use ordinary accesses, like HWASan tags. Allocator
 // updates are serialized by RegionLock; tag observations do not synchronize
 // application accesses with a concurrent free.
 #if !defined(FLEXFAT_TBI_LAST_BYTE) && !defined(FLEXFAT_TBI_PRIOR_BYTE)
-#ifdef FLEXFAT_CUSTOM_CONFIG
-// Custom-mode foreign table entries address this immutable byte.
-static u8 temporal_sentinel;
-static uptr *TemporalBiases() {
-  return reinterpret_cast<uptr *>(kTablesBase + 2 * kTablesOffset);
-}
-#endif
-#ifndef FLEXFAT_CUSTOM_CONFIG
 // Both shadow layouts use this anchor as the foreign-pointer zero sentinel.
 // Direct shadow uses slot_base >> 4; packed shadow uses a negative slot offset.
 static constexpr uptr kTemporalShadowOffset = FLEXFAT_TEMPORAL_SHADOW_OFFSET;
@@ -126,13 +122,7 @@ static_assert(kTemporalShadowOffset + 4096 <= kUserAddressLimit,
 #else
 static constexpr uptr kTemporalShadowBytes = FLEXFAT_DIRECT_SHADOW_BYTES;
 #endif
-#endif
-static_assert(sizeof(uptr) == 8, "TBI biases are 64-bit integers");
-static_assert((kUserAddressLimit >> kRegionSizeLog) * sizeof(uptr) <=
-                  kTablesOffset,
-              "TBI bias table exceeds reserved capacity");
 static void InitTemporal() {
-#ifndef FLEXFAT_CUSTOM_CONFIG
   // Reserve the selected shadow layout without committing unused pages.
   auto map_shadow = [](uptr address, uptr bytes) {
     if (!MemoryRangeIsAvailable(address, address + bytes - 1) ||
@@ -147,40 +137,24 @@ static void InitTemporal() {
 #else
   map_shadow(kTemporalShadowOffset, kTemporalShadowBytes);
 #endif
-#else
-  // The bias table belongs to temporal storage, not spatial initialization.
-  MapMetadataTable(2, "flexfat_temporal_biases");
-  uptr bytes = 0;
-  for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    uptr size = SizeClassToSize(i), start = GetRegionStart(i);
-    bytes += (start + kRegionSize - 1) / size - start / size + 1;
-  }
-  // Include partial boundary slots; zero-filled padding is addressable but
-  // must never acquire a generation through allocator/free operations.
-  uptr storage = reinterpret_cast<uptr>(
-      MmapNoReserveOrDie(bytes, "flexfat temporal metadata initialization"));
-#endif
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  auto *biases = TemporalBiases();
-  for (uptr index = 0; index < (kUserAddressLimit >> kRegionSizeLog); ++index)
-    biases[index] = reinterpret_cast<uptr>(&temporal_sentinel);
-  for (uptr i = 0; i < kNumSizeClasses; ++i) {
-    uptr size = SizeClassToSize(i), start = GetRegionStart(i);
-    uptr first = start / size;
-    uptr count = (start + kRegionSize - 1) / size - first + 1;
-    biases[start >> kRegionSizeLog] = storage - first;
-    storage += count;
-  }
-#endif
 }
 #endif
 
-// Allocation operations require complete slots, unlike instrumentation's
-// addressable padding bytes. Arithmetic stays unsigned until the final cast.
+static u8 *ForeignTemporalEntry() {
+#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
+  return &__flexfat_tbi_zero_sentinel;
+#else
+  return reinterpret_cast<u8 *>(kTemporalShadowOffset);
+#endif
+}
+
+// Foreign addresses use the zero sentinel. Managed addresses must identify a
+// complete slot; zero is a valid generation, not an invalid-geometry marker.
+// Arithmetic stays unsigned until the final cast.
 static u8 *TemporalEntry(uptr raw, uptr &base) {
   uptr region = GetRegionIndex(raw);
   if (region >= kNumSizeClasses)
-    return nullptr;
+    return ForeignTemporalEntry();
   uptr size = SizeClassToSize(region);
   uptr slot = raw / size;
   base = slot * size;
@@ -191,19 +165,12 @@ static u8 *TemporalEntry(uptr raw, uptr &base) {
   return reinterpret_cast<u8 *>(base - 1);
 #elif defined(FLEXFAT_TBI_LAST_BYTE)
   return reinterpret_cast<u8 *>(base + size - 1);
-#else
-#ifndef FLEXFAT_CUSTOM_CONFIG
-#ifdef FLEXFAT_TBI_PACKED_SHADOW
+#elif defined(FLEXFAT_TBI_PACKED_SHADOW)
   const unsigned shift = unsigned(region + kMinSizeLog);
   const s64 biased = s64(raw & 0xffffffffULL) - s64(1ULL << 33);
   return reinterpret_cast<u8 *>(kTemporalShadowOffset + uptr(biased >> shift));
 #else
   return reinterpret_cast<u8 *>(kTemporalShadowOffset + (base >> kMinSizeLog));
-#endif
-#else
-  return reinterpret_cast<u8 *>(
-      TemporalBiases()[raw >> kRegionSizeLog] + slot);
-#endif
 #endif
 }
 
@@ -213,32 +180,13 @@ struct TemporalState {
   unsigned generation = 0;
 
   bool Matches(uptr ptr) const {
-    unsigned tag = PointerTag(ptr);
-#ifdef FLEXFAT_CUSTOM_CONFIG
-    return entry && tag && generation == tag;
-#else
-    return entry && generation == tag;
-#endif
+    return entry && generation == PointerTag(ptr);
   }
 };
-
-#ifndef FLEXFAT_CUSTOM_CONFIG
-static u8 *ForeignTemporalEntry() {
-#if defined(FLEXFAT_TBI_LAST_BYTE) || defined(FLEXFAT_TBI_PRIOR_BYTE)
-  return &__flexfat_tbi_zero_sentinel;
-#else
-  return reinterpret_cast<u8 *>(kTemporalShadowOffset);
-#endif
-}
-#endif
 
 static TemporalState LoadTemporalState(uptr ptr) {
   TemporalState state;
   state.entry = TemporalEntry(Untag(ptr), state.base);
-#ifndef FLEXFAT_CUSTOM_CONFIG
-  if (!state.entry && !IsFlexFatPointer(Untag(ptr)))
-    state.entry = ForeignTemporalEntry();
-#endif
   if (state.entry)
     state.generation = *state.entry;
   return state;
@@ -249,10 +197,6 @@ static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
                                     const TemporalState &state, bool slot_valid) {
   const char *ops[] = {"read", "write", "free", "realloc"};
   const char *reason = !slot_valid ? "invalid slot geometry"
-#ifdef FLEXFAT_CUSTOM_CONFIG
-                       : !state.generation ? "never allocated"
-                       : !PointerTag(ptr) ? "zero managed tag"
-#endif
                        : "generation mismatch";
   Printf("FLEXFAT ERROR: temporal violation\n"
          "  operation = %s, tagged address = 0x%zx, raw slot base = 0x%zx\n"
@@ -270,13 +214,8 @@ static void NORETURN ReportTemporal(uptr ptr, uptr access_size, int operation,
 static void ValidateTemporal(uptr ptr, uptr access_size, int operation) {
   if (operation < 2 && !access_size)
     return;
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  if (!IsFlexFatPointer(ptr))
-    return;
-#else
   if (operation >= 2 && !IsFlexFatPointer(ptr))
     return;
-#endif
   TemporalState state = LoadTemporalState(ptr);
   if (!state.Matches(ptr))
     ReportTemporal(ptr, access_size, operation, state, state.entry != nullptr);
@@ -459,11 +398,7 @@ void Deallocate(void *ptr) {
 #endif
     if (valid) {
 #ifdef FLEXFAT_TEMPORAL_TBI
-#ifdef FLEXFAT_CUSTOM_CONFIG
-      *state.entry = u8(state.generation == 255 ? 1 : state.generation + 1);
-#else
       *state.entry = u8(state.generation + 1);
-#endif
 #endif
       // Invalidate before overwriting the slot with the raw free-list link.
       FreeBlock *block = (FreeBlock *)slot_base;
@@ -567,30 +502,17 @@ void __flexfat_free(void *ptr) { __flexfat::Deallocate(ptr); }
 #ifdef FLEXFAT_TEMPORAL_TBI
 #ifdef FLEXFAT_TBI_PRIOR_BYTE
 #ifdef FLEXFAT_CUSTOM_CONFIG
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v2() {
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v3() {
 #else
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_pow2_v3() {
 #endif
-  __flexfat_init();
-  CHECK(__flexfat::IsReady());
-}
 #elif defined(FLEXFAT_TBI_LAST_BYTE)
 #ifdef FLEXFAT_CUSTOM_CONFIG
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v1() {
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v2() {
 #else
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_pow2_v2() {
 #endif
-  __flexfat_init();
-  CHECK(__flexfat::IsReady());
-}
-#else
-#ifdef FLEXFAT_CUSTOM_CONFIG
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3() {
-  __flexfat_init();
-  CHECK(__flexfat::IsReady());
-}
-#else
-#ifdef FLEXFAT_TBI_PACKED_SHADOW
+#elif defined(FLEXFAT_TBI_PACKED_SHADOW)
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_packed_shadow_pow2_v1() {
 #else
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7() {
@@ -598,8 +520,6 @@ SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7() {
   __flexfat_init();
   CHECK(__flexfat::IsReady());
 }
-#endif
-#endif
 SANITIZER_INTERFACE_ATTRIBUTE NORETURN __attribute__((cold)) void
 __flexfat_report_temporal_v3(uptr ptr, uptr size, u32 operation,
                              u32 observed_generation) {
@@ -607,12 +527,6 @@ __flexfat_report_temporal_v3(uptr ptr, uptr size, u32 operation,
   __flexfat::TemporalState state;
   state.entry = __flexfat::TemporalEntry(__flexfat::Untag(ptr), state.base);
   state.generation = observed_generation;
-#ifndef FLEXFAT_CUSTOM_CONFIG
-  // Instrumented foreign addresses read the zero sentinel. Their observed
-  // generation is valid even though no managed slot can be reconstructed.
-  if (!state.entry && !__flexfat::IsFlexFatPointer(__flexfat::Untag(ptr)))
-    state.entry = __flexfat::ForeignTemporalEntry();
-#endif
   __flexfat::ReportTemporal(ptr, size, operation, state,
                             state.entry != nullptr);
 }

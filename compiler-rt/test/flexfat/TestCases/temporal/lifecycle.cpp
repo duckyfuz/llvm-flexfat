@@ -6,6 +6,8 @@
 // RUN: not %t write 2>&1 | FileCheck %s --check-prefix=WRITE
 // RUN: not %t double-free 2>&1 | FileCheck %s --check-prefix=FREE
 // RUN: not %t realloc 2>&1 | FileCheck %s --check-prefix=REALLOC
+// RUN: %t fresh-zero
+// RUN: %t never-zero
 // RUN: %t next-generation
 // RUN: %t wrap-reuse
 // RUN: not %t wrap-free 2>&1 | FileCheck %s --check-prefix=READ
@@ -31,17 +33,8 @@ extern "C" uintptr_t __flexfat_get_offset(uintptr_t);
 extern "C" uintptr_t __flexfat_get_usable_size(uintptr_t);
 extern "C" void __flexfat_check_temporal(uintptr_t, uintptr_t, int);
 extern "C" void __flexfat_report_temporal_v3(uintptr_t, uintptr_t, unsigned, unsigned);
-extern "C" void __flexfat_tbi_abi_v7() __attribute__((weak));
-extern "C" void __flexfat_tbi_abi_packed_shadow_pow2_v1() __attribute__((weak));
-extern "C" void __flexfat_tbi_abi_last_byte_pow2_v2() __attribute__((weak));
-extern "C" void __flexfat_tbi_abi_prior_byte_pow2_v3() __attribute__((weak));
-static bool pow2() {
-  return __flexfat_tbi_abi_v7 || __flexfat_tbi_abi_last_byte_pow2_v2 ||
-         __flexfat_tbi_abi_prior_byte_pow2_v3 ||
-         __flexfat_tbi_abi_packed_shadow_pow2_v1;
-}
 static unsigned next_tag(unsigned current) {
-  return pow2() ? (current + 1) & 255 : (current == 255 ? 1 : current + 1);
+  return (current + 1) & 255;
 }
 static uintptr_t raw(void *p) { return (uintptr_t)p & 0x00ffffffffffffffULL; }
 static unsigned tag(void *p) { return (uintptr_t)p >> 56; }
@@ -61,8 +54,8 @@ __attribute__((constructor)) static void startup() {
 }
 static void *release(void *p) { free(p); return nullptr; }
 int main(int argc, char **argv) {
-  assert(pow2() || tag(before_main)); assert(read_byte(before_main) == 9); free(before_main);
-  char *p = opaque((char *)malloc(23)); assert(p && (pow2() || tag(p)));
+  assert(read_byte(before_main) == 9); free(before_main);
+  char *p = opaque((char *)malloc(23)); assert(p);
   write_byte(p); assert(read_byte(p) == 9);
   uintptr_t base = __flexfat_get_base((uintptr_t)(p + 2));
   assert((base >> 56) == tag(p));
@@ -70,9 +63,23 @@ int main(int argc, char **argv) {
   assert(__flexfat_get_usable_size((uintptr_t)p) <= __flexfat_get_size((uintptr_t)p));
   if (argc > 1) {
     const char *mode = argv[1];
+    if (!strcmp(mode, "fresh-zero")) {
+      // This class has not been used above. Both compiler checks and runtime
+      // validation must accept a fresh zero-tagged managed allocation.
+      char *fresh = opaque((char *)malloc(4095));
+      assert(fresh && tag(fresh) == 0);
+      __flexfat_check_temporal((uintptr_t)fresh, 1, 0);
+      write_byte(fresh); assert(read_byte(fresh) == 9);
+      free(fresh); free(p); return 0;
+    }
     if (!strcmp(mode, "zero-tag")) {
       if (!tag(p)) { free(p); p = opaque((char *)malloc(23)); assert(tag(p)); }
       return read_byte((char *)raw(p));
+    }
+    if (!strcmp(mode, "tagged-foreign-runtime")) {
+      int local = 0;
+      __flexfat_check_temporal((uintptr_t)&local | (1ULL << 56), 1, 0);
+      abort();
     }
     if (!strncmp(mode, "geometry", 8)) {
       bool tail = strstr(mode, "tail");
@@ -171,8 +178,8 @@ int main(int argc, char **argv) {
   assert(memcpy(p, "abc", 3) == p);
   assert(memmove(p + 1, p, 2) == p + 1);
   write_byte(p);
-  char *dup = strdup("abc"); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "abc")); free(dup);
-  dup = strndup("abc", 2); assert(dup && (pow2() || tag(dup)) && !strcmp(dup, "ab")); free(dup);
+  char *dup = strdup("abc"); assert(dup && !strcmp(dup, "abc")); free(dup);
+  dup = strndup("abc", 2); assert(dup && !strcmp(dup, "ab")); free(dup);
   char *shifted = (char *)malloc(257);
   shifted[0] = 17; shifted[256] = 29;
   char *grown = (char *)realloc(shifted, 513);
@@ -186,16 +193,16 @@ int main(int argc, char **argv) {
   // LowFat realloc(p, 0) allocates separately and preserves p.
   q = (char *)realloc(p, 0); assert(q && raw(q) != raw(p));
   write_byte(p); assert(read_byte(p) == 9); free(p); free(q);
-  p = (char *)calloc(16, 1); assert(p && (pow2() || tag(p)));
+  p = (char *)calloc(16, 1); assert(p);
   for (unsigned i = 0; i < 16; ++i) assert(p[i] == 0);
   free(p);
   void *aligned = nullptr; assert(!posix_memalign(&aligned, 256, 50));
-  assert(!(raw(aligned) % 256)); assert(pow2() || tag(aligned));
+  assert(!(raw(aligned) % 256));
   write_byte((char *)aligned); free(aligned);
   p = (char *)malloc(23); unsigned first = tag(p); uintptr_t slot = raw(p);
-  for (unsigned i = 0; i < (pow2() ? 256U : 255U); ++i) {
+  for (unsigned i = 0; i < 256U; ++i) {
     free(p); p = opaque((char *)malloc(23)); assert(raw(p) == slot);
-    assert(tag(p) == (pow2() ? (first + i + 1) % 256 : (first + i) % 255 + 1)); write_byte(p);
+    assert(tag(p) == (first + i + 1) % 256); write_byte(p);
   }
   assert(tag(p) == first);
   int fd = open("/dev/null", O_WRONLY); assert(fd >= 0);

@@ -9,8 +9,7 @@
 // RUN: not %t quad-call 2>&1 | FileCheck %s
 // RUN: not %t quad-cross 2>&1 | FileCheck %s --check-prefix=CROSS
 // RUN: not %t quad-overflow 2>&1 | FileCheck %s --check-prefix=CROSS
-// RUN: %if !flexfat-custom-config %{ not %t tagged-foreign 2>&1 | FileCheck %s %}
-// RUN: %if flexfat-custom-config %{ %t tagged-foreign %}
+// RUN: not %t tagged-foreign 2>&1 | FileCheck %s
 // CHECK: temporal violation
 // CHECK: generation mismatch
 // CROSS: out-of-bounds error detected

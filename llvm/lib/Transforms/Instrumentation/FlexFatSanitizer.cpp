@@ -110,9 +110,9 @@ struct GeometryRecord {
   Value *Raw = nullptr;
   Value *Index = nullptr;
   Value *Size = nullptr;
-  Value *Slot = nullptr;
   Value *Base = nullptr;
   Value *Managed = nullptr;
+  Value *ValidSlot = nullptr;
   Value *Entry = nullptr;
   Instruction *PrepareBefore = nullptr;
 };
@@ -530,7 +530,6 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
   G.Index = getSafeTableIndex(B, G.Raw);
   auto [Size, Slot] = emitDynamicSlotMagic(B, G.Raw, G.Index);
   G.Size = Size;
-  G.Slot = Slot;
   G.Base = B.CreateMul(Slot, Size, "flexfat.base.int");
 #else
   if (Options.hasTBI()) {
@@ -572,7 +571,7 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
 }
 
 // Temporal-only fields are requested lazily. Escape-only spatial preparation
-// does not introduce a bias-table lookup, classification, or slot shift.
+// does not introduce temporal classification or shadow-address calculation.
 void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
                                                    GeometryRecord &G) {
   if (G.Entry)
@@ -588,6 +587,10 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
     Valid = B.CreateAnd(Valid, B.CreateICmpUGE(G.Base, Start));
     Valid =
         B.CreateAnd(Valid, B.CreateICmpULE(G.Base, B.CreateSub(End, G.Size)));
+    // Foreign pointers use the sentinel, but a partial managed slot must fail
+    // even when its pointer tag matches that sentinel's valid zero generation.
+    G.ValidSlot = B.CreateOr(B.CreateNot(G.Managed), Valid,
+                             "flexfat.slot.valid");
 #endif
     Value *Address =
         Options.TBI == FlexFatTBIMode::PriorByte
@@ -601,7 +604,9 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
                                B.getPtrTy(), "flexfat.metadata");
     return;
   }
-#ifndef FLEXFAT_CUSTOM_CONFIG
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  llvm_unreachable("Custom FlexFat TBI requires in-slot storage");
+#else
   Value *Address;
   if (Options.TBI == FlexFatTBIMode::PackedShadow) {
     // One byte per slot, concatenating the POW2 classes below the anchor.
@@ -633,15 +638,6 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
                           "flexfat.metadata.address");
   }
   G.Entry = B.CreateIntToPtr(Address, B.getPtrTy(), "flexfat.metadata");
-#else
-  Value *Slot =
-      B.CreateSelect(G.Managed, G.Slot, B.getInt64(0), "flexfat.metadata.slot");
-  Value *Bias = loadFromFixedTable(B, TablesBase + 2 * kTablesOffset,
-                                   B.getInt64Ty(), G.Index);
-  // Biases intentionally wrap. Do not use overflow flags or pointer GEPs.
-  G.Entry =
-      B.CreateIntToPtr(B.CreateAdd(Bias, Slot, "flexfat.metadata.address"),
-                       B.getPtrTy(), "flexfat.metadata");
 #endif
 }
 
@@ -1499,21 +1495,12 @@ bool FlexFatSanitizer::instrumentTemporal(const AccessRecord &Access) {
   Generation->setAlignment(Align(1));
   Value *Tag = B.CreateTrunc(B.CreateLShr(G.Tagged, 56), B.getInt8Ty());
   Value *Matches = B.CreateICmpEQ(Tag, Generation);
-#ifdef FLEXFAT_CUSTOM_CONFIG
-  Matches = B.CreateAnd(B.CreateICmpNE(Tag, B.getInt8(0)), Matches);
-  auto *Managed = dyn_cast<ConstantInt>(G.Managed);
-  Value *Valid = Managed && Managed->isOne()
-                     ? Matches
-                     : B.CreateOr(B.CreateNot(G.Managed), Matches);
-#else
-  Value *Valid = Matches;
-#endif
+  Value *Valid = G.ValidSlot ? B.CreateAnd(G.ValidSlot, Matches) : Matches;
   auto *Failure = SplitBlockAndInsertIfThen(
       B.CreateNot(Valid), CheckBefore, true,
       MDBuilder(M.getContext()).createBranchWeights(1, 1048575));
   markNoSanitize(Failure);
-  // Keep the temporal predicate as one condition. In custom mode this hint
-  // prevents SelectionDAG from turning its managed/tag OR into another branch.
+  // Keep geometry validation and tag equality in one temporal predicate.
   Failure->getParent()->getSinglePredecessor()->getTerminator()->setMetadata(
       LLVMContext::MD_unpredictable, getInstrumentedMetadata());
   B.SetInsertPoint(Failure);
@@ -1793,15 +1780,11 @@ bool FlexFatSanitizer::run() {
   const auto Mode = Options.TBI;
 #ifdef FLEXFAT_CUSTOM_CONFIG
   const char *CtorName = Mode == FlexFatTBIMode::PriorByte
-                             ? "__flexfat_tbi_ctor_prior_byte_custom_v2"
-                         : Mode == FlexFatTBIMode::LastByte
-                             ? "__flexfat_tbi_ctor_last_byte_custom_v1"
-                             : "__flexfat_tbi_ctor_v3";
+                             ? "__flexfat_tbi_ctor_prior_byte_custom_v3"
+                             : "__flexfat_tbi_ctor_last_byte_custom_v2";
   const char *ABIName = Mode == FlexFatTBIMode::PriorByte
-                            ? "__flexfat_tbi_abi_prior_byte_custom_v2"
-                        : Mode == FlexFatTBIMode::LastByte
-                            ? "__flexfat_tbi_abi_last_byte_custom_v1"
-                            : "__flexfat_tbi_abi_v3";
+                            ? "__flexfat_tbi_abi_prior_byte_custom_v3"
+                            : "__flexfat_tbi_abi_last_byte_custom_v2";
 #else
   const char *CtorName = Mode == FlexFatTBIMode::PriorByte
                              ? "__flexfat_tbi_ctor_prior_byte_pow2_v3"

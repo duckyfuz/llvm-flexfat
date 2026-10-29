@@ -18,7 +18,7 @@ define i8 @read_byte(ptr %p) {
 ; CHECK-NOT: bl{{[ \t]}}
 ; CHECK-NOT: stp
 ; CHECK-NOT: str
-; CHECK: b.{{eq|ne|lo|ls}}
+; CHECK: {{b\.(eq|ne|lo|ls)|tbn?z}}
 ; CHECK-NOT: {{^[ \t]*(b\.[a-z]+|cbn?z|tbn?z)}}
 ; CHECK: ldrb w0, [x0]
 ; CHECK-NEXT: ret
