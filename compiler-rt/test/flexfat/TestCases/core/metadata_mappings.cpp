@@ -120,7 +120,7 @@ int main() {
   assert(__flexfat_get_base(kUserAddressLimit - 1) == 0);
   assert(__flexfat_get_size(kUserAddressLimit) == ~uptr(0));
 
-  // No bias table is needed by spatial-only or in-slot temporal modes.
+  // The reserved metadata-table slot must remain unmapped.
   for (uptr slot = 0; slot < 4; ++slot) {
     const bool used = slot == 0 || slot == recovery_slot;
     expect_unmapped(kTablesBase + slot * kTablesOffset + (used ? bytes : 0));

@@ -15,7 +15,7 @@
 // LAST: flexfat.metadata.address
 // LAST: load i8
 // LAST: load volatile i32
-// LAST: call void @__flexfat_tbi_abi_last_byte_{{pow2_v2|custom_v1}}()
+// LAST: call void @__flexfat_tbi_abi_last_byte_{{pow2_v2|custom_v2}}()
 // PRIOR: @__flexfat_tbi_zero_sentinel = external {{.*}}global i8
 // PRIOR-LABEL: define {{.*}} @read_wide(
 // PRIOR: call void @__flexfat_report_oob
@@ -23,6 +23,6 @@
 // PRIOR: flexfat.metadata.address
 // PRIOR: load i8
 // PRIOR: load volatile i32
-// PRIOR: call void @__flexfat_tbi_abi_prior_byte_{{pow2_v3|custom_v2}}()
+// PRIOR: call void @__flexfat_tbi_abi_prior_byte_{{pow2_v3|custom_v3}}()
 // INVALID: invalid value 'invalid'
 int read_wide(volatile int *p) { return *p; }

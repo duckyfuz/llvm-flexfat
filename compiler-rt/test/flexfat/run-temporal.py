@@ -39,8 +39,8 @@ for build in args.builds:
     abis = {
         'shadow': '__flexfat_tbi_abi_v7',
         'packed-shadow': '__flexfat_tbi_abi_packed_shadow_pow2_v1',
-        'last-byte': f"__flexfat_tbi_abi_last_byte_{profile}_{'v1' if custom else 'v2'}",
-        'prior-byte': f"__flexfat_tbi_abi_prior_byte_{profile}_{'v2' if custom else 'v3'}",
+        'last-byte': f"__flexfat_tbi_abi_last_byte_{profile}_v2",
+        'prior-byte': f"__flexfat_tbi_abi_prior_byte_{profile}_v3",
     }
     abi = abis[args.tbi]
     config_flags = ['-I' + str(root.parent.parent / 'lib')]
@@ -71,7 +71,7 @@ for build in args.builds:
             'read': 'read', 'write': 'write', 'reuse': 'read', 'wrap-free': 'read',
             'double-free': 'free', 'stale-free': 'free', 'realloc': 'realloc',
             'stale-realloc': 'realloc', 'realloc-zero': 'realloc',
-            'zero-tag': 'read', 'never': 'read',
+            'zero-tag': 'read', 'never': 'read', 'tagged-foreign-runtime': 'read',
             'report-observation': 'read', 'thread': 'read',
             'memset': 'write', 'memcpy-src': 'read', 'memcpy-dst': 'write',
             'memmove': 'write', 'strdup': 'read', 'strndup': 'read', 'posix': 'write'}
@@ -79,25 +79,17 @@ for build in args.builds:
             run([cxx, *common, *flags, '-fno-builtin', '-pthread',
                  root/'TestCases/temporal/lifecycle.cpp', '-o', exe])
             for mode in ['', 'zero-length', 'realloc-failure', 'fallback',
-                         'next-generation', 'wrap-reuse']:
+                         'next-generation', 'wrap-reuse', 'fresh-zero', 'never-zero']:
                 run([exe, *([mode] if mode else [])])
                 checks += 1
-            if custom:
-                failures['never-zero'] = 'read'
-            else:
-                run([exe, 'never-zero'])
-                checks += 1
             for mode, operation in failures.items():
-                reason = ({'zero-tag': 'zero managed tag', 'never': 'never allocated',
-                           'never-zero': 'never allocated',
-                           'report-observation': 'never allocated'}.get(
-                               mode, 'generation mismatch')
-                          if custom else 'generation mismatch')
-                run([exe, mode], ['operation = ' + operation, 'reason = ' + reason])
+                run([exe, mode], ['operation = ' + operation,
+                                  'reason = generation mismatch'])
                 checks += 1
             if custom:
                 for mode in ['geometry', 'geometry-tail', 'geometry-zero', 'geometry-tail-zero',
-                             'geometry-legacy', 'geometry-tail-legacy']:
+                             'geometry-legacy', 'geometry-tail-legacy',
+                             'geometry-legacy-zero', 'geometry-tail-legacy-zero']:
                     run([exe, mode], 'unavailable (invalid slot geometry)')
                     checks += 1
             print(build.name, name, 'passed', flush=True)
@@ -107,7 +99,7 @@ for build in args.builds:
                  '-fno-unroll-loops', root/'TestCases/temporal/loops.cpp', '-o', exe])
             run([exe])
             checks += 1
-            run([exe, 'tagged-foreign'], None if custom else 'generation mismatch')
+            run([exe, 'tagged-foreign'], 'generation mismatch')
             checks += 1
             for mode in ['stale', 'overflow', 'write', 'call', 'reuse', 'fixed']:
                 run([exe, mode], 'generation mismatch')
@@ -140,7 +132,13 @@ for build in args.builds:
             '__flexfat_tbi_abi_v1')
         checks += 1
         obsolete_abis = ['__flexfat_tbi_abi_v2']
-        if not custom:
+        if custom:
+            obsolete_abis += {
+                'last-byte': ['__flexfat_tbi_abi_last_byte_custom_v1'],
+                'prior-byte': ['__flexfat_tbi_abi_prior_byte_custom_v1',
+                               '__flexfat_tbi_abi_prior_byte_custom_v2'],
+            }[args.tbi]
+        else:
             obsolete_abis += {
                 'last-byte': ['__flexfat_tbi_abi_last_byte_pow2_v1'],
                 'prior-byte': ['__flexfat_tbi_abi_prior_byte_pow2_v2'],
@@ -167,12 +165,9 @@ for build in args.builds:
         run([cc, '-fsanitize=flexfat', obj, '-Wl,--gc-sections', '-o', d/'wrong'], abi)
         run([cc, obj, '-Wl,--gc-sections', '-o', d/'missing'], abi)
         old_runtime = d/'old-runtime.c'
-        old_runtime.write_text('void __flexfat_tbi_abi_v1(void) {}\n'
-                               'void __flexfat_tbi_abi_v2(void) {}\n' +
-                               ('' if custom else 'void __flexfat_tbi_abi_v3(void) {}\n') +
-                               ('void __flexfat_tbi_abi_prior_byte_' +
-                                ('custom' if custom else 'pow2') + '_v1(void) {}\n'
-                                if args.tbi == 'prior-byte' else ''))
+        old_runtime.write_text(''.join(
+            f'void {symbol}(void) {{}}\n'
+            for symbol in ['__flexfat_tbi_abi_v1', *obsolete_abis]))
         run([cc, obj, old_runtime, '-Wl,--gc-sections', '-o', d/'old-runtime'],
             abi)
         checks += 4

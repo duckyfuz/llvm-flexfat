@@ -164,14 +164,7 @@ void *Allocate(uptr size) {
     uptr recovered_base;
     auto *entry = TemporalEntry(base, recovered_base);
     CHECK(entry);
-    unsigned generation = *entry;
-#ifdef FLEXFAT_CUSTOM_CONFIG
-    if (!generation) {
-      generation = 1;
-      *entry = u8(generation);
-    }
-#endif
-    return reinterpret_cast<void *>(TagPointer(base, generation));
+    return reinterpret_cast<void *>(TagPointer(base, *entry));
 #else
     return reinterpret_cast<void *>(base);
 #endif

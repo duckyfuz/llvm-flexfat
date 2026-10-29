@@ -17,10 +17,9 @@ extern "C" {
 
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_init();
 
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v3();
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v2();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_custom_v3();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_prior_byte_pow2_v3();
-SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v1();
+SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_custom_v2();
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_last_byte_pow2_v2();
 #ifndef FLEXFAT_CUSTOM_CONFIG
 SANITIZER_INTERFACE_ATTRIBUTE void __flexfat_tbi_abi_v7();

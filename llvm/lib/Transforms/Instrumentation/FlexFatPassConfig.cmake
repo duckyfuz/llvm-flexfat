@@ -1,3 +1,8 @@
+set(FLEXFAT_RUNTIME_LIB_DIR "${LLVM_MAIN_SRC_DIR}/../compiler-rt/lib")
+set_property(SOURCE FlexFatSanitizer.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+  ${FLEXFAT_RUNTIME_LIB_DIR})
+set(FLEXFAT_LAYOUT_HEADER "${FLEXFAT_RUNTIME_LIB_DIR}/flexfat/flexfat_layout.h")
+
 if(FLEXFAT_SIZES_CFG)
   # LLVM pass needs the generated header too. Since runtimes build AFTER LLVM,
   # we must generate a local copy of the header for the pass to use.
@@ -17,7 +22,7 @@ if(FLEXFAT_SIZES_CFG)
     COMMAND ${CMAKE_C_COMPILER} -std=c11 -O2
             ${FLEXFAT_CONFIG_GEN_SRC}
             -o ${FLEXFAT_CONFIG_GEN_BIN}
-    DEPENDS ${FLEXFAT_CONFIG_GEN_SRC}
+    DEPENDS ${FLEXFAT_CONFIG_GEN_SRC} ${FLEXFAT_LAYOUT_HEADER}
     COMMENT "Compiling flexfat_config_gen host tool (for LLVM pass)"
     VERBATIM
   )

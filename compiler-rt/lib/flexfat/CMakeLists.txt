@@ -1,6 +1,7 @@
 include_directories(..)
 
 set(FLEXFAT_COMMON_DEFINITIONS)
+set(FLEXFAT_LAYOUT_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/flexfat_layout.h)
 
 #===------------------------------------------------------------------------===
 # Custom size-class configuration (non-POW2 support)
@@ -28,7 +29,7 @@ if(FLEXFAT_SIZES_CFG)
     COMMAND ${CMAKE_C_COMPILER} -std=c11 -O2
             ${FLEXFAT_CONFIG_GEN_SRC}
             -o ${FLEXFAT_CONFIG_GEN_BIN}
-    DEPENDS ${FLEXFAT_CONFIG_GEN_SRC}
+    DEPENDS ${FLEXFAT_CONFIG_GEN_SRC} ${FLEXFAT_LAYOUT_HEADER}
     COMMENT "Compiling flexfat_config_gen host tool"
     VERBATIM
   )
@@ -66,6 +67,7 @@ set(FLEXFAT_HEADERS
   flexfat_allocator.h
   flexfat_lowfat_allocator.inc
   flexfat_config.h
+  flexfat_layout.h
   flexfat_interface.h
   flexfat_stack.h
 )
@@ -97,17 +99,17 @@ if(COMPILER_RT_HAS_FLEXFAT)
       PARENT_TARGET flexfat)
   else()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND "aarch64" IN_LIST FLEXFAT_SUPPORTED_ARCH)
-      add_compiler_rt_runtime(clang_rt.flexfat_tbi
-        STATIC ARCHS aarch64
-        SOURCES ${FLEXFAT_SOURCES}
-        ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
-        OBJECT_LIBS RTInterception RTSanitizerCommon RTSanitizerCommonLibc
-                    RTSanitizerCommonSymbolizer RTSanitizerCommonSymbolizerInternal
-        CFLAGS ${FLEXFAT_CFLAGS}
-        DEFS ${FLEXFAT_COMMON_DEFINITIONS} FLEXFAT_TEMPORAL_TBI=1
-        DEPS ${FLEXFAT_DEPS}
-        PARENT_TARGET flexfat)
       if(NOT FLEXFAT_SIZES_CFG)
+        add_compiler_rt_runtime(clang_rt.flexfat_tbi
+          STATIC ARCHS aarch64
+          SOURCES ${FLEXFAT_SOURCES}
+          ADDITIONAL_HEADERS ${FLEXFAT_HEADERS}
+          OBJECT_LIBS RTInterception RTSanitizerCommon RTSanitizerCommonLibc
+                      RTSanitizerCommonSymbolizer RTSanitizerCommonSymbolizerInternal
+          CFLAGS ${FLEXFAT_CFLAGS}
+          DEFS ${FLEXFAT_COMMON_DEFINITIONS} FLEXFAT_TEMPORAL_TBI=1
+          DEPS ${FLEXFAT_DEPS}
+          PARENT_TARGET flexfat)
         add_compiler_rt_runtime(clang_rt.flexfat_tbi_packed_shadow
           STATIC ARCHS aarch64
           SOURCES ${FLEXFAT_SOURCES}
