@@ -16,19 +16,8 @@
 //   (POW2-only mode) or via fixed-point magic-number math (custom mode)
 // - The size can be looked up from a table using the region index
 //
-// Default Memory Layout (POW2-only mode, kRegionSizeLog=32):
-//   Region 0: [0x10_0000_0000, 0x20_0000_0000) - 16-byte allocations
-//   Region 1: [0x20_0000_0000, 0x30_0000_0000) - 32-byte allocations
-//   Region 2: [0x30_0000_0000, 0x40_0000_0000) - 64-byte allocations
-//   ...
-//   Region N: [0xN0_0000_0000, ...)            - 2^(N+4)-byte allocations
-//
-// Custom Config Mode (FLEXFAT_CUSTOM_CONFIG, kRegionSizeLog=38):
-//   Arbitrary configured sizes (e.g. 48, 80, 96 bytes) are also supported.
-//   kRegionSizeLog increases to 38 (256 GiB per region), allowing all 64
-//   LowFat source classes through 64 GiB.
-//   The key helpers (SizeClassIndex, SizeClassToSize) switch to table lookups.
-//   Base recovery uses generated reciprocal tables for every size class.
+// The compiler, runtime, and generator share the address-space definitions in
+// flexfat_layout.h. Custom builds additionally generate the size-class profile.
 //
 //===----------------------------------------------------------------------===//
 
@@ -42,9 +31,7 @@
 
 #include "sanitizer_common/sanitizer_internal_defs.h"
 
-#ifdef FLEXFAT_CUSTOM_CONFIG
-#include "flexfat_config_generated.h"
-#endif
+#include "flexfat_layout.h"
 
 namespace __flexfat {
 
@@ -83,13 +70,13 @@ inline uptr UsableClassSize(uptr size) {
 //===----------------------------------------------------------------------===//
 
 // Minimum allocation size (must be power of 2)
-constexpr uptr kMinSizeLog = 4; // 16 bytes
+constexpr uptr kMinSizeLog = FLEXFAT_MIN_SIZE_LOG;
 constexpr uptr kMinSize = 1ULL << kMinSizeLog;
-
-#ifdef FLEXFAT_CUSTOM_CONFIG
 
 constexpr uptr kNumSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
 constexpr uptr kMaxSize = FLEXFAT_MAX_SIZE;
+
+#ifdef FLEXFAT_CUSTOM_CONFIG
 
 // SizeClassIndex: table lookup (binary search on kFlexFatGenSizes[])
 // Replaces the POW2-only __builtin_clzll math.
@@ -107,11 +94,7 @@ inline uptr SizeClassToSize(uptr class_index) {
 #else
 
 // Maximum allocation size (must be power of 2)
-constexpr uptr kMaxSizeLog = 30; // 1 GB
-constexpr uptr kMaxSize = 1ULL << kMaxSizeLog;
-
-// Number of size classes (one per power of 2)
-constexpr uptr kNumSizeClasses = kMaxSizeLog - kMinSizeLog + 1;
+constexpr uptr kMaxSizeLog = FLEXFAT_POW2_MAX_SIZE_LOG;
 
 // Size class index for a given size (rounded up to next power of 2)
 // Returns 0 for sizes <= 16, 1 for sizes 17-32, etc.
@@ -137,27 +120,12 @@ inline uptr SizeClassToSize(uptr class_index) {
 // Memory Region Configuration
 //===----------------------------------------------------------------------===//
 
-#ifdef FLEXFAT_CUSTOM_CONFIG
 constexpr uptr kRegionSizeLog = FLEXFAT_REGION_SIZE_LOG;
-#else
-// Each region is 4GB (32 bits of address space per region)
-constexpr uptr kRegionSizeLog = 32;
-#endif
-
-constexpr uptr kRegionSize = 1ULL << kRegionSizeLog;
-constexpr uptr kTablesOffset = 0x1000000ULL;
-constexpr uptr kUserAddressLimit = 1ULL << 48;
-
-// Base address where FlexFat regions start
-// We use the upper portion of the address space
-// On 64-bit systems: 0x100000000000 (17.6 TB mark)
-#ifdef FLEXFAT_CUSTOM_CONFIG
+constexpr uptr kRegionSize = FLEXFAT_REGION_SIZE;
+constexpr uptr kTablesOffset = FLEXFAT_TABLES_OFFSET;
+constexpr uptr kUserAddressLimit = FLEXFAT_USER_ADDRESS_LIMIT;
 constexpr uptr kRegionBase = FLEXFAT_REGION_BASE;
 constexpr uptr kTablesBase = FLEXFAT_TABLES_BASE;
-#else
-constexpr uptr kRegionBase = 0x100000000000ULL;
-constexpr uptr kTablesBase = 0x118000000000ULL;
-#endif
 
 // Get the region number from a pointer
 inline uptr GetRegionIndex(uptr ptr) {
@@ -193,64 +161,44 @@ inline uptr GetSize(uptr ptr) {
   return sizes[GetTableIndex(ptr)];
 }
 
+// Recover a managed slot base when its size is already known. In particular,
+// POW2 bounds checks need only a mask, without another metadata-table lookup.
+inline uptr GetBaseForSize(uptr ptr, uptr size) {
+  ptr = Untag(ptr);
 #ifdef FLEXFAT_CUSTOM_CONFIG
-
-// GetBase override for custom config: use reciprocal fixed-point
-// multiplication for every configured size class, including power-of-two
-// classes. This keeps base recovery uniform across custom layouts.
-//
-//   quotient = (u128)ptr * magic >> 64
-//   candidate = quotient * size
-//   base = candidate > ptr ? candidate - size : candidate
-inline uptr GetBase(uptr ptr) {
-  ptr = Untag(ptr);
-  uptr table_index = GetTableIndex(ptr);
-  const uptr *sizes = (const uptr *)(kTablesBase + 0 * kTablesOffset);
-  const uptr *magics = (const uptr *)(kTablesBase + 1 * kTablesOffset);
+  // Use the corrected reciprocal for every configured class, including powers
+  // of two, so allocation geometry and instrumentation use the same recovery.
+  const uptr *magics = (const uptr *)(kTablesBase + kTablesOffset);
   typedef unsigned __int128 u128;
-  u128 mul = (u128)ptr * (u128)magics[table_index];
-  uptr idx = (uptr)(mul >> 64);
-  uptr size = sizes[table_index];
-  uptr candidate = idx * size;
+  uptr quotient = ((u128)ptr * magics[GetTableIndex(ptr)]) >> 64;
+  uptr candidate = quotient * size;
   return candidate > ptr ? candidate - size : candidate;
-}
-
-// CheckBounds override: uses the custom GetBase above.
-inline bool CheckBounds(uptr ptr, uptr access_size) {
-  ptr = Untag(ptr);
-  uptr region = GetRegionIndex(ptr);
-  if (region >= kNumSizeClasses)
-    return true; // Not a FlexFat pointer — assume valid
-  uptr alloc_size = SizeClassToSize(region);
-  uptr base = GetBase(ptr);
-  return CheckBoundsImpl(ptr, access_size, base, alloc_size);
-}
-
 #else
-
-// Get the base address of an allocation from a FlexFat pointer
-// This uses the key FlexFat insight: allocations are aligned to their size
-inline uptr GetBase(uptr ptr) {
-  ptr = Untag(ptr);
-  uptr table_index = GetTableIndex(ptr);
-  const uptr *masks = (const uptr *)(kTablesBase + 3 * kTablesOffset);
-  return ptr & masks[table_index];
+  return ptr & ~(size - 1);
+#endif
 }
 
-// Check if ptr..ptr+access_size is within bounds
+// Foreign pointers recover base zero through their zero magic or mask entry.
+inline uptr GetBase(uptr ptr) {
+#ifdef FLEXFAT_CUSTOM_CONFIG
+  return GetBaseForSize(ptr, GetSize(ptr));
+#else
+  ptr = Untag(ptr);
+  const uptr *masks = (const uptr *)(kTablesBase + 3 * kTablesOffset);
+  return ptr & masks[GetTableIndex(ptr)];
+#endif
+}
+
+// Check whether the complete access fits the usable managed slot. Foreign
+// memory remains permissive; both layouts use the same access predicate.
 inline bool CheckBounds(uptr ptr, uptr access_size) {
   ptr = Untag(ptr);
   uptr region = GetRegionIndex(ptr);
   if (region >= kNumSizeClasses)
-    return true; // Not a FlexFat pointer, assume valid (or could error)
-
-  uptr alloc_size = SizeClassToSize(region);
-  uptr base = ptr & ~(alloc_size - 1);
-
-  return CheckBoundsImpl(ptr, access_size, base, alloc_size);
+    return true;
+  uptr size = SizeClassToSize(region);
+  return CheckBoundsImpl(ptr, access_size, GetBaseForSize(ptr, size), size);
 }
-
-#endif // FLEXFAT_CUSTOM_CONFIG
 
 //===----------------------------------------------------------------------===//
 // Region Table (for lookup by region index)

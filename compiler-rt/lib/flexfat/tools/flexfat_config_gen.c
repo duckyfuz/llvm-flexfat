@@ -33,6 +33,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "../flexfat_layout.h"
+
 #include <assert.h>
 #include <inttypes.h>
 #include <stdint.h>
@@ -41,20 +43,20 @@
 #include <string.h>
 
 // --------------------------------------------------------------------------
-// Configuration constants (must stay in sync with flexfat_config.h)
+// Custom geometry comes from the shared compiler/runtime layout header.
 // --------------------------------------------------------------------------
 
 // 64 LowFat source classes need a 256 GiB region so the largest 64 GiB class
 // remains no greater than one quarter of a region.
-#define REGION_SIZE_LOG 38
-#define REGION_SIZE ((uint64_t)1 << REGION_SIZE_LOG)
-#define REGION_BASE UINT64_C(0x100000000000)
-#define TABLES_BASE UINT64_C(0x300000000000)
-#define TABLES_SIZE UINT64_C(0x04000000)
+#define REGION_SIZE_LOG FLEXFAT_CUSTOM_REGION_SIZE_LOG
+#define REGION_SIZE FLEXFAT_CUSTOM_REGION_SIZE
+#define REGION_BASE FLEXFAT_REGION_BASE
+#define TABLES_BASE FLEXFAT_CUSTOM_TABLES_BASE
+#define TABLES_SIZE FLEXFAT_TABLES_SPAN
 #define MAX_SIZE_CLASSES 256
 
 // Minimum alignment / granularity
-#define MIN_SIZE 16
+#define MIN_SIZE (1 << FLEXFAT_MIN_SIZE_LOG)
 
 // --------------------------------------------------------------------------
 // __int128 helpers (standard C99/C11 with GCC/Clang extension)
@@ -227,7 +229,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Error: managed regions overlap fixed metadata tables\n");
     return 1;
   }
-  if ((u128)TABLES_BASE + TABLES_SIZE > ((u128)1 << 48)) {
+  if ((u128)TABLES_BASE + TABLES_SIZE > (u128)FLEXFAT_USER_ADDRESS_LIMIT) {
     fprintf(stderr,
             "Error: fixed metadata is outside the 48-bit address space\n");
     return 1;
@@ -258,28 +260,9 @@ int main(int argc, char *argv[]) {
           "\n"
           "#include <stdint.h>\n"
           "\n"
-          "// Fixed layout shared by the compiler pass and runtime.\n"
-          "#define FLEXFAT_CUSTOM_CONFIG       1\n"
-          "#define FLEXFAT_REGION_BASE         UINT64_C(0x100000000000)\n"
-          "#define FLEXFAT_REGION_SIZE_LOG     38\n"
-          "#define FLEXFAT_REGION_SIZE         (UINT64_C(1) << "
-          "FLEXFAT_REGION_SIZE_LOG)\n"
-          "#define FLEXFAT_TABLES_BASE         UINT64_C(0x300000000000)\n"
+          "// Class profile; address-space geometry is in flexfat_layout.h.\n"
           "#define FLEXFAT_NUM_SIZE_CLASSES    %d\n"
           "#define FLEXFAT_MAX_SIZE            UINT64_C(%" PRIu64 ")\n"
-          "#if defined(__cplusplus)\n"
-          "static_assert(FLEXFAT_REGION_BASE + FLEXFAT_NUM_SIZE_CLASSES * "
-          "FLEXFAT_REGION_SIZE <= FLEXFAT_TABLES_BASE, \"managed regions "
-          "overlap metadata\");\n"
-          "static_assert(FLEXFAT_MAX_SIZE <= FLEXFAT_REGION_SIZE / 4, "
-          "\"largest class exceeds region quarter\");\n"
-          "#else\n"
-          "_Static_assert(FLEXFAT_REGION_BASE + FLEXFAT_NUM_SIZE_CLASSES * "
-          "FLEXFAT_REGION_SIZE <= FLEXFAT_TABLES_BASE, \"managed regions "
-          "overlap metadata\");\n"
-          "_Static_assert(FLEXFAT_MAX_SIZE <= FLEXFAT_REGION_SIZE / 4, "
-          "\"largest class exceeds region quarter\");\n"
-          "#endif\n"
           "\n",
           cfg_path, num_sizes, sizes[num_sizes - 1]);
 

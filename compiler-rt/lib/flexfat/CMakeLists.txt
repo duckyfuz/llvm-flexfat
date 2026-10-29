@@ -1,6 +1,7 @@
 include_directories(..)
 
 set(FLEXFAT_COMMON_DEFINITIONS)
+set(FLEXFAT_LAYOUT_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/flexfat_layout.h)
 
 #===------------------------------------------------------------------------===
 # Custom size-class configuration (non-POW2 support)
@@ -28,7 +29,7 @@ if(FLEXFAT_SIZES_CFG)
     COMMAND ${CMAKE_C_COMPILER} -std=c11 -O2
             ${FLEXFAT_CONFIG_GEN_SRC}
             -o ${FLEXFAT_CONFIG_GEN_BIN}
-    DEPENDS ${FLEXFAT_CONFIG_GEN_SRC}
+    DEPENDS ${FLEXFAT_CONFIG_GEN_SRC} ${FLEXFAT_LAYOUT_HEADER}
     COMMENT "Compiling flexfat_config_gen host tool"
     VERBATIM
   )
@@ -66,6 +67,7 @@ set(FLEXFAT_HEADERS
   flexfat_allocator.h
   flexfat_lowfat_allocator.inc
   flexfat_config.h
+  flexfat_layout.h
   flexfat_interface.h
   flexfat_stack.h
 )

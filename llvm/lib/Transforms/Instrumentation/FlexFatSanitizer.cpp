@@ -33,9 +33,7 @@
 #include <algorithm>
 #include <optional>
 
-#ifdef FLEXFAT_CUSTOM_CONFIG
-#include "flexfat_config_generated.h"
-#endif
+#include "flexfat/flexfat_layout.h"
 
 using namespace llvm;
 
@@ -250,40 +248,18 @@ private:
     return Load;
   }
 
-  // Constants (kept in sync with flexfat_config.h / flexfat_config_generated.h)
-#ifdef FLEXFAT_CUSTOM_CONFIG
+  // Shared with the runtime and the size-class configuration generator.
   static constexpr uint64_t RegionBase = FLEXFAT_REGION_BASE;
   static constexpr uint64_t RegionSizeLog = FLEXFAT_REGION_SIZE_LOG;
   static constexpr uint64_t NumSizeClasses = FLEXFAT_NUM_SIZE_CLASSES;
+  static constexpr uint64_t MinSizeLog = FLEXFAT_MIN_SIZE_LOG;
   static constexpr uint64_t kTablesBase = FLEXFAT_TABLES_BASE;
-#else
-  static constexpr uint64_t RegionBase = 0x100000000000ULL;
-  static constexpr uint64_t RegionSizeLog = 32;
-  static constexpr uint64_t NumSizeClasses =
-      27; // kMaxSizeLog(30) - kMinSizeLog(4) + 1
-  static constexpr uint64_t kTablesBase = 0x118000000000ULL;
-#endif
-
-  static constexpr uint64_t kTablesOffset = 0x1000000ULL;
+  static constexpr uint64_t kTablesOffset = FLEXFAT_TABLES_OFFSET;
 #ifndef FLEXFAT_CUSTOM_CONFIG
-  static constexpr uint64_t kTemporalShadowOffset = 0x200000000000ULL;
+  static constexpr uint64_t kTemporalShadowOffset = FLEXFAT_TEMPORAL_SHADOW_OFFSET;
 #endif
-  static constexpr uint64_t UserAddressLimit = 1ULL << 48;
-  static constexpr uint64_t NumTableEntries = UserAddressLimit >> RegionSizeLog;
+  static constexpr uint64_t UserAddressLimit = FLEXFAT_USER_ADDRESS_LIMIT;
   static constexpr uint64_t ManagedTableBegin = RegionBase >> RegionSizeLog;
-
-  static_assert(NumTableEntries * sizeof(uint64_t) <= kTablesOffset,
-                "FlexFat metadata table exceeds its fixed mapping");
-  static_assert(ManagedTableBegin + NumSizeClasses <= NumTableEntries,
-                "FlexFat managed regions exceed the 48-bit metadata table");
-  static_assert(RegionBase + (NumSizeClasses << RegionSizeLog) <= kTablesBase,
-                "FlexFat managed regions overlap fixed metadata");
-  static_assert(kTablesBase + 4 * kTablesOffset <= UserAddressLimit,
-                "FlexFat fixed metadata exceeds the 48-bit address space");
-#ifndef FLEXFAT_CUSTOM_CONFIG
-  static_assert(kTemporalShadowOffset + (1ULL << 44) <= UserAddressLimit,
-                "FlexFat direct shadow exceeds the user address range");
-#endif
 
   MDNode *InstrumentedMD = nullptr;
   MDNode *NoSanitizeMD = nullptr;
@@ -569,7 +545,7 @@ GeometryRecord FlexFatSanitizer::emitGeometry(IRBuilder<> &B, Value *Ptr,
         B.CreateICmpULT(Class, B.getInt64(NumSizeClasses), "flexfat.managed");
     G.Index =
         B.CreateSelect(G.Managed, Region, B.getInt64(0), "flexfat.region");
-    Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
+    Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(MinSizeLog)),
                                   B.getInt64(0), "flexfat.size.shift");
     Value *ManagedSize =
         B.CreateShl(B.getInt64(1), Shift, "flexfat.managed.size");
@@ -633,7 +609,7 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
     // with the within-region slot index gives a single signed shift.
     Value *Class = B.CreateSub(B.CreateLShr(G.Raw, B.getInt64(32)),
                                B.getInt64(ManagedTableBegin));
-    Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(4)),
+    Value *Shift = B.CreateSelect(G.Managed, B.CreateAdd(Class, B.getInt64(MinSizeLog)),
                                   B.getInt64(0));
     Value *Within = B.CreateAnd(G.Raw, B.getInt64(0xffffffffULL));
     Value *Biased = B.CreateSub(Within, B.getInt64(1ULL << 33));
@@ -652,7 +628,7 @@ void FlexFatSanitizer::materializeTemporalGeometry(IRBuilder<> &B,
                           "flexfat.metadata");
     return;
   } else {
-    Address = B.CreateAdd(B.CreateLShr(G.Base, B.getInt64(4)),
+    Address = B.CreateAdd(B.CreateLShr(G.Base, B.getInt64(MinSizeLog)),
                           B.getInt64(kTemporalShadowOffset),
                           "flexfat.metadata.address");
   }
@@ -996,7 +972,7 @@ BoundsRecord FlexFatSanitizer::getBounds(Value *Ptr) {
 #ifdef FLEXFAT_CUSTOM_CONFIG
           uint64_t AllocSize = kFlexFatGenSizes[ClassIndex];
 #else
-          uint64_t AllocSize = 1ULL << (ClassIndex + 4);
+          uint64_t AllocSize = 1ULL << (ClassIndex + MinSizeLog);
 #endif
           BaseAddress = Address - Address % AllocSize;
         } else {

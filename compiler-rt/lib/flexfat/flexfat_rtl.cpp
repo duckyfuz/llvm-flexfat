@@ -81,17 +81,6 @@ static RegionAllocator region_allocators[kNumSizeClasses];
 // Custom mode generates kTablesBase together with its region geometry.
 static constexpr uptr kTableEntries = kUserAddressLimit >> kRegionSizeLog;
 static constexpr uptr kManagedTableBegin = kRegionBase >> kRegionSizeLog;
-static constexpr uptr kTablesAddressSpan = 4 * kTablesOffset;
-
-static_assert(kTableEntries * sizeof(u64) <= kTablesOffset,
-              "FlexFat metadata table exceeds its fixed slot");
-static_assert(kManagedTableBegin + kNumSizeClasses <= kTableEntries,
-              "FlexFat managed regions exceed the 48-bit metadata table");
-static_assert(kRegionBase + kNumSizeClasses * kRegionSize <= kTablesBase,
-              "FlexFat managed regions overlap fixed metadata");
-static_assert(kTablesBase + kTablesAddressSpan <= kUserAddressLimit,
-              "FlexFat fixed metadata exceeds the 48-bit address space");
-
 static void MapMetadataTable(uptr slot, const char *name) {
   const uptr address = kTablesBase + slot * kTablesOffset;
   const uptr bytes = RoundUpTo(kTableEntries * sizeof(u64), GetPageSizeCached());
@@ -121,7 +110,7 @@ static uptr *TemporalBiases() {
 #ifndef FLEXFAT_CUSTOM_CONFIG
 // Both shadow layouts use this anchor as the foreign-pointer zero sentinel.
 // Direct shadow uses slot_base >> 4; packed shadow uses a negative slot offset.
-static constexpr uptr kTemporalShadowOffset = 0x200000000000ULL;
+static constexpr uptr kTemporalShadowOffset = FLEXFAT_TEMPORAL_SHADOW_OFFSET;
 #ifdef FLEXFAT_TBI_PACKED_SHADOW
 // Classes occupy [anchor - 512 MiB, anchor); the separate final page is the
 // foreign-pointer zero sentinel. Four bytes before the anchor are unused.
@@ -135,9 +124,7 @@ static_assert(kTemporalShadowOffset - kTemporalShadowDataBytes >=
 static_assert(kTemporalShadowOffset + 4096 <= kUserAddressLimit,
               "Packed shadow exceeds the user address range");
 #else
-static constexpr uptr kTemporalShadowBytes = 1ULL << 44;
-static_assert(kTemporalShadowOffset + kTemporalShadowBytes <= kUserAddressLimit,
-              "POW2 direct shadow exceeds the user address range");
+static constexpr uptr kTemporalShadowBytes = FLEXFAT_DIRECT_SHADOW_BYTES;
 #endif
 #endif
 static_assert(sizeof(uptr) == 8, "TBI biases are 64-bit integers");
